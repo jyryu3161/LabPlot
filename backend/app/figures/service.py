@@ -15,7 +15,7 @@ from app.common.exceptions import BadRequestError, NotFoundError
 from app.config import settings
 from app.datasets.models import Dataset
 from app.datasets import service as ds_service
-from app.figures.models import Figure, FigureVersion, Improvement, Review
+from app.figures.models import Figure, FigureCodeArtifact, FigureVersion, Improvement, Review
 from app.projects.models import Project
 from app.r_engine import renderer
 from app.r_engine.presets import PRESETS
@@ -33,9 +33,13 @@ _OPTION_CHOICES = {
     "color_mode": {"color", "grayscale"},
     "stat": {"mean", "sum", "count"},
     "palette": {"viridis", "magma", "inferno", "plasma", "cividis"},
+    "corr_method": {"pearson", "spearman"},
 }
-_BOOL_OPTIONS = {"show_points", "show_box", "error_bars", "scale_rows", "add_smooth", "hide_legend", "log_x", "log_y", "flip_coords"}
-_NUMBER_OPTIONS = {"fc_threshold", "p_threshold", "label_top", "font_scale", "dpi", "width_in", "height_in"}
+_BOOL_OPTIONS = {
+    "show_points", "show_box", "error_bars", "scale_rows", "add_smooth", "show_density", "show_rug",
+    "show_values", "hide_legend", "log_x", "log_y", "flip_coords",
+}
+_NUMBER_OPTIONS = {"fc_threshold", "p_threshold", "label_top", "font_scale", "dpi", "width_in", "height_in", "bins"}
 
 
 def _project_context(db: Session, project_id) -> str | None:
@@ -248,6 +252,36 @@ def _render_into_version(df, plot_type, mapping, options, preset, figure_id, ver
     return res, out_dir
 
 
+def _archive_code_artifact(db: Session, owner_id: uuid.UUID, ds: Dataset, fig: Figure,
+                           version: FigureVersion, res) -> None:
+    if not res.r_code:
+        return
+    import hashlib
+    row = FigureCodeArtifact(
+        owner_id=owner_id,
+        dataset_id=ds.id,
+        figure_id=fig.id,
+        figure_version_id=version.id,
+        plot_type=fig.plot_type,
+        style_preset=version.style_preset,
+        mapping=version.mapping or {},
+        options=version.options or {},
+        dataset_profile={
+            "name": ds.name,
+            "n_rows": ds.n_rows,
+            "n_cols": ds.n_cols,
+            "columns": [
+                {"name": c.get("name"), "dtype": c.get("dtype"), "role": c.get("role")}
+                for c in (ds.column_profile or [])
+            ],
+        },
+        r_code=res.r_code,
+        render_log=res.log,
+        code_hash=hashlib.sha256(res.r_code.encode("utf-8")).hexdigest(),
+    )
+    db.add(row)
+
+
 def create_figure(db: Session, owner_id: uuid.UUID, data) -> dict:
     ds = ds_service.get_dataset(db, data.dataset_id, owner_id)
     preset = data.style_preset if data.style_preset in PRESETS else "nature"
@@ -274,6 +308,7 @@ def create_figure(db: Session, owner_id: uuid.UUID, data) -> dict:
         r_path=res.outputs.get("r"), render_log=res.log,
     )
     db.add(version)
+    _archive_code_artifact(db, owner_id, ds, fig, version, res)
     db.commit()
     return figure_detail(db, figure_id, owner_id)
 
@@ -309,6 +344,7 @@ def rerender(db: Session, figure_id: uuid.UUID, owner_id: uuid.UUID, req) -> dic
     fig.style_preset = preset
     fig.plot_type = plot_type
     fig.status = "ready"
+    _archive_code_artifact(db, owner_id, ds, fig, version, res)
     db.commit()
     return version_response(version)
 
@@ -444,6 +480,8 @@ def _sanitize_option(key: str, value: Any) -> Any:
             return int(max(72, min(1200, num)))
         if key == "label_top":
             return int(max(0, min(100, num)))
+        if key == "bins":
+            return int(max(5, min(120, num)))
         if key == "font_scale":
             return max(0.6, min(2.0, num))
         if key in {"width_in", "height_in"}:
@@ -502,6 +540,21 @@ def ai_recommend(db: Session, dataset_id: uuid.UUID, owner_id: uuid.UUID) -> lis
     if ds.description and ds.description.strip():
         ctx = ((ctx + " ") if ctx else "") + "Dataset: " + ds.description.strip()
     return ai_client.recommend_charts(db, ds.column_profile, project_context=ctx, user_id=owner_id)
+
+
+def ai_recommend_from_reference_image(db: Session, dataset_id: uuid.UUID, owner_id: uuid.UUID,
+                                      image_bytes: bytes, mime: str) -> list[dict]:
+    if mime not in {"image/png", "image/jpeg", "image/webp"}:
+        raise BadRequestError("Reference image must be PNG, JPEG, or WebP", error_code="BAD_IMAGE_TYPE")
+    if len(image_bytes) > 8 * 1024 * 1024:
+        raise BadRequestError("Reference image must be 8 MB or smaller", error_code="IMAGE_TOO_LARGE")
+    ds = ds_service.get_dataset(db, dataset_id, owner_id)
+    ctx = _project_context(db, ds.project_id)
+    if ds.description and ds.description.strip():
+        ctx = ((ctx + " ") if ctx else "") + "Dataset: " + ds.description.strip()
+    return ai_client.recommend_from_reference_image(
+        db, ds.column_profile, image_bytes, mime, project_context=ctx, user_id=owner_id
+    )
 
 
 # ---------------------------------------------------------------- export

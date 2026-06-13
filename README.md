@@ -9,8 +9,9 @@ LabPlot AI is a web platform for producing publication-ready scientific figures 
 - Next.js frontend optimized for production standalone deployment
 - ggplot2-based rendering through fixed R templates, not arbitrary user code
 - Rule-based chart suggestions for immediate feedback
-- Optional Claude or Gemini AI features for recommendations, figure review, improvements, legend writing, and prompt enhancement
+- Optional Claude or Gemini AI features for recommendations, reference-image chart matching, figure review, improvements, legend writing, and prompt enhancement
 - Admin controls for user approval, role management, AI provider settings, and per-user AI token/cost estimates
+- Successful render code is archived as reusable figure-code artifacts for later retrieval, training-data preparation, and cross-user template reuse
 - Caddy reverse proxy with HTTPS, compression, and cache headers for rendered static assets
 
 ## Architecture
@@ -25,7 +26,7 @@ Browser
         -> Anthropic Claude or Google Gemini API
 ```
 
-The backend stores datasets, figure versions, rendered asset paths, reviews, improvements, AI configuration, and AI usage records. Figure rendering is deterministic: validated JSON parameters are passed into known R templates and every version keeps its generated R script for reproducibility.
+The backend stores datasets, figure versions, rendered asset paths, reviews, improvements, AI configuration, AI usage records, and reusable figure-code artifacts. Figure rendering is deterministic: validated JSON parameters are passed into known R templates and every version keeps its generated R script for reproducibility.
 
 ## Repository Layout
 

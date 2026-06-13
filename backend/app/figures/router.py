@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, File, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
@@ -54,6 +54,15 @@ def enhance_prompt(data: EnhancePromptRequest, db: Session = Depends(get_db), cu
 @meta_router.post("/datasets/{dataset_id}/recommend", response_model=list[RecommendationItem])
 def ai_recommend(dataset_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     return service.ai_recommend(db, dataset_id, current_user.id)
+
+
+@meta_router.post("/datasets/{dataset_id}/recommend-from-image", response_model=list[RecommendationItem])
+async def ai_recommend_from_image(dataset_id: uuid.UUID, file: UploadFile = File(...),
+                                  db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    image_bytes = await file.read()
+    return service.ai_recommend_from_reference_image(
+        db, dataset_id, current_user.id, image_bytes, file.content_type or "application/octet-stream"
+    )
 
 
 # -------- figures --------

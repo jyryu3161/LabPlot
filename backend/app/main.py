@@ -120,6 +120,29 @@ _MIGRATIONS = [
     """,
     "CREATE INDEX IF NOT EXISTS ix_ai_usage_user_created ON ai_usage (user_id, created_at DESC)",
     "CREATE INDEX IF NOT EXISTS ix_ai_usage_provider_model ON ai_usage (provider, model)",
+    """
+    CREATE TABLE IF NOT EXISTS figure_code_artifacts (
+        id UUID PRIMARY KEY,
+        owner_id UUID REFERENCES users(id) ON DELETE SET NULL,
+        dataset_id UUID REFERENCES datasets(id) ON DELETE SET NULL,
+        figure_id UUID REFERENCES figures(id) ON DELETE SET NULL,
+        figure_version_id UUID UNIQUE REFERENCES figure_versions(id) ON DELETE SET NULL,
+        plot_type VARCHAR(40) NOT NULL,
+        style_preset VARCHAR(40) NOT NULL DEFAULT 'nature',
+        mapping JSONB NOT NULL DEFAULT '{}'::jsonb,
+        options JSONB NOT NULL DEFAULT '{}'::jsonb,
+        dataset_profile JSONB NOT NULL DEFAULT '{}'::jsonb,
+        r_code TEXT NOT NULL,
+        render_log TEXT,
+        code_hash VARCHAR(64) NOT NULL,
+        reusable BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS ix_figure_code_artifacts_owner ON figure_code_artifacts (owner_id)",
+    "CREATE INDEX IF NOT EXISTS ix_figure_code_artifacts_plot_type ON figure_code_artifacts (plot_type)",
+    "CREATE INDEX IF NOT EXISTS ix_figure_code_artifacts_code_hash ON figure_code_artifacts (code_hash)",
+    "CREATE INDEX IF NOT EXISTS ix_figure_code_artifacts_created ON figure_code_artifacts (created_at DESC)",
 ]
 
 

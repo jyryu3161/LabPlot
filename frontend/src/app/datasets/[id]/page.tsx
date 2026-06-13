@@ -7,7 +7,7 @@ import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import {
   getDataset, getChartSuggestions, recommendCharts, getPlotTypes, getStyles,
-  createFigure, listFigures, updateDataset,
+  createFigure, listFigures, updateDataset, recommendChartsFromImage,
 } from '@/lib/api';
 import { Textarea } from '@/components/ui/textarea';
 import type { ChartSuggestion, PlotTypeDef } from '@/lib/types';
@@ -42,10 +42,19 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
   });
 
   const [aiSug, setAiSug] = useState<ChartSuggestion[] | null>(null);
+  const [referenceFile, setReferenceFile] = useState<File | null>(null);
   const aiRecommend = useMutation({
     mutationFn: () => recommendCharts(id),
     onSuccess: (s) => { setAiSug(s); toast.success('AI recommendations ready'); },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'AI recommend failed'),
+  });
+  const referenceRecommend = useMutation({
+    mutationFn: () => {
+      if (!referenceFile) throw new Error('Choose a reference image first');
+      return recommendChartsFromImage(id, referenceFile);
+    },
+    onSuccess: (s) => { setAiSug(s); toast.success('Reference-based recommendations ready'); },
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Reference recommendation failed'),
   });
 
   const qc = useQueryClient();
@@ -211,14 +220,33 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                   Ask AI {aiSug ? '(refresh)' : ''}
                 </Button>
               </CardHeader>
-              <CardContent>
+              <CardContent className="space-y-4">
+                <div className="flex flex-col gap-3 rounded-lg border bg-muted/30 p-3 md:flex-row md:items-end">
+                  <div className="min-w-0 flex-1 space-y-1">
+                    <Label>Reference figure image</Label>
+                    <Input
+                      type="file"
+                      accept="image/png,image/jpeg,image/webp"
+                      onChange={(e) => setReferenceFile(e.target.files?.[0] ?? null)}
+                    />
+                  </div>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    onClick={() => referenceRecommend.mutate()}
+                    disabled={!referenceFile || referenceRecommend.isPending}
+                  >
+                    {referenceRecommend.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Wand2 className="mr-2 h-4 w-4" />}
+                    Match reference
+                  </Button>
+                </div>
                 <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                   {suggestions.map((s, i) => (
                     <button key={i} onClick={() => applySuggestion(s)}
                       className="rounded-lg border p-3 text-left transition hover:border-primary hover:shadow-sm">
                       <div className="flex items-center justify-between">
                         <span className="font-medium">{s.title ?? s.plot_type}</span>
-                        <Badge variant={s.source === 'claude' ? 'default' : 'secondary'}>{s.source === 'claude' ? 'AI' : 'rule'}</Badge>
+                        <Badge variant={s.source === 'rule' ? 'secondary' : 'default'}>{s.source === 'rule' ? 'rule' : 'AI'}</Badge>
                       </div>
                       {s.rationale && <p className="mt-1 line-clamp-3 text-xs text-muted-foreground">{s.rationale}</p>}
                       <span className="mt-2 inline-flex items-center text-xs text-primary">Use this <ArrowRight className="ml-1 h-3 w-3" /></span>

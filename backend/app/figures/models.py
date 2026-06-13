@@ -59,6 +59,26 @@ class FigureVersion(Base):
     improvements = relationship("Improvement", back_populates="version", cascade="all, delete-orphan")
 
 
+class FigureCodeArtifact(Base):
+    __tablename__ = "figure_code_artifacts"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    owner_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    dataset_id = Column(UUID(as_uuid=True), ForeignKey("datasets.id", ondelete="SET NULL"), nullable=True, index=True)
+    figure_id = Column(UUID(as_uuid=True), ForeignKey("figures.id", ondelete="SET NULL"), nullable=True, index=True)
+    figure_version_id = Column(UUID(as_uuid=True), ForeignKey("figure_versions.id", ondelete="SET NULL"), nullable=True, unique=True, index=True)
+    plot_type = Column(String(40), nullable=False, index=True)
+    style_preset = Column(String(40), nullable=False, default="nature")
+    mapping = Column(JSONB, nullable=False, default=dict)
+    options = Column(JSONB, nullable=False, default=dict)
+    dataset_profile = Column(JSONB, nullable=False, default=dict)
+    r_code = Column(Text, nullable=False)
+    render_log = Column(Text, nullable=True)
+    code_hash = Column(String(64), nullable=False, index=True)
+    reusable = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime(timezone=True), default=_now)
+
+
 class Recommendation(Base):
     __tablename__ = "recommendations"
 

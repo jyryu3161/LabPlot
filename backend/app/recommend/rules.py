@@ -51,6 +51,10 @@ def suggest_charts(columns: list[dict]) -> list[dict]:
             {"time": time[:3], "status": status[:3]})
 
     if group and numeric:
+        add("density", "Density plot", 0.86,
+            f"Compare the distribution shape of '{numeric[0]}' across groups in '{group[0]}'.",
+            {"value": numeric[0], "group": group[0]},
+            {"value": numeric[:5], "group": group[:3]})
         add("box", "Box plot", 0.9,
             f"Compare the distribution of numeric column '{numeric[0]}' across categorical groups in '{group[0]}'.",
             {"x": group[0], "y": numeric[0], "color": group[0]},
@@ -64,11 +68,21 @@ def suggest_charts(columns: list[dict]) -> list[dict]:
             {"x": group[0], "y": numeric[0], "stat": "mean"},
             {"x": group[:3], "y": numeric[:5]})
 
+    if numeric:
+        add("histogram", "Histogram", 0.82,
+            f"Show the univariate distribution of numeric column '{numeric[0]}'.",
+            {"value": numeric[0], "group": (group[0] if group else None)},
+            {"value": numeric[:5]})
+
     if len(numeric) >= 2:
         add("scatter", "Scatter plot", 0.88,
             f"Inspect the relationship between numeric variables '{numeric[0]}' and '{numeric[1]}'.",
             {"x": numeric[0], "y": numeric[1], "color": (group[0] if group else None)},
             {"x": numeric[:5], "y": numeric[:5]})
+        add("correlation_heatmap", "Correlation heatmap", 0.78,
+            f"Summarize pairwise correlations across {len(numeric)} numeric variables.",
+            {"columns": numeric[:20]},
+            {"columns": numeric[:50]})
 
     if time and numeric:
         add("line", "Line plot", 0.8,

@@ -135,6 +135,85 @@ p <- ggplot(df, {aes}) +
 """
 
 
+def _histogram(m, o):
+    value = m["value"]
+    group = m.get("group")
+    bins = int(_num(o.get("bins", 30), 30))
+    bins = max(5, min(120, bins))
+    density = bool(o.get("show_density", False))
+    if group:
+        aes = f"aes(x = {_data(value)}, fill = factor({_data(group)}))"
+        scale = "  scale_fill_manual(values = labplot_palette()) +\n"
+        guide = f" + guides(fill = guide_legend(title = {rq(group)}))"
+        position = ', position = "identity"'
+    else:
+        aes = f"aes(x = {_data(value)})"
+        scale = ""
+        guide = ""
+        position = ""
+    density_layer = (
+        f"  geom_density(aes(y = after_stat(count)), linewidth = 0.7, colour = \"grey20\", fill = NA) +\n"
+        if density and not group else ""
+    )
+    return f"""
+p <- ggplot(df, {aes}) +
+  geom_histogram(bins = {bins}, colour = "white", linewidth = 0.2, alpha = 0.85{position}) +
+{density_layer}{scale}  {_labs(o, value, "count")}{guide}
+"""
+
+
+def _density(m, o):
+    value = m["value"]
+    group = m.get("group")
+    rug = bool(o.get("show_rug", False))
+    if group:
+        aes = f"aes(x = {_data(value)}, colour = factor({_data(group)}), fill = factor({_data(group)}))"
+        scale = "  scale_colour_manual(values = labplot_palette()) +\n  scale_fill_manual(values = labplot_palette()) +\n"
+        guide = f" + guides(colour = guide_legend(title = {rq(group)}), fill = guide_legend(title = {rq(group)}))"
+    else:
+        aes = f"aes(x = {_data(value)})"
+        scale = ""
+        guide = ""
+    rug_layer = "  geom_rug(alpha = 0.25, linewidth = 0.2) +\n" if rug else ""
+    return f"""
+p <- ggplot(df, {aes}) +
+  geom_density(alpha = 0.28, linewidth = 0.9) +
+{rug_layer}{scale}  {_labs(o, value, "density")}{guide}
+"""
+
+
+def _correlation_heatmap(m, o):
+    cols = m["columns"]
+    if not isinstance(cols, list) or len(cols) < 2:
+        raise ValueError("correlation heatmap requires at least 2 numeric columns")
+    col_vec = "c(" + ", ".join(rq(c) for c in cols) + ")"
+    method = o.get("corr_method", "pearson")
+    if method not in ("pearson", "spearman"):
+        method = "pearson"
+    show_values = "TRUE" if o.get("show_values", True) else "FALSE"
+    return f"""
+.cols <- {col_vec}
+.mat <- as.matrix(df[, .cols, drop = FALSE])
+storage.mode(.mat) <- "double"
+.cor <- stats::cor(.mat, use = "pairwise.complete.obs", method = "{method}")
+.long <- as.data.frame(as.table(.cor))
+colnames(.long) <- c("x", "y", "value")
+.long$x <- factor(.long$x, levels = .cols)
+.long$y <- factor(.long$y, levels = rev(.cols))
+p <- ggplot(.long, aes(x = x, y = y, fill = value)) +
+  geom_tile(colour = "white", linewidth = 0.4) +
+  scale_fill_gradient2(low = "#3C5488", mid = "white", high = "#E64B35", midpoint = 0,
+                       limits = c(-1, 1), name = "r") +
+  {_labs(o, "", "")} +
+  coord_equal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        panel.grid = element_blank())
+if ({show_values}) {{
+  p <- p + geom_text(aes(label = sprintf("%.2f", value)), size = 2.6, colour = "grey20")
+}}
+"""
+
+
 def _heatmap(m, o):
     cols = m["columns"]
     if not isinstance(cols, list) or len(cols) < 1:
@@ -295,6 +374,9 @@ _BUILDERS = {
     "scatter": _scatter,
     "bar": _bar,
     "line": _line,
+    "histogram": _histogram,
+    "density": _density,
+    "correlation_heatmap": _correlation_heatmap,
     "heatmap": _heatmap,
     "volcano": _volcano,
     "pca": _pca,
@@ -330,6 +412,20 @@ PLOT_TYPES = [
                   {"key": "y", "label": "Y (numeric)", "roles": ["numeric"]}],
      "optional": [{"key": "group", "label": "Group/Color", "roles": ["group", "category", "status"]}],
      "options": []},
+    {"type": "histogram", "label": "Histogram",
+     "required": [{"key": "value", "label": "Value", "roles": ["numeric", "log2fc", "pvalue"]}],
+     "optional": [{"key": "group", "label": "Group/Fill", "roles": ["group", "category", "status"]}],
+     "options": [{"key": "bins", "label": "Bins", "type": "number", "default": 30},
+                 {"key": "show_density", "label": "Density overlay", "type": "bool", "default": False}]},
+    {"type": "density", "label": "Density plot",
+     "required": [{"key": "value", "label": "Value", "roles": ["numeric", "log2fc", "pvalue"]}],
+     "optional": [{"key": "group", "label": "Group/Color", "roles": ["group", "category", "status"]}],
+     "options": [{"key": "show_rug", "label": "Rug marks", "type": "bool", "default": False}]},
+    {"type": "correlation_heatmap", "label": "Correlation heatmap",
+     "required": [{"key": "columns", "label": "Numeric columns", "roles": ["numeric", "log2fc", "pvalue"], "multi": True}],
+     "optional": [],
+     "options": [{"key": "corr_method", "label": "Correlation", "type": "select", "choices": ["pearson", "spearman"], "default": "pearson"},
+                 {"key": "show_values", "label": "Show r values", "type": "bool", "default": True}]},
     {"type": "heatmap", "label": "Heatmap",
      "required": [{"key": "columns", "label": "Value columns (matrix)", "roles": ["numeric", "log2fc", "pvalue"], "multi": True}],
      "optional": [{"key": "row_label", "label": "Row label", "roles": ["gene", "category", "text", "group"]}],
@@ -564,7 +660,8 @@ PLOT_TYPES += [
 ]
 
 PLOT_DOMAINS = {
-    "box": "basic", "violin": "basic", "scatter": "basic", "bar": "basic", "line": "basic", "heatmap": "basic",
+    "box": "basic", "violin": "basic", "scatter": "basic", "bar": "basic", "line": "basic",
+    "histogram": "basic", "density": "basic", "correlation_heatmap": "basic", "heatmap": "basic",
     "volcano": "omics", "pca": "omics",
     "kaplan_meier": "clinical", "annotated_heatmap": "clinical",
     "network": "systems_biology",

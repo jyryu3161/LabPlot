@@ -148,6 +148,16 @@ export async function getChartSuggestions(datasetId: string): Promise<{ suggesti
 export async function recommendCharts(datasetId: string): Promise<ChartSuggestion[]> {
   return fetcher(`/api/datasets/${datasetId}/recommend`, { method: 'POST' });
 }
+export async function recommendChartsFromImage(datasetId: string, file: File): Promise<ChartSuggestion[]> {
+  const fd = new FormData();
+  fd.append('file', file);
+  const headers: Record<string, string> = {};
+  const token = getAccessToken();
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const res = await fetch(`${BASE_URL}/api/datasets/${datasetId}/recommend-from-image`, { method: 'POST', body: fd, headers });
+  if (!res.ok) { const b = await res.text().catch(() => ''); throw new ApiError(parseErrorMessage(b, res.statusText), res.status); }
+  return res.json();
+}
 
 // ── meta ──
 export async function getPlotTypes(): Promise<{ plot_types: PlotTypeDef[] }> { return fetcher('/api/plot-types'); }

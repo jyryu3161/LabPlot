@@ -12,18 +12,26 @@ from sqlalchemy.orm import Session
 from app.ai import providers
 from app.ai.config_service import active_model_and_key, get_config
 from app.ai.models import AIUsage
-from app.ai.prompts import IMPROVE_SYSTEM, LEGEND_SYSTEM, RECOMMEND_SYSTEM, REVIEW_SYSTEM
+from app.ai.prompts import IMPROVE_SYSTEM, LEGEND_SYSTEM, RECOMMEND_SYSTEM, REFERENCE_RECOMMEND_SYSTEM, REVIEW_SYSTEM
 from app.common.exceptions import BadRequestError
 from app.database import SessionLocal
 
-_PLOT_TYPES = ["box", "violin", "scatter", "bar", "line", "heatmap", "volcano", "pca", "kaplan_meier"]
+_PLOT_TYPES = [
+    "box", "violin", "scatter", "bar", "line", "histogram", "density", "correlation_heatmap",
+    "heatmap", "volcano", "pca", "kaplan_meier", "annotated_heatmap", "network", "enrichment_dot",
+    "enrichment_bar", "manhattan", "chemical_space",
+]
 _MAPPING_PATCH_SCHEMA = {
     "type": "object",
     "properties": {
-        "x": {"type": "string"}, "y": {"type": "string"}, "color": {"type": "string"},
+        "x": {"type": "string"}, "y": {"type": "string"}, "value": {"type": "string"},
+        "color": {"type": "string"}, "size": {"type": "string"},
         "group": {"type": "string"}, "time": {"type": "string"}, "status": {"type": "string"},
         "log2fc": {"type": "string"}, "pvalue": {"type": "string"}, "gene_label": {"type": "string"},
         "row_label": {"type": "string"}, "columns": {"type": "array", "items": {"type": "string"}},
+        "annotations": {"type": "array", "items": {"type": "string"}},
+        "source": {"type": "string"}, "target": {"type": "string"}, "weight": {"type": "string"},
+        "term": {"type": "string"}, "chrom": {"type": "string"}, "pos": {"type": "string"},
     },
 }
 _OPTIONS_PATCH_SCHEMA = {
@@ -31,9 +39,12 @@ _OPTIONS_PATCH_SCHEMA = {
     "properties": {
         "show_points": {"type": "boolean"}, "show_box": {"type": "boolean"},
         "add_smooth": {"type": "boolean"}, "error_bars": {"type": "boolean"},
-        "scale_rows": {"type": "boolean"}, "stat": {"type": "string", "enum": ["mean", "sum", "count"]},
+        "scale_rows": {"type": "boolean"}, "show_density": {"type": "boolean"},
+        "show_rug": {"type": "boolean"}, "show_values": {"type": "boolean"},
+        "stat": {"type": "string", "enum": ["mean", "sum", "count"]},
+        "corr_method": {"type": "string", "enum": ["pearson", "spearman"]},
         "palette": {"type": "string", "enum": ["viridis", "magma", "inferno", "plasma", "cividis"]},
-        "fc_threshold": {"type": "number"}, "p_threshold": {"type": "number"},
+        "bins": {"type": "integer"}, "fc_threshold": {"type": "number"}, "p_threshold": {"type": "number"},
         "label_top": {"type": "integer"}, "palette_name": {"type": "string"},
         "size": {"type": "string", "enum": ["single_column", "wide", "double_column", "square", "custom"]},
         "width_in": {"type": "number"}, "height_in": {"type": "number"},
@@ -45,6 +56,37 @@ _OPTIONS_PATCH_SCHEMA = {
         "log_x": {"type": "boolean"}, "log_y": {"type": "boolean"}, "flip_coords": {"type": "boolean"},
     },
 }
+
+
+def _mapping_schema() -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "x": {"type": "string"}, "y": {"type": "string"}, "value": {"type": "string"},
+            "color": {"type": "string"}, "size": {"type": "string"}, "group": {"type": "string"},
+            "time": {"type": "string"}, "status": {"type": "string"},
+            "log2fc": {"type": "string"}, "pvalue": {"type": "string"}, "gene_label": {"type": "string"},
+            "row_label": {"type": "string"}, "columns": {"type": "array", "items": {"type": "string"}},
+            "annotations": {"type": "array", "items": {"type": "string"}},
+            "source": {"type": "string"}, "target": {"type": "string"}, "weight": {"type": "string"},
+            "term": {"type": "string"}, "chrom": {"type": "string"}, "pos": {"type": "string"},
+        },
+    }
+
+
+def _recommendation_schema() -> dict:
+    mapping_schema = _mapping_schema()
+    return {
+        "type": "object",
+        "properties": {"recommendations": {"type": "array", "items": {"type": "object", "properties": {
+            "plot_type": {"type": "string", "enum": _PLOT_TYPES},
+            "title": {"type": "string"}, "score": {"type": "number"},
+            "rationale": {"type": "string"}, "required_vars": mapping_schema,
+            "suggested_mapping": mapping_schema,
+            "example_usage": {"type": "string"}},
+            "required": ["plot_type", "title", "score", "rationale"]}}},
+        "required": ["recommendations"],
+    }
 
 
 def _rates_per_million(provider: str, model: str) -> tuple[float, float] | None:
@@ -141,31 +183,38 @@ def recommend_charts(db: Session, column_profile: list[dict], project_context: s
     cols = [{"name": c["name"], "dtype": c["dtype"], "role": c["role"],
              "n_unique": c["n_unique"], "sample": c.get("sample_values", [])[:4]} for c in column_profile]
     system = RECOMMEND_SYSTEM
-    mapping_schema = {
-        "type": "object",
-        "properties": {
-            "x": {"type": "string"}, "y": {"type": "string"}, "color": {"type": "string"},
-            "group": {"type": "string"}, "time": {"type": "string"}, "status": {"type": "string"},
-            "log2fc": {"type": "string"}, "pvalue": {"type": "string"}, "gene_label": {"type": "string"},
-            "row_label": {"type": "string"}, "columns": {"type": "array", "items": {"type": "string"}},
-        },
-    }
-    schema = {
-        "type": "object",
-        "properties": {"recommendations": {"type": "array", "items": {"type": "object", "properties": {
-            "plot_type": {"type": "string", "enum": _PLOT_TYPES},
-            "title": {"type": "string"}, "score": {"type": "number"},
-            "rationale": {"type": "string"}, "required_vars": mapping_schema,
-            "suggested_mapping": mapping_schema,
-            "example_usage": {"type": "string"}},
-            "required": ["plot_type", "title", "score", "rationale"]}}},
-        "required": ["recommendations"],
-    }
+    schema = _recommendation_schema()
     content = _ctx_block(project_context) + [{"kind": "text", "text": "Column profile:\n" + json.dumps(cols, ensure_ascii=False)}]
     out = _run_logged(db, user_id, "chart_recommendations", system, content, schema, "chart_recommendations", 2000)
     recs = out.get("recommendations", [])
     for r in recs:
         r["source"] = cfg.provider
+        if not r.get("suggested_mapping") and isinstance(r.get("required_vars"), dict):
+            r["suggested_mapping"] = {k: v for k, v in r["required_vars"].items() if v not in (None, "", [])}
+    return recs
+
+
+def recommend_from_reference_image(db: Session, column_profile: list[dict], image_bytes: bytes, mime: str,
+                                   project_context: str | None = None,
+                                   user_id: uuid.UUID | None = None) -> list[dict]:
+    cfg = get_config(db)
+    if not cfg.enabled:
+        raise BadRequestError("AI features are disabled", error_code="AI_DISABLED")
+    if not image_bytes:
+        raise BadRequestError("Reference image is empty", error_code="EMPTY_IMAGE")
+    cols = [{"name": c["name"], "dtype": c["dtype"], "role": c["role"],
+             "n_unique": c["n_unique"], "sample": c.get("sample_values", [])[:4]} for c in column_profile]
+    content = _ctx_block(project_context) + [
+        {"kind": "text", "text": "Dataset column profile:\n" + json.dumps(cols, ensure_ascii=False)},
+        {"kind": "image", "mime": mime, "b64": base64.standard_b64encode(image_bytes).decode("ascii")},
+    ]
+    out = _run_logged(
+        db, user_id, "reference_chart_recommendations", REFERENCE_RECOMMEND_SYSTEM,
+        content, _recommendation_schema(), "chart_recommendations", 2400
+    )
+    recs = out.get("recommendations", [])
+    for r in recs:
+        r["source"] = f"{cfg.provider}:reference"
         if not r.get("suggested_mapping") and isinstance(r.get("required_vars"), dict):
             r["suggested_mapping"] = {k: v for k, v in r["required_vars"].items() if v not in (None, "", [])}
     return recs
