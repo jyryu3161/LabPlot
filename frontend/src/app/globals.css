@@ -127,3 +127,17 @@
     @apply font-sans;
   }
 }
+
+.svg-vector-editor-stage [data-labplot-editable="true"] {
+  cursor: pointer;
+}
+
+.svg-vector-editor-stage [data-labplot-editable="true"]:hover {
+  outline: 1px dashed oklch(0.623 0.214 259.815);
+  outline-offset: 2px;
+}
+
+.svg-vector-editor-stage [data-labplot-selected="true"] {
+  outline: 2px solid oklch(0.623 0.214 259.815);
+  outline-offset: 2px;
+}

@@ -10,6 +10,7 @@ import {
 } from '@/lib/api';
 import type { FigureVersion, Review, Improvement, PlotTypeDef, ColumnProfile } from '@/lib/types';
 import { formatStylePreset } from '@/lib/style-presets';
+import { SvgVectorEditor } from '@/components/figures/SvgVectorEditor';
 import { AppHeader } from '@/components/layout/AppHeader';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -136,6 +137,8 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
               {version?.png_url ? <img src={version.png_url} alt={fig.name} decoding="async" className="mx-auto max-h-[58vh] w-auto rounded bg-white object-contain" />
                 : <div className="py-20 text-center text-muted-foreground">No image</div>}
             </CardContent></Card>
+
+            <SvgVectorEditor svgUrl={version?.svg_url} filenameBase={fig.name} versionNumber={version?.version_number} />
 
             <Card>
               <CardHeader className="pb-2"><CardTitle className="flex items-center gap-2 text-base"><Download className="h-4 w-4" /> Export {version && `(v${version.version_number})`}</CardTitle></CardHeader>
