@@ -226,7 +226,7 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
 
                 {/* universal label/axis/appearance controls */}
                 <div className="grid grid-cols-1 gap-2 border-t pt-2">
-                  <div className="space-y-1"><Label className="text-xs">Title</Label><Input className="text-sm" value={String(effectiveOptions.title ?? '')} onChange={(e) => setOptions({ ...effectiveOptions, title: e.target.value })} /></div>
+                  <div className="space-y-1"><Label className="text-xs">In-plot title (usually blank)</Label><Input className="text-sm" value={String(effectiveOptions.title ?? '')} onChange={(e) => setOptions({ ...effectiveOptions, title: e.target.value })} placeholder="Leave blank for manuscript-style figures" /></div>
                   <div className="grid grid-cols-2 gap-2">
                     <div className="space-y-1"><Label className="text-xs">X label</Label><Input className="text-sm" value={String(effectiveOptions.x_label ?? '')} onChange={(e) => setOptions({ ...effectiveOptions, x_label: e.target.value })} /></div>
                     <div className="space-y-1"><Label className="text-xs">Y label</Label><Input className="text-sm" value={String(effectiveOptions.y_label ?? '')} onChange={(e) => setOptions({ ...effectiveOptions, y_label: e.target.value })} /></div>

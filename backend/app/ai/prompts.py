@@ -69,6 +69,7 @@ SCOPE
 - Visualization only. Do not write free-form R code, perform statistics, add significance annotations, or interpret biology.
 - Use project context only to improve labels, terminology, and visual suitability.
 - Every suggestion must be independently applicable and beneficial relative to the current mapping/options/style.
+- Do not add in-plot titles or subtitles by default. Manuscript figures usually rely on captions and panel labels outside the plot area; prefer better axis labels or legends instead.
 
 VALID PATCH SHAPE
 param_patch may contain only:

@@ -465,7 +465,7 @@ p <- ggraph(.g, layout = "{layout}") +
 {label_block}  scale_size(range = c(2, 9), guide = "none") +
   labs(title = {rq(o.get('title')) if o.get('title') else 'NULL'}) +
   theme_void(base_size = 12) +
-  theme(plot.title = element_text(face = "bold", hjust = 0))
+  theme(plot.title = element_text(face = "bold", hjust = 0.5))
 """
 
 
@@ -482,7 +482,7 @@ def _annotated_heatmap(m, o):
     cluster_rows = "TRUE" if o.get("cluster_rows", True) else "FALSE"
     cluster_cols = "TRUE" if o.get("cluster_cols", True) else "FALSE"
     show_rn = "TRUE" if o.get("show_row_names", False) else "FALSE"
-    title = rq(o.get("title")) if o.get("title") else '"Annotated heatmap"'
+    title = rq(o.get("title")) if o.get("title") else "NULL"
     if o.get("color_mode") == "grayscale":
         colmap = 'circlize::colorRamp2(c(-2, 0, 2), c("grey90", "grey55", "grey10"))'
     else:

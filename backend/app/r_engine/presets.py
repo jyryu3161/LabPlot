@@ -88,8 +88,8 @@ labplot_palette <- function(n = 100) {{
 labplot_theme <- function() {{
   {cfg['base']}(base_size = {size}) +
   theme(
-    plot.title = element_text(face = "bold", hjust = 0, size = {size + 2}),
-    plot.subtitle = element_text(size = {size}, colour = "grey30"),
+    plot.title = element_text(face = "bold", hjust = 0.5, size = {size + 2}),
+    plot.subtitle = element_text(size = {size}, colour = "grey30", hjust = 0.5),
     axis.title = element_text(face = "bold"),
     axis.text = element_text(colour = "grey20"),
     legend.position = "right",

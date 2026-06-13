@@ -305,8 +305,8 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
 
                     <div className="grid gap-4 md:grid-cols-2">
                       <div className="space-y-1">
-                        <Label>Title (optional)</Label>
-                        <Input value={String(options.title ?? '')} onChange={(e) => setOptions({ ...options, title: e.target.value })} placeholder="Figure title" />
+                        <Label>In-plot title (usually blank)</Label>
+                        <Input value={String(options.title ?? '')} onChange={(e) => setOptions({ ...options, title: e.target.value })} placeholder="Leave blank for manuscript-style figures" />
                       </div>
                       <div className="space-y-1">
                         <Label>Journal style</Label>
