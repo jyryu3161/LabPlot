@@ -9,6 +9,7 @@ import {
   improveVersion, applyImprovement, updateFigure, generateLegend, downloadExport, enhancePrompt,
 } from '@/lib/api';
 import type { FigureVersion, Review, Improvement, PlotTypeDef, ColumnProfile } from '@/lib/types';
+import { formatStylePreset } from '@/lib/style-presets';
 import { AppHeader } from '@/components/layout/AppHeader';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -125,7 +126,7 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
         <div className="mb-6 flex items-center gap-3">
           <h1 className="text-2xl font-bold">{fig.name}</h1>
           <Badge variant="secondary">{fig.plot_type}</Badge>
-          <Badge variant="outline">{fig.style_preset}</Badge>
+          <Badge variant="outline">{formatStylePreset(fig.style_preset)}</Badge>
         </div>
 
         <div className="grid gap-6 lg:grid-cols-3">
@@ -297,7 +298,7 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
                 {fig.versions.slice().reverse().map((v) => (
                   <button key={v.id} onClick={() => { setSelectedVid(v.id); setReview(null); setImprovements(null); }}
                     className={`flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs ${v.id === effectiveSelectedVid ? 'bg-muted font-medium' : 'hover:bg-muted/50'}`}>
-                    <span>v{v.version_number} · {v.style_preset} · {v.change_note || ''}</span>
+                    <span>v{v.version_number} · {formatStylePreset(v.style_preset)} · {v.change_note || ''}</span>
                     {v.id === fig.current_version_id && <Badge variant="secondary" className="text-[10px]">latest</Badge>}
                   </button>
                 ))}

@@ -11,6 +11,7 @@ import {
 } from '@/lib/api';
 import { Textarea } from '@/components/ui/textarea';
 import type { ChartSuggestion, PlotTypeDef } from '@/lib/types';
+import { formatStylePreset } from '@/lib/style-presets';
 import { AppHeader } from '@/components/layout/AppHeader';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -337,7 +338,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                         <Input value={String(options.title ?? '')} onChange={(e) => setOptions({ ...options, title: e.target.value })} placeholder="Leave blank for manuscript-style figures" />
                       </div>
                       <div className="space-y-1">
-                        <Label>Journal style</Label>
+                        <Label>Style preset</Label>
                         <select className="w-full rounded-md border px-3 py-2 text-sm" value={style} onChange={(e) => setStyle(e.target.value)}>
                           {styles.map((s) => <option key={s.key} value={s.key}>{s.label}</option>)}
                         </select>
@@ -365,7 +366,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                       {f.thumb_url && <img src={f.thumb_url} alt={f.name} loading="lazy" decoding="async" className="aspect-[4/3] w-full bg-white object-contain" />}
                       <CardContent className="p-3">
                         <p className="truncate text-sm font-medium">{f.name}</p>
-                        <p className="text-xs text-muted-foreground">{f.plot_type} · {f.style_preset}</p>
+                        <p className="text-xs text-muted-foreground">{f.plot_type} · {formatStylePreset(f.style_preset)}</p>
                       </CardContent>
                     </Card>
                   </Link>

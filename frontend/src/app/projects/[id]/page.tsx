@@ -14,6 +14,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Loader2, UploadCloud, FileSpreadsheet, Trash2, Images, Database, Package, FlaskConical, Sparkles } from 'lucide-react';
+import { formatStylePreset } from '@/lib/style-presets';
 
 export default function ProjectWorkspace({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -155,7 +156,7 @@ export default function ProjectWorkspace({ params }: { params: Promise<{ id: str
                       </Link>
                       <CardContent className="p-3">
                         <div className="flex items-start justify-between gap-2">
-                          <Link href={`/figures/${f.id}`} className="min-w-0"><p className="truncate text-sm font-medium">{f.name}</p><p className="text-xs text-muted-foreground">{f.plot_type} · {f.style_preset}</p></Link>
+                          <Link href={`/figures/${f.id}`} className="min-w-0"><p className="truncate text-sm font-medium">{f.name}</p><p className="text-xs text-muted-foreground">{f.plot_type} · {formatStylePreset(f.style_preset)}</p></Link>
                           <Button variant="ghost" size="sm" onClick={() => { if (confirm(`Delete ${f.name}?`)) delFig.mutate(f.id); }}><Trash2 className="h-4 w-4 text-muted-foreground" /></Button>
                         </div>
                       </CardContent>

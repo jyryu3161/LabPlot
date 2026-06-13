@@ -35,21 +35,23 @@ def public_gallery(limit: int = 12, db: Session = Depends(get_db)):
         .all()
     )
     seen_types: set[str] = set()
-    primary, extra = [], []
+    figures = []
     for f, v in rows:
+        # Public gallery is a showcase, so keep one representative per plot type
+        # instead of filling sections with visually duplicated examples.
+        if f.plot_type in seen_types:
+            continue
+        seen_types.add(f.plot_type)
         thumb = _url(v.png_path)
         dom = PLOT_DOMAINS.get(f.plot_type, "basic")
         item = {"name": f.name, "plot_type": f.plot_type, "style_preset": f.style_preset, "thumb_url": thumb,
                 "domain": dom, "domain_label": DOMAIN_LABELS.get(dom, dom)}
-        # prefer one-per-plot-type first for visual variety, then fill with the rest
-        if f.plot_type not in seen_types:
-            seen_types.add(f.plot_type)
-            primary.append(item)
-        else:
-            extra.append(item)
-    return {"figures": (primary + extra)[:limit]}
+        figures.append(item)
+        if len(figures) >= limit:
+            break
+    return {"figures": figures}
 
 
 @router.get("/stats")
 def public_stats(db: Session = Depends(get_db)):
-    return {"plot_types": 9, "journal_styles": 5, "palettes": 5}
+    return {"plot_types": 18, "style_presets": 5, "palettes": 5}

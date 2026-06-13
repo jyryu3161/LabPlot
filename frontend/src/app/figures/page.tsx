@@ -9,6 +9,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Loader2, Images, Trash2 } from 'lucide-react';
+import { formatStylePreset } from '@/lib/style-presets';
 
 export default function FiguresPage() {
   const qc = useQueryClient();
@@ -49,7 +50,7 @@ export default function FiguresPage() {
                       <Trash2 className="h-4 w-4 text-muted-foreground" />
                     </Button>
                   </div>
-                  <Badge variant="outline" className="mt-2">{f.style_preset}</Badge>
+                  <Badge variant="outline" className="mt-2">{formatStylePreset(f.style_preset)}</Badge>
                 </CardContent>
               </Card>
             ))}

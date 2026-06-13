@@ -1,4 +1,4 @@
-"""Journal style presets -> R theme + palette code (uses base ggplot2 only)."""
+"""Publication style presets -> R theme + palette code (uses base ggplot2 only)."""
 from __future__ import annotations
 
 PALETTES = {
@@ -25,9 +25,9 @@ _BASE = {
 PRESETS = list(_BASE.keys())
 
 PRESET_LABELS = {
-    "nature": "Nature-style",
-    "science": "Science-style",
-    "cell": "Cell-style",
+    "nature": "Clean Classic",
+    "science": "Grid Classic",
+    "cell": "Biomedical",
     "minimal": "Minimal",
     "colorblind": "Colorblind-safe",
 }

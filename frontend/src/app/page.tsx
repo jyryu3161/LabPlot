@@ -10,7 +10,7 @@ import {
 
 const FEATURES = [
   { icon: Sparkles, title: 'AI chart recommendation', desc: 'LabPlot AI reads your column types and suggests the right plot — box, volcano, Kaplan–Meier, PCA and more — with a clear rationale.' },
-  { icon: BarChart3, title: 'Publication-quality ggplot2', desc: '9 chart types, journal-style themes, color or grayscale, and colorblind-safe palettes — all rendered in R/ggplot2.' },
+  { icon: BarChart3, title: 'Publication-quality ggplot2', desc: '18 chart templates, publication style presets, color or grayscale, and colorblind-safe palettes — all rendered in R/ggplot2.' },
   { icon: Star, title: 'AI Figure Review', desc: 'A vision model evaluates your rendered figure for publication readiness and returns a score with concrete fixes.' },
   { icon: FileText, title: 'AI figure legends', desc: 'Draft a journal-style figure legend grounded in your study context and the statistics actually computed — never invented.' },
   { icon: FileCode2, title: 'Reproducible R code', desc: 'Every figure ships with the exact R script. Export to SVG, TIFF (300/600 dpi) and PDF for submission.' },
@@ -20,7 +20,7 @@ const FEATURES = [
 const TRUST = [
   { icon: RefreshCw, title: 'Reproducible by design', desc: 'Every figure includes the exact R/ggplot2 script that produced it. Re-run it anywhere and get the same result.' },
   { icon: Eye, title: 'No black box', desc: 'Inspect, edit, and re-render everything yourself. The AI proposes parameter changes against vetted templates — never opaque code.' },
-  { icon: Award, title: 'Publication-grade output', desc: 'Journal-style themes, colorblind-safe palettes, vector SVG/PDF and high-DPI TIFF — built for figure submission.' },
+  { icon: Award, title: 'Publication-grade output', desc: 'Publication style presets, colorblind-safe palettes, vector SVG/PDF and high-DPI TIFF — built for figure submission.' },
   { icon: ShieldCheck, title: 'Private & self-hosted', desc: 'Runs on your own lab or institutional server. Your unpublished data stays under your control.' },
 ];
 
