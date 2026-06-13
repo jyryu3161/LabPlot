@@ -1,0 +1,68 @@
+services:
+  labplot-db:
+    image: postgres:16-alpine
+    container_name: labplot-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: labplot
+      POSTGRES_PASSWORD: labplot
+      POSTGRES_DB: labplot
+    ports:
+      - "5435:5432"
+    volumes:
+      - labplot_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U labplot -d labplot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  labplot-backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: labplot-backend
+    restart: unless-stopped
+    command: pixi run serve
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://labplot:labplot@labplot-db:5432/labplot
+    ports:
+      - "8071:8000"
+    volumes:
+      - ./backend:/app/backend
+    depends_on:
+      labplot-db:
+        condition: service_healthy
+
+  labplot-frontend:
+    build:
+      context: ./frontend
+    container_name: labplot-frontend
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: ""
+      NEXT_TELEMETRY_DISABLED: "1"
+    volumes:
+      - ./frontend/src:/app/src
+    depends_on:
+      - labplot-backend
+
+  labplot-caddy:
+    image: caddy:2-alpine
+    container_name: labplot-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - labplot_caddy:/data
+    depends_on:
+      - labplot-backend
+
+volumes:
+  labplot_pg:
+  labplot_caddy:

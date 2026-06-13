@@ -1,0 +1,29 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# python
+__pycache__/
+*.pyc
+.pixi/
+
+# node
+node_modules/
+.next/
+frontend/.next/
+npm-debug.log*
+
+# data / generated figures
+backend/static/uploads/
+backend/static/figures/
+
+# bkit tooling internals
+.bkit/
+
+# ops logs
+scripts/*.log
+*.log
+
+# os
+.DS_Store

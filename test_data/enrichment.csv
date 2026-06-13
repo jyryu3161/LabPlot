@@ -1,0 +1,16 @@
+Description,GeneRatio,Count,p.adjust,neg_log10_padj
+Cell cycle,0.038,7,2.291e-07,6.64
+DNA replication,0.282,53,0.000955,3.02
+Apoptosis,0.088,34,4.786e-10,9.32
+p53 signaling,0.058,7,9.333e-05,4.03
+Immune response,0.198,38,0.003467,2.46
+Oxidative phosphorylation,0.147,40,3.548e-07,6.45
+MAPK signaling,0.066,9,2.291e-09,8.64
+Cell adhesion,0.211,50,2.512e-05,4.6
+Angiogenesis,0.049,12,1.288e-06,5.89
+Wnt signaling,0.042,10,4.786e-06,5.32
+Inflammatory response,0.113,26,0.01202,1.92
+Glycolysis,0.201,30,5.754e-10,9.24
+Fatty acid metabolism,0.195,41,4.365e-07,6.36
+T cell activation,0.131,30,3.162e-06,5.5
+Extracellular matrix,0.379,55,0.0001738,3.76

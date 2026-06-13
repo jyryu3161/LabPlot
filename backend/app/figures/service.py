@@ -1,0 +1,546 @@
+from __future__ import annotations
+
+import os
+import re
+import shutil
+import uuid
+from typing import Any
+
+from sqlalchemy import func
+from sqlalchemy.orm import Session, joinedload
+
+from app.ai import client as ai_client
+from app.common.exceptions import BadRequestError, NotFoundError
+from app.config import settings
+from app.datasets import service as ds_service
+from app.figures.models import Figure, FigureVersion, Improvement, Review
+from app.r_engine import renderer
+from app.r_engine.presets import PRESETS
+from app.r_engine.templates import PLOT_TYPES, PLOT_TYPE_KEYS
+
+_STATIC_ROOT = os.path.dirname(settings.figures_dir.rstrip("/"))
+_UNIVERSAL_OPTION_KEYS = {
+    "palette_name", "size", "width_in", "height_in", "color_mode", "font_scale", "dpi",
+    "title", "subtitle", "x_label", "y_label", "legend_title",
+    "hide_legend", "log_x", "log_y", "flip_coords",
+}
+_OPTION_CHOICES = {
+    "palette_name": {"preset", "okabe_ito", "tol_bright", "set2", "npg", "tableau10"},
+    "size": {"single_column", "wide", "double_column", "square", "custom"},
+    "color_mode": {"color", "grayscale"},
+    "stat": {"mean", "sum", "count"},
+    "palette": {"viridis", "magma", "inferno", "plasma", "cividis"},
+}
+_BOOL_OPTIONS = {"show_points", "show_box", "error_bars", "scale_rows", "add_smooth", "hide_legend", "log_x", "log_y", "flip_coords"}
+_NUMBER_OPTIONS = {"fc_threshold", "p_threshold", "label_top", "font_scale", "dpi", "width_in", "height_in"}
+
+
+def _project_context(db: Session, project_id) -> str | None:
+    if not project_id:
+        return None
+    from app.projects.models import Project
+    p = db.query(Project).filter(Project.id == project_id).first()
+    if p and (p.description or "").strip():
+        return f"Study: {p.name}. {p.description.strip()}"
+    return None
+
+
+# ---------------------------------------------------------------- helpers
+def _url(abs_path: str | None) -> str | None:
+    if not abs_path:
+        return None
+    try:
+        rel = os.path.relpath(abs_path, _STATIC_ROOT)
+    except ValueError:
+        return None
+    if rel.startswith(".."):
+        return None
+    return "/static/" + rel.replace(os.sep, "/")
+
+
+def _friendly_error(log: str) -> str:
+    if not log:
+        return "Rendering failed for unknown reasons."
+    lines = [ln for ln in log.splitlines() if "error" in ln.lower()]
+    msg = lines[-1] if lines else log.strip().splitlines()[-1]
+    msg = re.sub(r"^Error[^:]*:\s*", "", msg).strip()
+    # make a couple of common R errors human-friendly
+    if "subscript out of bounds" in msg or "undefined columns" in msg:
+        msg = "A selected column was not found in the data. Check your column mapping."
+    if "must be a numeric" in msg or "non-numeric" in msg:
+        msg = "A column expected to be numeric contains non-numeric values."
+    return msg[:300] or "Rendering failed."
+
+
+def _plot_def(plot_type: str) -> dict:
+    for p in PLOT_TYPES:
+        if p["type"] == plot_type:
+            return p
+    raise BadRequestError(f"Unknown plot type '{plot_type}'", error_code="UNKNOWN_PLOT_TYPE")
+
+
+def validate_mapping(plot_type: str, mapping: dict) -> None:
+    if plot_type not in PLOT_TYPE_KEYS:
+        raise BadRequestError(f"Unsupported plot type '{plot_type}'", error_code="UNKNOWN_PLOT_TYPE")
+    pdef = _plot_def(plot_type)
+    missing = []
+    for req in pdef["required"]:
+        key = req["key"]
+        val = (mapping or {}).get(key)
+        if req.get("multi"):
+            if not val or (isinstance(val, list) and len(val) == 0):
+                missing.append(req["label"])
+        elif val in (None, ""):
+            missing.append(req["label"])
+    if missing:
+        raise BadRequestError("Missing required mapping: " + ", ".join(missing), error_code="MISSING_MAPPING")
+
+
+def version_response(v: FigureVersion) -> dict:
+    return {
+        "id": v.id,
+        "version_number": v.version_number,
+        "mapping": v.mapping or {},
+        "options": v.options or {},
+        "style_preset": v.style_preset,
+        "change_note": v.change_note,
+        "created_at": v.created_at,
+        "png_url": _url(v.png_path),
+        "svg_url": _url(v.svg_path),
+        "tiff_url": _url(v.tiff_path),
+        "pdf_url": _url(v.pdf_path),
+        "r_url": _url(v.r_path),
+    }
+
+
+# ---------------------------------------------------------------- retrieval
+def get_figure(db: Session, figure_id: uuid.UUID, owner_id: uuid.UUID) -> Figure:
+    fig = (
+        db.query(Figure)
+        .options(joinedload(Figure.versions), joinedload(Figure.dataset))
+        .filter(Figure.id == figure_id, Figure.owner_id == owner_id)
+        .first()
+    )
+    if not fig:
+        raise NotFoundError("Figure", str(figure_id))
+    return fig
+
+
+def get_version(fig: Figure, version_id: uuid.UUID) -> FigureVersion:
+    for v in fig.versions:
+        if v.id == version_id:
+            return v
+    raise NotFoundError("FigureVersion", str(version_id))
+
+
+def list_figures(db: Session, owner_id: uuid.UUID, project_id: uuid.UUID | None = None) -> list[dict]:
+    q = (db.query(Figure).options(joinedload(Figure.versions)).filter(Figure.owner_id == owner_id))
+    if project_id is not None:
+        q = q.filter(Figure.project_id == project_id)
+    figs = q.order_by(Figure.updated_at.desc()).all()
+    out = []
+    for f in figs:
+        thumb = None
+        for v in f.versions:
+            if v.id == f.current_version_id:
+                thumb = _url(v.png_path)
+        out.append({
+            "id": f.id, "name": f.name, "plot_type": f.plot_type, "style_preset": f.style_preset,
+            "status": f.status, "dataset_id": f.dataset_id, "project_id": f.project_id,
+            "created_at": f.created_at, "updated_at": f.updated_at, "thumb_url": thumb,
+        })
+    return out
+
+
+def list_gallery_figures(db: Session, limit: int = 200) -> list[dict]:
+    from app.projects.models import Project
+
+    limit = max(1, min(limit, 500))
+    figs = (
+        db.query(Figure)
+        .options(joinedload(Figure.versions), joinedload(Figure.dataset), joinedload(Figure.owner))
+        .filter(Figure.current_version_id.isnot(None), Figure.status == "ready")
+        .order_by(Figure.updated_at.desc())
+        .limit(limit)
+        .all()
+    )
+    project_ids = {f.project_id for f in figs if f.project_id}
+    project_names = {}
+    if project_ids:
+        project_names = dict(db.query(Project.id, Project.name).filter(Project.id.in_(project_ids)).all())
+
+    out = []
+    for f in figs:
+        current = next((v for v in f.versions if v.id == f.current_version_id), None)
+        out.append({
+            "id": f.id,
+            "name": f.name,
+            "plot_type": f.plot_type,
+            "style_preset": f.style_preset,
+            "status": f.status,
+            "dataset_id": f.dataset_id,
+            "dataset_name": f.dataset.name if f.dataset else None,
+            "project_id": f.project_id,
+            "project_name": project_names.get(f.project_id),
+            "owner_name": f.owner.display_name if f.owner else None,
+            "owner_email": f.owner.email if f.owner else None,
+            "current_version_id": f.current_version_id,
+            "created_at": f.created_at,
+            "updated_at": f.updated_at,
+            "thumb_url": _url(current.png_path) if current else None,
+            "r_url": (
+                f"/api/figures/gallery/{f.id}/versions/{current.id}/export?format=r"
+                if current and current.r_path else None
+            ),
+        })
+    return out
+
+
+def figure_detail(db: Session, figure_id: uuid.UUID, owner_id: uuid.UUID) -> dict:
+    fig = get_figure(db, figure_id, owner_id)
+    return {
+        "id": fig.id, "name": fig.name, "plot_type": fig.plot_type, "style_preset": fig.style_preset,
+        "status": fig.status, "dataset_id": fig.dataset_id, "project_id": fig.project_id,
+        "dataset_name": fig.dataset.name if fig.dataset else None,
+        "description": fig.description, "legend": fig.legend,
+        "current_version_id": fig.current_version_id,
+        "created_at": fig.created_at, "updated_at": fig.updated_at,
+        "versions": [version_response(v) for v in sorted(fig.versions, key=lambda x: x.version_number)],
+    }
+
+
+def update_figure(db: Session, figure_id: uuid.UUID, owner_id: uuid.UUID, data: dict) -> dict:
+    fig = get_figure(db, figure_id, owner_id)
+    for k in ("name", "description", "legend"):
+        if k in data and data[k] is not None:
+            setattr(fig, k, data[k])
+    db.commit()
+    return figure_detail(db, figure_id, owner_id)
+
+
+def generate_legend(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, owner_id: uuid.UUID, style: str = "nature") -> dict:
+    fig = get_figure(db, figure_id, owner_id)
+    v = get_version(fig, version_id)
+    ds = ds_service.get_dataset(db, fig.dataset_id, owner_id)
+    dataset_summary = {
+        "name": ds.name, "n_rows": ds.n_rows,
+        "columns": [{"name": c["name"], "role": c["role"]} for c in (ds.column_profile or [])],
+        "comparisons": (ds.statistics or {}).get("comparisons", [])[:4],
+    }
+    pc = _project_context(db, fig.project_id)
+    if ds.description and ds.description.strip():
+        pc = ((pc + " ") if pc else "") + "Dataset: " + ds.description.strip()
+    legend = ai_client.generate_legend(db, fig.plot_type, v.mapping or {}, v.options or {},
+                                       dataset_summary, fig.description, style, project_context=pc)
+    fig.legend = legend
+    db.commit()
+    return {"legend": legend}
+
+
+# ---------------------------------------------------------------- rendering
+def _render_into_version(df, plot_type, mapping, options, preset, figure_id, version_id):
+    out_dir = os.path.join(settings.figures_dir, str(figure_id), str(version_id))
+    res = renderer.render(plot_type, mapping, options or {}, preset, df, out_dir)
+    if not res.success:
+        shutil.rmtree(out_dir, ignore_errors=True)
+        raise BadRequestError(_friendly_error(res.log), error_code="RENDER_FAILED")
+    return res, out_dir
+
+
+def create_figure(db: Session, owner_id: uuid.UUID, data) -> dict:
+    ds = ds_service.get_dataset(db, data.dataset_id, owner_id)
+    preset = data.style_preset if data.style_preset in PRESETS else "nature"
+    validate_mapping(data.plot_type, data.mapping)
+    df = ds_service.load_dataframe(ds)
+
+    figure_id = uuid.uuid4()
+    version_id = uuid.uuid4()
+    res, _ = _render_into_version(df, data.plot_type, data.mapping, data.options, preset, figure_id, version_id)
+
+    fig = Figure(
+        id=figure_id, owner_id=owner_id, dataset_id=ds.id, project_id=ds.project_id, name=data.name,
+        plot_type=data.plot_type, style_preset=preset, status="ready",
+        current_version_id=version_id,
+    )
+    db.add(fig)
+    db.flush()
+    version = FigureVersion(
+        id=version_id, figure_id=figure_id, version_number=1,
+        mapping=data.mapping, options=data.options or {}, style_preset=preset,
+        r_code=res.r_code, change_note="Initial figure",
+        png_path=res.outputs.get("png"), svg_path=res.outputs.get("svg"),
+        tiff_path=res.outputs.get("tiff"), pdf_path=res.outputs.get("pdf"),
+        r_path=res.outputs.get("r"), render_log=res.log,
+    )
+    db.add(version)
+    db.commit()
+    return figure_detail(db, figure_id, owner_id)
+
+
+def rerender(db: Session, figure_id: uuid.UUID, owner_id: uuid.UUID, req) -> dict:
+    fig = get_figure(db, figure_id, owner_id)
+    base = get_version(fig, fig.current_version_id) if fig.current_version_id else fig.versions[-1]
+    mapping = req.mapping if req.mapping is not None else base.mapping
+    options = req.options if req.options is not None else base.options
+    preset = req.style_preset or fig.style_preset
+    if preset not in PRESETS:
+        preset = "nature"
+    plot_type = getattr(req, "plot_type", None) or fig.plot_type
+    validate_mapping(plot_type, mapping)
+
+    ds = ds_service.get_dataset(db, fig.dataset_id, owner_id)
+    df = ds_service.load_dataframe(ds)
+    next_num = (db.query(func.max(FigureVersion.version_number))
+                .filter(FigureVersion.figure_id == figure_id).scalar() or 0) + 1
+    version_id = uuid.uuid4()
+    res, _ = _render_into_version(df, plot_type, mapping, options, preset, figure_id, version_id)
+
+    version = FigureVersion(
+        id=version_id, figure_id=figure_id, version_number=next_num,
+        mapping=mapping, options=options or {}, style_preset=preset,
+        r_code=res.r_code, change_note=(req.change_note or "Re-rendered"),
+        png_path=res.outputs.get("png"), svg_path=res.outputs.get("svg"),
+        tiff_path=res.outputs.get("tiff"), pdf_path=res.outputs.get("pdf"),
+        r_path=res.outputs.get("r"), render_log=res.log,
+    )
+    db.add(version)
+    fig.current_version_id = version_id
+    fig.style_preset = preset
+    fig.plot_type = plot_type
+    fig.status = "ready"
+    db.commit()
+    return version_response(version)
+
+
+def delete_figure(db: Session, figure_id: uuid.UUID, owner_id: uuid.UUID) -> None:
+    fig = get_figure(db, figure_id, owner_id)
+    shutil.rmtree(os.path.join(settings.figures_dir, str(figure_id)), ignore_errors=True)
+    db.delete(fig)
+    db.commit()
+
+
+# ---------------------------------------------------------------- AI: review / improve / apply
+def review_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, owner_id: uuid.UUID) -> Review:
+    fig = get_figure(db, figure_id, owner_id)
+    v = get_version(fig, version_id)
+    if not v.png_path or not os.path.exists(v.png_path):
+        raise BadRequestError("Rendered image not available for review", error_code="NO_IMAGE")
+    result = ai_client.review_figure(db, v.png_path, fig.plot_type, v.mapping or {}, v.options or {},
+                                     project_context=_project_context(db, fig.project_id))
+    rev = Review(
+        figure_version_id=version_id,
+        publication_score=result.get("publication_score"),
+        payload=result, model=ai_client.active_provider_label(db),
+    )
+    db.add(rev)
+    db.commit()
+    db.refresh(rev)
+    return rev
+
+
+def improve_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, owner_id: uuid.UUID) -> list[Improvement]:
+    fig = get_figure(db, figure_id, owner_id)
+    v = get_version(fig, version_id)
+    last_review = (db.query(Review).filter(Review.figure_version_id == version_id)
+                   .order_by(Review.created_at.desc()).first())
+    pdef = _plot_def(fig.plot_type)
+    available = {"options": pdef.get("options", []),
+                 "mapping_keys": [r["key"] for r in pdef["required"]] + [o["key"] for o in pdef.get("optional", [])]}
+    suggestions = ai_client.improve_figure(
+        db, fig.plot_type, v.mapping or {}, v.options or {}, fig.style_preset,
+        last_review.payload if last_review else None, [available],
+        project_context=_project_context(db, fig.project_id),
+    )
+    rows = []
+    for s in suggestions:
+        patch = _sanitize_param_patch(s.get("param_patch", {}), pdef, v.mapping or {})
+        if not patch:
+            continue
+        imp = Improvement(
+            figure_version_id=version_id,
+            suggestion_type=s.get("suggestion_type"),
+            current_state=s.get("current"),
+            recommended=s.get("recommended"),
+            param_patch=patch,
+            priority=s.get("priority"),
+        )
+        db.add(imp)
+        rows.append(imp)
+    if not rows:
+        imp = Improvement(
+            figure_version_id=version_id,
+            suggestion_type="Publication export settings",
+            current_state="Current figure settings may not specify final export defaults.",
+            recommended="Use a stable wide export with 300 dpi and slightly larger type for review readability.",
+            param_patch={"options": {"size": "wide", "dpi": 300, "font_scale": 1.1}},
+            priority="medium",
+        )
+        db.add(imp)
+        rows.append(imp)
+    db.commit()
+    for r in rows:
+        db.refresh(r)
+    return rows
+
+
+def list_improvements(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, owner_id: uuid.UUID) -> list[Improvement]:
+    fig = get_figure(db, figure_id, owner_id)
+    get_version(fig, version_id)
+    return (db.query(Improvement).filter(Improvement.figure_version_id == version_id)
+            .order_by(Improvement.created_at.desc()).all())
+
+
+def apply_improvement(db: Session, figure_id: uuid.UUID, improvement_id: uuid.UUID, owner_id: uuid.UUID) -> dict:
+    fig = get_figure(db, figure_id, owner_id)
+    version_ids = {v.id for v in fig.versions}
+    imp = db.query(Improvement).filter(Improvement.id == improvement_id).first()
+    if not imp or imp.figure_version_id not in version_ids:
+        raise NotFoundError("Improvement", str(improvement_id))
+
+    base = get_version(fig, fig.current_version_id) if fig.current_version_id else fig.versions[-1]
+    patch = imp.param_patch or {}
+    new_mapping = {**(base.mapping or {}), **(patch.get("mapping") or {})}
+    new_options = {**(base.options or {}), **(patch.get("options") or {})}
+    new_preset = patch.get("style_preset") or fig.style_preset
+
+    class _Req:
+        mapping = new_mapping
+        options = new_options
+        style_preset = new_preset
+        change_note = f"Applied AI suggestion: {imp.suggestion_type or 'improvement'}"
+
+    result = rerender(db, figure_id, owner_id, _Req())
+    imp.applied = True
+    db.commit()
+    return result
+
+
+def _known_mapping_values(mapping: dict[str, Any]) -> set[str]:
+    values: set[str] = set()
+    for value in mapping.values():
+        if isinstance(value, str) and value:
+            values.add(value)
+        elif isinstance(value, list):
+            values.update(v for v in value if isinstance(v, str) and v)
+    return values
+
+
+def _sanitize_option(key: str, value: Any) -> Any:
+    if value in (None, ""):
+        return None
+    if key in _OPTION_CHOICES:
+        return value if isinstance(value, str) and value in _OPTION_CHOICES[key] else None
+    if key in _BOOL_OPTIONS:
+        return value if isinstance(value, bool) else None
+    if key in _NUMBER_OPTIONS:
+        try:
+            num = float(value)
+        except (TypeError, ValueError):
+            return None
+        if key == "dpi":
+            return int(max(72, min(1200, num)))
+        if key == "label_top":
+            return int(max(0, min(100, num)))
+        if key == "font_scale":
+            return max(0.6, min(2.0, num))
+        if key in {"width_in", "height_in"}:
+            return max(1.0, min(20.0, num))
+        return num
+    if isinstance(value, str):
+        return value[:200]
+    return None
+
+
+def _sanitize_param_patch(patch: dict[str, Any], pdef: dict, base_mapping: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(patch, dict):
+        return {}
+
+    clean: dict[str, Any] = {}
+    style = patch.get("style_preset")
+    if isinstance(style, str) and style in PRESETS:
+        clean["style_preset"] = style
+
+    allowed_mapping = {r["key"] for r in pdef["required"]} | {o["key"] for o in pdef.get("optional", [])}
+    known_columns = _known_mapping_values(base_mapping)
+    mapping_patch = {}
+    raw_mapping = patch.get("mapping")
+    if isinstance(raw_mapping, dict):
+        for key, value in raw_mapping.items():
+            if key not in allowed_mapping:
+                continue
+            if isinstance(value, str) and value in known_columns:
+                mapping_patch[key] = value
+            elif isinstance(value, list):
+                vals = [v for v in value if isinstance(v, str) and v in known_columns]
+                if vals:
+                    mapping_patch[key] = vals
+    if mapping_patch:
+        clean["mapping"] = mapping_patch
+
+    allowed_options = {o["key"] for o in pdef.get("options", [])} | _UNIVERSAL_OPTION_KEYS
+    options_patch = {}
+    raw_options = patch.get("options")
+    if isinstance(raw_options, dict):
+        for key, value in raw_options.items():
+            if key not in allowed_options:
+                continue
+            sanitized = _sanitize_option(key, value)
+            if sanitized is not None:
+                options_patch[key] = sanitized
+    if options_patch:
+        clean["options"] = options_patch
+    return clean
+
+
+# ---------------------------------------------------------------- recommend
+def ai_recommend(db: Session, dataset_id: uuid.UUID, owner_id: uuid.UUID) -> list[dict]:
+    ds = ds_service.get_dataset(db, dataset_id, owner_id)
+    ctx = _project_context(db, ds.project_id)
+    if ds.description and ds.description.strip():
+        ctx = ((ctx + " ") if ctx else "") + "Dataset: " + ds.description.strip()
+    return ai_client.recommend_charts(db, ds.column_profile, project_context=ctx)
+
+
+# ---------------------------------------------------------------- export
+_EXPORT = {
+    "png": ("png_path", "image/png", "png"),
+    "svg": ("svg_path", "image/svg+xml", "svg"),
+    "tiff": ("tiff_path", "image/tiff", "tiff"),
+    "pdf": ("pdf_path", "application/pdf", "pdf"),
+    "r": ("r_path", "text/plain", "R"),
+}
+
+
+def export_path(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, fmt: str, owner_id: uuid.UUID):
+    if fmt not in _EXPORT:
+        raise BadRequestError(f"Unsupported export format '{fmt}'", error_code="BAD_FORMAT")
+    fig = get_figure(db, figure_id, owner_id)
+    v = get_version(fig, version_id)
+    attr, media, ext = _EXPORT[fmt]
+    path = getattr(v, attr)
+    if not path or not os.path.exists(path):
+        raise NotFoundError("Export file", fmt)
+    safe = re.sub(r"[^A-Za-z0-9_-]+", "_", fig.name)
+    filename = f"{safe}_v{v.version_number}.{ext}"
+    return path, media, filename
+
+
+def gallery_export_path(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, fmt: str):
+    if fmt not in _EXPORT:
+        raise BadRequestError(f"Unsupported export format '{fmt}'", error_code="BAD_FORMAT")
+    fig = (
+        db.query(Figure)
+        .options(joinedload(Figure.versions))
+        .filter(Figure.id == figure_id, Figure.status == "ready")
+        .first()
+    )
+    if not fig:
+        raise NotFoundError("Figure", str(figure_id))
+    v = get_version(fig, version_id)
+    attr, media, ext = _EXPORT[fmt]
+    path = getattr(v, attr)
+    if not path or not os.path.exists(path):
+        raise NotFoundError("Export file", fmt)
+    safe = re.sub(r"[^A-Za-z0-9_-]+", "_", fig.name)
+    filename = f"gallery_{safe}_v{v.version_number}.{ext}"
+    return path, media, filename

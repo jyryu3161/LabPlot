@@ -1,0 +1,172 @@
+"""Provider-agnostic structured-output transport for the AI features.
+
+Neutral `content` is a list of items:
+  {"kind": "text", "text": "..."}
+  {"kind": "image", "mime": "image/png", "b64": "..."}
+
+run_structured(...) returns a validated dict (parsed JSON object).
+"""
+from __future__ import annotations
+
+import json
+import urllib.request
+import urllib.error
+
+from app.common.exceptions import BadRequestError
+
+_GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+
+
+def run_structured(provider: str, model: str, key: str | None, system: str,
+                   content: list[dict], schema: dict, tool_name: str = "result",
+                   max_tokens: int = 1600) -> dict:
+    if not key:
+        raise BadRequestError(f"No API key configured for provider '{provider}'", error_code="AI_NO_KEY")
+    if provider == "gemini":
+        return _gemini(model, key, system, content, schema, max_tokens)
+    return _claude(model, key, system, content, schema, tool_name, max_tokens)
+
+
+# ----------------------------------------------------------------- Claude
+def _claude(model, key, system, content, schema, tool_name, max_tokens) -> dict:
+    try:
+        import anthropic
+    except ImportError:
+        raise BadRequestError("anthropic SDK not installed", error_code="AI_NO_SDK")
+
+    blocks = []
+    for c in content:
+        if c["kind"] == "text":
+            blocks.append({"type": "text", "text": c["text"]})
+        elif c["kind"] == "image":
+            blocks.append({"type": "image", "source": {"type": "base64", "media_type": c["mime"], "data": c["b64"]}})
+
+    client = anthropic.Anthropic(api_key=key)
+    try:
+        resp = client.messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            system=system,
+            tools=[{"name": tool_name, "description": f"Return the {tool_name}.", "input_schema": schema}],
+            tool_choice={"type": "tool", "name": tool_name},
+            messages=[{"role": "user", "content": blocks}],
+        )
+    except Exception as e:
+        raise BadRequestError(f"Claude API error: {e}", error_code="AI_API_ERROR")
+    for block in resp.content:
+        if getattr(block, "type", None) == "tool_use":
+            return block.input
+    raise BadRequestError("Claude returned no structured output", error_code="AI_BAD_RESPONSE")
+
+
+# ----------------------------------------------------------------- Gemini
+class _UnsupportedSchema(Exception):
+    pass
+
+
+def _to_gemini_schema(js: dict) -> dict:
+    """Convert a JSON-Schema dict to Gemini responseSchema (uppercase types).
+    Raises _UnsupportedSchema for generic/property-less objects (e.g. param_patch)."""
+    t = js.get("type")
+    if t == "object":
+        props = js.get("properties")
+        if not props:
+            raise _UnsupportedSchema()
+        g = {"type": "OBJECT", "properties": {k: _to_gemini_schema(v) for k, v in props.items()}}
+        if js.get("required"):
+            g["required"] = js["required"]
+        return g
+    if t == "array":
+        return {"type": "ARRAY", "items": _to_gemini_schema(js["items"])}
+    if t == "string":
+        g = {"type": "STRING"}
+        if js.get("enum"):
+            g["enum"] = js["enum"]
+        return g
+    if t == "integer":
+        return {"type": "INTEGER"}
+    if t == "number":
+        return {"type": "NUMBER"}
+    if t == "boolean":
+        return {"type": "BOOLEAN"}
+    raise _UnsupportedSchema()
+
+
+def _gemini(model, key, system, content, schema, max_tokens) -> dict:
+    parts = []
+    for c in content:
+        if c["kind"] == "text":
+            parts.append({"text": c["text"]})
+        elif c["kind"] == "image":
+            parts.append({"inline_data": {"mime_type": c["mime"], "data": c["b64"]}})
+
+    gen = {"responseMimeType": "application/json", "maxOutputTokens": max_tokens, "temperature": 0.3}
+    try:
+        gen["responseSchema"] = _to_gemini_schema(schema)
+        sys_text = system  # schema is enforced by responseSchema
+    except _UnsupportedSchema:
+        sys_text = (system + "\n\nReturn ONLY a single JSON object that conforms to this JSON schema "
+                    "(no prose, no markdown, no code fences):\n" + json.dumps(schema))
+    body = {
+        "system_instruction": {"parts": [{"text": sys_text}]},
+        "contents": [{"parts": parts}],
+        "generationConfig": gen,
+    }
+    url = _GEMINI_URL.format(model=model, key=key)
+    req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"),
+                                 headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", "ignore")[:300]
+        raise BadRequestError(f"Gemini API error {e.code}: {detail}", error_code="AI_API_ERROR")
+    except Exception as e:
+        raise BadRequestError(f"Gemini API error: {e}", error_code="AI_API_ERROR")
+
+    try:
+        cand = payload["candidates"][0]
+        parts = cand.get("content", {}).get("parts", [])
+        text = "".join(p.get("text", "") for p in parts)
+    except (KeyError, IndexError):
+        raise BadRequestError("Gemini returned no content", error_code="AI_BAD_RESPONSE")
+
+    return _parse_json(text)
+
+
+def _parse_json(text: str) -> dict:
+    t = (text or "").strip()
+    # strip ```json ... ``` / ``` ... ``` fences
+    if t.startswith("```"):
+        t = t[3:]
+        if t[:4].lower() == "json":
+            t = t[4:]
+        if t.endswith("```"):
+            t = t[:-3]
+        t = t.strip()
+    try:
+        return json.loads(t, strict=False)
+    except json.JSONDecodeError:
+        pass
+    # robust brace extraction (handles trailing prose)
+    start = t.find("{")
+    if start >= 0:
+        depth = 0
+        for i in range(start, len(t)):
+            if t[i] == "{":
+                depth += 1
+            elif t[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(t[start:i + 1], strict=False)
+                    except json.JSONDecodeError:
+                        break
+    # last resort: simple span
+    end = t.rfind("}")
+    if start >= 0 and end > start:
+        try:
+            return json.loads(t[start:end + 1], strict=False)
+        except json.JSONDecodeError:
+            pass
+    raise BadRequestError("Gemini did not return valid JSON", error_code="AI_BAD_RESPONSE")

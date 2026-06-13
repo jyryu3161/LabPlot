@@ -1,0 +1,136 @@
+import os
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+
+from app.config import settings
+from app.common.exceptions import AppError, app_error_handler
+
+# import models so metadata is registered before create_all
+from sqlalchemy import text
+
+from app.auth import models as _auth_models  # noqa: F401
+from app.projects import models as _proj_models  # noqa: F401
+from app.datasets import models as _ds_models  # noqa: F401
+from app.figures import models as _fig_models  # noqa: F401
+from app.ai import models as _ai_models  # noqa: F401
+from app.database import Base, engine
+
+from app.auth.router import router as auth_router
+from app.admin.router import router as admin_router
+from app.projects.router import router as projects_router
+from app.datasets.router import router as datasets_router
+from app.figures.router import router as figures_router, meta_router
+from app.public.router import router as public_router
+
+app = FastAPI(title="LabPlot AI", description="AI-powered publication figure copilot", version="1.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.add_exception_handler(AppError, app_error_handler)
+
+app.include_router(auth_router)
+app.include_router(admin_router)
+app.include_router(projects_router)
+app.include_router(datasets_router)
+app.include_router(figures_router)
+app.include_router(meta_router)
+app.include_router(public_router)
+
+# static mount for rendered figures (/static/figures/...)
+_static_root = os.path.dirname(settings.figures_dir.rstrip("/"))
+os.makedirs(settings.figures_dir, exist_ok=True)
+os.makedirs(settings.upload_dir, exist_ok=True)
+app.mount("/static", StaticFiles(directory=_static_root), name="static")
+
+
+def _seed_root():
+    from sqlalchemy.orm import Session
+    from app.auth.models import User
+    from app.auth.service import _hash_password
+
+    with Session(engine) as db:
+        existing = db.query(User).filter(User.email == settings.ROOT_EMAIL).first()
+        if existing:
+            changed = False
+            if not existing.is_admin:
+                existing.is_admin = True
+                changed = True
+            if not existing.is_active:
+                existing.is_active = True
+                changed = True
+            if not existing.is_approved:
+                existing.is_approved = True
+                changed = True
+            if changed:
+                db.commit()
+            return
+        root = User(
+            email=settings.ROOT_EMAIL,
+            hashed_password=_hash_password(settings.ROOT_PASSWORD),
+            display_name="Root Admin",
+            is_active=True,
+            is_approved=True,
+            is_admin=True,
+        )
+        db.add(root)
+        db.commit()
+
+
+def _seed_ai_config():
+    from sqlalchemy.orm import Session
+    from app.ai.config_service import get_config
+    with Session(engine) as db:
+        get_config(db)  # creates the single config row from env defaults if absent
+
+
+_MIGRATIONS = [
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_approved BOOLEAN NOT NULL DEFAULT TRUE",
+    "ALTER TABLE datasets ADD COLUMN IF NOT EXISTS project_id UUID",
+    "ALTER TABLE datasets ADD COLUMN IF NOT EXISTS statistics JSONB",
+    "ALTER TABLE datasets ADD COLUMN IF NOT EXISTS description TEXT",
+    "ALTER TABLE figures ADD COLUMN IF NOT EXISTS project_id UUID",
+    "ALTER TABLE figures ADD COLUMN IF NOT EXISTS description TEXT",
+    "ALTER TABLE figures ADD COLUMN IF NOT EXISTS legend TEXT",
+]
+
+
+def _light_migrations():
+    with engine.begin() as conn:
+        for stmt in _MIGRATIONS:
+            conn.execute(text(stmt))
+
+
+def _backfill_projects():
+    from sqlalchemy.orm import Session
+    from app.auth.models import User
+    from app.projects.service import ensure_default_project
+    with Session(engine) as db:
+        for u in db.query(User).all():
+            proj = ensure_default_project(db, u.id)
+            db.execute(text("UPDATE datasets SET project_id = :p WHERE owner_id = :o AND project_id IS NULL"),
+                       {"p": str(proj.id), "o": str(u.id)})
+            db.execute(text("UPDATE figures SET project_id = :p WHERE owner_id = :o AND project_id IS NULL"),
+                       {"p": str(proj.id), "o": str(u.id)})
+            db.commit()
+
+
+@app.on_event("startup")
+def on_startup():
+    Base.metadata.create_all(bind=engine)
+    _light_migrations()
+    _seed_root()
+    _seed_ai_config()
+    _backfill_projects()
+
+
+@app.get("/api/health")
+def health_check():
+    return {"status": "ok", "service": "labplot-ai", "ai_enabled": bool(settings.ANTHROPIC_API_KEY)}

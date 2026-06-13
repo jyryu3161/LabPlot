@@ -1,0 +1,33 @@
+{
+	# Let's Encrypt 인증서 갱신 알림 수신 이메일
+	email jyryu@ssu.ac.kr
+}
+
+# 공통 라우팅
+(labplot) {
+	handle /api/* {
+		reverse_proxy labplot-backend:8000
+	}
+	handle /static/* {
+		reverse_proxy labplot-backend:8000
+	}
+	handle /docs* {
+		reverse_proxy labplot-backend:8000
+	}
+	handle /openapi.json {
+		reverse_proxy labplot-backend:8000
+	}
+	handle {
+		reverse_proxy labplot-frontend:3000
+	}
+}
+
+# 메인 도메인 — Caddy 자동 HTTPS
+labplotai.com {
+	import labplot
+}
+
+# www → apex 영구 리다이렉트
+www.labplotai.com {
+	redir https://labplotai.com{uri} permanent
+}

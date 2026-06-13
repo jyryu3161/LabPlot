@@ -1,0 +1,171 @@
+'use client';
+
+import { use, useCallback, useEffect, useState } from 'react';
+import Link from 'next/link';
+import { useDropzone } from 'react-dropzone';
+import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
+import { toast } from 'sonner';
+import { getProject, updateProject, listDatasets, listFigures, uploadDataset, deleteDataset, deleteFigure, downloadProjectPack, enhancePrompt } from '@/lib/api';
+import { AppHeader } from '@/components/layout/AppHeader';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
+import { Textarea } from '@/components/ui/textarea';
+import { Label } from '@/components/ui/label';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Loader2, UploadCloud, FileSpreadsheet, Trash2, Images, Database, Package, FlaskConical, Sparkles } from 'lucide-react';
+
+export default function ProjectWorkspace({ params }: { params: Promise<{ id: string }> }) {
+  const { id } = use(params);
+  const qc = useQueryClient();
+  const { data: project } = useQuery({ queryKey: ['project', id], queryFn: () => getProject(id) });
+  const { data: datasets, isLoading: dsLoading } = useQuery({ queryKey: ['datasets', id], queryFn: () => listDatasets(id) });
+  const { data: figures } = useQuery({ queryKey: ['figures', id], queryFn: () => listFigures(id) });
+  const [uploading, setUploading] = useState(false);
+  const [uploadDesc, setUploadDesc] = useState('');
+
+  const onDrop = useCallback(async (files: File[]) => {
+    if (!files.length) return;
+    setUploading(true);
+    try {
+      for (const f of files) await uploadDataset(f, id, uploadDesc || undefined);
+      toast.success(`${files.length} dataset(s) uploaded`);
+      setUploadDesc('');
+      qc.invalidateQueries({ queryKey: ['datasets', id] });
+      qc.invalidateQueries({ queryKey: ['project', id] });
+    } catch (e) { toast.error(e instanceof Error ? e.message : 'Upload failed'); }
+    finally { setUploading(false); }
+  }, [qc, id, uploadDesc]);
+
+  const { getRootProps, getInputProps, isDragActive } = useDropzone({
+    onDrop,
+    accept: { 'text/csv': ['.csv'], 'text/tab-separated-values': ['.tsv'], 'text/plain': ['.txt'],
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'] },
+  });
+
+  const delDs = useMutation({ mutationFn: deleteDataset, onSuccess: () => { toast.success('Dataset deleted'); qc.invalidateQueries({ queryKey: ['datasets', id] }); } });
+  const delFig = useMutation({ mutationFn: deleteFigure, onSuccess: () => { toast.success('Figure deleted'); qc.invalidateQueries({ queryKey: ['figures', id] }); } });
+
+  const [desc, setDesc] = useState('');
+  useEffect(() => { if (project) setDesc((d) => (d || project.description || '')); }, [project]);
+  const saveDesc = useMutation({
+    mutationFn: () => updateProject(id, { description: desc }),
+    onSuccess: () => { toast.success('Research description saved'); qc.invalidateQueries({ queryKey: ['project', id] }); },
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Save failed'),
+  });
+  const enhanceDesc = useMutation({
+    mutationFn: () => enhancePrompt(desc, 'project'),
+    onSuccess: (r) => { setDesc(r.enhanced); toast.success('Enhanced'); },
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Enhance failed'),
+  });
+  const enhanceUpload = useMutation({
+    mutationFn: () => enhancePrompt(uploadDesc, 'dataset_description', desc),
+    onSuccess: (r) => { setUploadDesc(r.enhanced); toast.success('Enhanced'); },
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Enhance failed'),
+  });
+
+  return (
+    <div className="min-h-screen bg-muted/20">
+      <AppHeader />
+      <main className="mx-auto max-w-7xl px-4 py-8">
+        <div className="mb-2 flex items-center gap-2 text-sm text-muted-foreground">
+          <Link href="/projects" className="hover:underline">Projects</Link> / {project?.name ?? '…'}
+        </div>
+        <div className="mb-6 flex items-center justify-between">
+          <h1 className="text-2xl font-bold">{project?.name ?? 'Project'}</h1>
+          <Button variant="outline" size="sm" disabled={!figures?.length}
+            onClick={() => downloadProjectPack(id, project?.name ?? 'project').catch(() => toast.error('Export failed'))}>
+            <Package className="mr-2 h-4 w-4" /> Download figure pack
+          </Button>
+        </div>
+
+        <Card className="mb-6">
+          <CardHeader className="pb-2"><CardTitle className="flex items-center gap-2 text-base"><FlaskConical className="h-4 w-4 text-primary" /> Research description</CardTitle></CardHeader>
+          <CardContent className="space-y-2">
+            <Textarea value={desc} onChange={(e) => setDesc(e.target.value)} rows={3}
+              placeholder="Describe the study (organism, design, treatments, hypothesis…). This context is given to the AI to improve chart recommendations, reviews and figure legends." />
+            <div className="flex gap-2">
+              <Button size="sm" variant="outline" onClick={() => enhanceDesc.mutate()} disabled={enhanceDesc.isPending}>
+                {enhanceDesc.isPending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Sparkles className="mr-1 h-4 w-4" />} Enhance
+              </Button>
+              <Button size="sm" variant="secondary" onClick={() => saveDesc.mutate()} disabled={saveDesc.isPending}>
+                {saveDesc.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Save description'}
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Tabs defaultValue="datasets">
+          <TabsList>
+            <TabsTrigger value="datasets">Datasets ({datasets?.length ?? 0})</TabsTrigger>
+            <TabsTrigger value="figures">Figures ({figures?.length ?? 0})</TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="datasets" className="space-y-6">
+            <div className="space-y-1">
+              <Label className="text-xs text-muted-foreground">데이터셋 설명 (선택) — 업로드 전에 입력하면 AI 추천·리뷰·legend에 활용됩니다</Label>
+              <Textarea value={uploadDesc} onChange={(e) => setUploadDesc(e.target.value)} rows={2}
+                placeholder="예: 종양 세포주에서 약물 A/B/C 처리 후 표적 유전자 발현 및 생존율 측정" />
+              <Button size="sm" variant="outline" onClick={() => enhanceUpload.mutate()} disabled={enhanceUpload.isPending}>
+                {enhanceUpload.isPending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Sparkles className="mr-1 h-4 w-4" />} Enhance with AI
+              </Button>
+            </div>
+            <div {...getRootProps()}
+              className={`flex cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed p-8 transition ${isDragActive ? 'border-primary bg-primary/5' : 'border-muted-foreground/25 hover:border-primary/50'}`}>
+              <input {...getInputProps()} />
+              {uploading ? <Loader2 className="h-7 w-7 animate-spin text-primary" /> : <UploadCloud className="h-7 w-7 text-muted-foreground" />}
+              <p className="mt-2 text-sm font-medium">{isDragActive ? 'Drop here' : 'Upload data to this project'}</p>
+              <p className="text-xs text-muted-foreground">CSV, TSV, TXT, XLSX — statistics computed automatically</p>
+            </div>
+
+            {dsLoading ? <div className="flex justify-center py-8"><Loader2 className="h-6 w-6 animate-spin" /></div>
+              : !datasets?.length ? <div className="rounded-lg border border-dashed p-10 text-center text-muted-foreground"><Database className="mx-auto mb-2 h-7 w-7" /> No datasets yet.</div>
+              : (
+                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                  {datasets.map((d) => (
+                    <Card key={d.id} className="transition hover:shadow-md">
+                      <CardHeader className="pb-2">
+                        <div className="flex items-start justify-between">
+                          <CardTitle className="flex items-center gap-2 text-base"><FileSpreadsheet className="h-4 w-4 text-primary" /> {d.name}</CardTitle>
+                          <Button variant="ghost" size="sm" onClick={() => { if (confirm(`Delete ${d.name}?`)) delDs.mutate(d.id); }}><Trash2 className="h-4 w-4 text-muted-foreground" /></Button>
+                        </div>
+                      </CardHeader>
+                      <CardContent>
+                        <div className="mb-3 flex gap-2">
+                          <Badge variant="secondary">{d.n_rows} rows</Badge>
+                          <Badge variant="secondary">{d.n_cols} cols</Badge>
+                        </div>
+                        <Link href={`/datasets/${d.id}`}><Button size="sm" className="w-full">Open &amp; visualize</Button></Link>
+                      </CardContent>
+                    </Card>
+                  ))}
+                </div>
+              )}
+          </TabsContent>
+
+          <TabsContent value="figures">
+            {!figures?.length ? <div className="rounded-lg border border-dashed p-10 text-center text-muted-foreground"><Images className="mx-auto mb-2 h-7 w-7" /> No figures yet. Open a dataset to build one.</div>
+              : (
+                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                  {figures.map((f) => (
+                    <Card key={f.id} className="group overflow-hidden transition hover:shadow-md">
+                      <Link href={`/figures/${f.id}`}>
+                        {f.thumb_url ? <img src={f.thumb_url} alt={f.name} className="aspect-[4/3] w-full bg-white object-contain" />
+                          : <div className="flex aspect-[4/3] items-center justify-center bg-muted text-muted-foreground"><Images className="h-7 w-7" /></div>}
+                      </Link>
+                      <CardContent className="p-3">
+                        <div className="flex items-start justify-between gap-2">
+                          <Link href={`/figures/${f.id}`} className="min-w-0"><p className="truncate text-sm font-medium">{f.name}</p><p className="text-xs text-muted-foreground">{f.plot_type} · {f.style_preset}</p></Link>
+                          <Button variant="ghost" size="sm" onClick={() => { if (confirm(`Delete ${f.name}?`)) delFig.mutate(f.id); }}><Trash2 className="h-4 w-4 text-muted-foreground" /></Button>
+                        </div>
+                      </CardContent>
+                    </Card>
+                  ))}
+                </div>
+              )}
+          </TabsContent>
+        </Tabs>
+      </main>
+    </div>
+  );
+}
