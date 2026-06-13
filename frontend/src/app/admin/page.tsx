@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import {
@@ -16,6 +16,14 @@ import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Loader2, Shield, UserPlus, KeyRound, Trash2, Cpu } from 'lucide-react';
 
+const numberFmt = new Intl.NumberFormat('en-US');
+const usdFmt = new Intl.NumberFormat('en-US', {
+  style: 'currency',
+  currency: 'USD',
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 4,
+});
+
 export default function AdminPage() {
   const qc = useQueryClient();
   const { user } = useAuthContext();
@@ -30,17 +38,17 @@ export default function AdminPage() {
 
   // ── AI provider config ──
   const { data: aiCfg } = useQuery({ queryKey: ['ai-config'], queryFn: getAiConfig });
-  const [provider, setProvider] = useState('claude');
+  const [provider, setProvider] = useState('');
   const [claudeModel, setClaudeModel] = useState('');
   const [geminiModel, setGeminiModel] = useState('');
   const [anthropicKey, setAnthropicKey] = useState('');
   const [geminiKey, setGeminiKey] = useState('');
-  useEffect(() => {
-    if (aiCfg) { setProvider(aiCfg.provider); setClaudeModel(aiCfg.claude_model); setGeminiModel(aiCfg.gemini_model); }
-  }, [aiCfg]);
+  const activeProvider = provider || aiCfg?.provider || 'claude';
+  const activeClaudeModel = claudeModel || aiCfg?.claude_model || '';
+  const activeGeminiModel = geminiModel || aiCfg?.gemini_model || '';
   const saveAi = useMutation({
     mutationFn: () => updateAiConfig({
-      provider, claude_model: claudeModel, gemini_model: geminiModel,
+      provider: activeProvider, claude_model: activeClaudeModel, gemini_model: activeGeminiModel,
       ...(anthropicKey ? { anthropic_api_key: anthropicKey } : {}),
       ...(geminiKey ? { gemini_api_key: geminiKey } : {}),
     }),
@@ -81,19 +89,19 @@ export default function AdminPage() {
             <div className="grid items-end gap-3 md:grid-cols-4">
               <div className="space-y-1">
                 <Label>Provider</Label>
-                <select className="w-full rounded-md border px-3 py-2 text-sm" value={provider} onChange={(e) => setProvider(e.target.value)}>
+                <select className="w-full rounded-md border px-3 py-2 text-sm" value={activeProvider} onChange={(e) => setProvider(e.target.value)}>
                   <option value="claude">Claude (Anthropic)</option>
                   <option value="gemini">Gemini (Google)</option>
                 </select>
               </div>
-              {provider === 'claude' ? (
+              {activeProvider === 'claude' ? (
                 <>
-                  <div className="space-y-1"><Label>Claude model</Label><Input value={claudeModel} onChange={(e) => setClaudeModel(e.target.value)} placeholder="claude-sonnet-4-6" /></div>
+                  <div className="space-y-1"><Label>Claude model</Label><Input value={activeClaudeModel} onChange={(e) => setClaudeModel(e.target.value)} placeholder="claude-sonnet-4-6" /></div>
                   <div className="space-y-1"><Label>Anthropic API key {aiCfg?.has_anthropic_key && <span className="text-xs text-green-600">(set)</span>}</Label><Input type="password" value={anthropicKey} onChange={(e) => setAnthropicKey(e.target.value)} placeholder={aiCfg?.has_anthropic_key ? '•••••• (leave blank to keep)' : 'sk-ant-...'} /></div>
                 </>
               ) : (
                 <>
-                  <div className="space-y-1"><Label>Gemini model</Label><Input value={geminiModel} onChange={(e) => setGeminiModel(e.target.value)} placeholder="gemini-3.5-flash" /></div>
+                  <div className="space-y-1"><Label>Gemini model</Label><Input value={activeGeminiModel} onChange={(e) => setGeminiModel(e.target.value)} placeholder="gemini-3.5-flash" /></div>
                   <div className="space-y-1"><Label>Gemini API key {aiCfg?.has_gemini_key && <span className="text-xs text-green-600">(set)</span>}</Label><Input type="password" value={geminiKey} onChange={(e) => setGeminiKey(e.target.value)} placeholder={aiCfg?.has_gemini_key ? '•••••• (leave blank to keep)' : 'AIza...'} /></div>
                 </>
               )}
@@ -129,7 +137,8 @@ export default function AdminPage() {
                 <table className="w-full text-sm">
                   <thead><tr className="border-b text-left text-muted-foreground">
                     <th className="px-2 py-2">Email</th><th className="px-2 py-2">Name</th><th className="px-2 py-2">Role</th>
-                    <th className="px-2 py-2">Approval</th><th className="px-2 py-2">Active</th><th className="px-2 py-2">Data</th><th className="px-2 py-2">Figs</th><th className="px-2 py-2">Actions</th>
+                    <th className="px-2 py-2">Approval</th><th className="px-2 py-2">Active</th><th className="px-2 py-2">Data</th><th className="px-2 py-2">Figs</th>
+                    <th className="px-2 py-2">AI Calls</th><th className="px-2 py-2">Tokens</th><th className="px-2 py-2">Est. Cost</th><th className="px-2 py-2">Actions</th>
                   </tr></thead>
                   <tbody>
                     {users?.map((u) => (
@@ -156,6 +165,11 @@ export default function AdminPage() {
                         </td>
                         <td className="px-2 py-2 text-muted-foreground">{u.dataset_count}</td>
                         <td className="px-2 py-2 text-muted-foreground">{u.figure_count}</td>
+                        <td className="px-2 py-2 text-muted-foreground">{numberFmt.format(u.ai_request_count)}</td>
+                        <td className="px-2 py-2 text-muted-foreground" title={`${numberFmt.format(u.ai_input_tokens)} input / ${numberFmt.format(u.ai_output_tokens)} output`}>
+                          {numberFmt.format(u.ai_total_tokens)}
+                        </td>
+                        <td className="px-2 py-2 text-muted-foreground">{usdFmt.format(u.ai_estimated_cost_usd)}</td>
                         <td className="px-2 py-2">
                           <div className="flex gap-1">
                             <Button variant="ghost" size="sm" title="Reset password"

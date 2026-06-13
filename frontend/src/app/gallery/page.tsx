@@ -19,7 +19,7 @@ const DOMAIN_ORDER = [
 function FigureCard({ f }: { f: PublicFigure }) {
   return (
     <div className="overflow-hidden rounded-xl border bg-white shadow-sm transition hover:shadow-md">
-      <img src={f.thumb_url} alt={f.name} className="aspect-[4/3] w-full object-contain" />
+      <img src={f.thumb_url} alt={f.name} loading="lazy" decoding="async" className="aspect-[4/3] w-full object-contain" />
       <div className="flex items-center justify-between border-t px-3 py-2">
         <span className="truncate text-sm font-medium">{f.name}</span>
         <Badge variant="secondary" className="capitalize">{f.plot_type.replace(/_/g, ' ')}</Badge>

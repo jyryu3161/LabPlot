@@ -1,0 +1,14 @@
+.git
+.bkit
+frontend/.next
+frontend/node_modules
+frontend/npm-debug.log*
+backend/**/__pycache__
+backend/**/*.pyc
+backend/static/uploads
+backend/static/figures
+scripts/*.log
+*.log
+.env
+.env.*
+!.env.example

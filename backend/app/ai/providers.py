@@ -20,6 +20,13 @@ _GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:g
 def run_structured(provider: str, model: str, key: str | None, system: str,
                    content: list[dict], schema: dict, tool_name: str = "result",
                    max_tokens: int = 1600) -> dict:
+    payload, _ = run_structured_with_usage(provider, model, key, system, content, schema, tool_name, max_tokens)
+    return payload
+
+
+def run_structured_with_usage(provider: str, model: str, key: str | None, system: str,
+                              content: list[dict], schema: dict, tool_name: str = "result",
+                              max_tokens: int = 1600) -> tuple[dict, dict]:
     if not key:
         raise BadRequestError(f"No API key configured for provider '{provider}'", error_code="AI_NO_KEY")
     if provider == "gemini":
@@ -28,7 +35,7 @@ def run_structured(provider: str, model: str, key: str | None, system: str,
 
 
 # ----------------------------------------------------------------- Claude
-def _claude(model, key, system, content, schema, tool_name, max_tokens) -> dict:
+def _claude(model, key, system, content, schema, tool_name, max_tokens) -> tuple[dict, dict]:
     try:
         import anthropic
     except ImportError:
@@ -53,10 +60,35 @@ def _claude(model, key, system, content, schema, tool_name, max_tokens) -> dict:
         )
     except Exception as e:
         raise BadRequestError(f"Claude API error: {e}", error_code="AI_API_ERROR")
+    usage = _claude_usage(resp)
     for block in resp.content:
         if getattr(block, "type", None) == "tool_use":
-            return block.input
+            return block.input, usage
     raise BadRequestError("Claude returned no structured output", error_code="AI_BAD_RESPONSE")
+
+
+def _as_int(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _claude_usage(resp) -> dict:
+    raw = getattr(resp, "usage", None)
+    if not raw:
+        return {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    input_tokens = (
+        _as_int(getattr(raw, "input_tokens", 0))
+        + _as_int(getattr(raw, "cache_creation_input_tokens", 0))
+        + _as_int(getattr(raw, "cache_read_input_tokens", 0))
+    )
+    output_tokens = _as_int(getattr(raw, "output_tokens", 0))
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+    }
 
 
 # ----------------------------------------------------------------- Gemini
@@ -92,7 +124,7 @@ def _to_gemini_schema(js: dict) -> dict:
     raise _UnsupportedSchema()
 
 
-def _gemini(model, key, system, content, schema, max_tokens) -> dict:
+def _gemini(model, key, system, content, schema, max_tokens) -> tuple[dict, dict]:
     parts = []
     for c in content:
         if c["kind"] == "text":
@@ -131,7 +163,19 @@ def _gemini(model, key, system, content, schema, max_tokens) -> dict:
     except (KeyError, IndexError):
         raise BadRequestError("Gemini returned no content", error_code="AI_BAD_RESPONSE")
 
-    return _parse_json(text)
+    return _parse_json(text), _gemini_usage(payload)
+
+
+def _gemini_usage(payload: dict) -> dict:
+    raw = payload.get("usageMetadata") or {}
+    input_tokens = _as_int(raw.get("promptTokenCount"))
+    output_tokens = _as_int(raw.get("candidatesTokenCount"))
+    total_tokens = _as_int(raw.get("totalTokenCount")) or (input_tokens + output_tokens)
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+    }
 
 
 def _parse_json(text: str) -> dict:

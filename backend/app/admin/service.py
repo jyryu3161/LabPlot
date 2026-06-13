@@ -3,6 +3,7 @@ import uuid
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.ai.models import AIUsage
 from app.auth.models import User
 from app.auth.service import _hash_password
 from app.common.exceptions import BadRequestError, NotFoundError
@@ -20,6 +21,29 @@ def list_users(db: Session) -> list[dict]:
     fig_counts = dict(
         db.query(Figure.owner_id, func.count(Figure.id)).group_by(Figure.owner_id).all()
     )
+    usage_rows = (
+        db.query(
+            AIUsage.user_id,
+            func.count(AIUsage.id),
+            func.coalesce(func.sum(AIUsage.input_tokens), 0),
+            func.coalesce(func.sum(AIUsage.output_tokens), 0),
+            func.coalesce(func.sum(AIUsage.total_tokens), 0),
+            func.coalesce(func.sum(AIUsage.estimated_cost_usd), 0.0),
+        )
+        .filter(AIUsage.user_id.isnot(None))
+        .group_by(AIUsage.user_id)
+        .all()
+    )
+    usage = {
+        user_id: {
+            "ai_request_count": int(request_count or 0),
+            "ai_input_tokens": int(input_tokens or 0),
+            "ai_output_tokens": int(output_tokens or 0),
+            "ai_total_tokens": int(total_tokens or 0),
+            "ai_estimated_cost_usd": float(estimated_cost or 0.0),
+        }
+        for user_id, request_count, input_tokens, output_tokens, total_tokens, estimated_cost in usage_rows
+    }
     return [
         {
             "id": u.id,
@@ -31,6 +55,13 @@ def list_users(db: Session) -> list[dict]:
             "created_at": u.created_at,
             "dataset_count": ds_counts.get(u.id, 0),
             "figure_count": fig_counts.get(u.id, 0),
+            **usage.get(u.id, {
+                "ai_request_count": 0,
+                "ai_input_tokens": 0,
+                "ai_output_tokens": 0,
+                "ai_total_tokens": 0,
+                "ai_estimated_cost_usd": 0.0,
+            }),
         }
         for u in users
     ]

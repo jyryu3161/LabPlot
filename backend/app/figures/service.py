@@ -10,10 +10,13 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
 from app.ai import client as ai_client
+from app.auth.models import User
 from app.common.exceptions import BadRequestError, NotFoundError
 from app.config import settings
+from app.datasets.models import Dataset
 from app.datasets import service as ds_service
 from app.figures.models import Figure, FigureVersion, Improvement, Review
+from app.projects.models import Project
 from app.r_engine import renderer
 from app.r_engine.presets import PRESETS
 from app.r_engine.templates import PLOT_TYPES, PLOT_TYPE_KEYS
@@ -134,44 +137,40 @@ def get_version(fig: Figure, version_id: uuid.UUID) -> FigureVersion:
 
 
 def list_figures(db: Session, owner_id: uuid.UUID, project_id: uuid.UUID | None = None) -> list[dict]:
-    q = (db.query(Figure).options(joinedload(Figure.versions)).filter(Figure.owner_id == owner_id))
+    q = (
+        db.query(Figure, FigureVersion.png_path)
+        .outerjoin(FigureVersion, Figure.current_version_id == FigureVersion.id)
+        .filter(Figure.owner_id == owner_id)
+    )
     if project_id is not None:
         q = q.filter(Figure.project_id == project_id)
-    figs = q.order_by(Figure.updated_at.desc()).all()
+    rows = q.order_by(Figure.updated_at.desc()).all()
     out = []
-    for f in figs:
-        thumb = None
-        for v in f.versions:
-            if v.id == f.current_version_id:
-                thumb = _url(v.png_path)
+    for f, png_path in rows:
         out.append({
             "id": f.id, "name": f.name, "plot_type": f.plot_type, "style_preset": f.style_preset,
             "status": f.status, "dataset_id": f.dataset_id, "project_id": f.project_id,
-            "created_at": f.created_at, "updated_at": f.updated_at, "thumb_url": thumb,
+            "created_at": f.created_at, "updated_at": f.updated_at, "thumb_url": _url(png_path),
         })
     return out
 
 
 def list_gallery_figures(db: Session, limit: int = 200) -> list[dict]:
-    from app.projects.models import Project
-
     limit = max(1, min(limit, 500))
-    figs = (
-        db.query(Figure)
-        .options(joinedload(Figure.versions), joinedload(Figure.dataset), joinedload(Figure.owner))
+    rows = (
+        db.query(Figure, FigureVersion, Dataset.name, Project.name, User.display_name, User.email)
+        .join(FigureVersion, Figure.current_version_id == FigureVersion.id)
+        .outerjoin(Dataset, Figure.dataset_id == Dataset.id)
+        .outerjoin(Project, Figure.project_id == Project.id)
+        .outerjoin(User, Figure.owner_id == User.id)
         .filter(Figure.current_version_id.isnot(None), Figure.status == "ready")
         .order_by(Figure.updated_at.desc())
         .limit(limit)
         .all()
     )
-    project_ids = {f.project_id for f in figs if f.project_id}
-    project_names = {}
-    if project_ids:
-        project_names = dict(db.query(Project.id, Project.name).filter(Project.id.in_(project_ids)).all())
 
     out = []
-    for f in figs:
-        current = next((v for v in f.versions if v.id == f.current_version_id), None)
+    for f, current, dataset_name, project_name, owner_name, owner_email in rows:
         out.append({
             "id": f.id,
             "name": f.name,
@@ -179,18 +178,18 @@ def list_gallery_figures(db: Session, limit: int = 200) -> list[dict]:
             "style_preset": f.style_preset,
             "status": f.status,
             "dataset_id": f.dataset_id,
-            "dataset_name": f.dataset.name if f.dataset else None,
+            "dataset_name": dataset_name,
             "project_id": f.project_id,
-            "project_name": project_names.get(f.project_id),
-            "owner_name": f.owner.display_name if f.owner else None,
-            "owner_email": f.owner.email if f.owner else None,
+            "project_name": project_name,
+            "owner_name": owner_name,
+            "owner_email": owner_email,
             "current_version_id": f.current_version_id,
             "created_at": f.created_at,
             "updated_at": f.updated_at,
-            "thumb_url": _url(current.png_path) if current else None,
+            "thumb_url": _url(current.png_path),
             "r_url": (
                 f"/api/figures/gallery/{f.id}/versions/{current.id}/export?format=r"
-                if current and current.r_path else None
+                if current.r_path else None
             ),
         })
     return out
@@ -230,8 +229,10 @@ def generate_legend(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, ow
     pc = _project_context(db, fig.project_id)
     if ds.description and ds.description.strip():
         pc = ((pc + " ") if pc else "") + "Dataset: " + ds.description.strip()
-    legend = ai_client.generate_legend(db, fig.plot_type, v.mapping or {}, v.options or {},
-                                       dataset_summary, fig.description, style, project_context=pc)
+    legend = ai_client.generate_legend(
+        db, fig.plot_type, v.mapping or {}, v.options or {},
+        dataset_summary, fig.description, style, project_context=pc, user_id=owner_id
+    )
     fig.legend = legend
     db.commit()
     return {"legend": legend}
@@ -325,8 +326,10 @@ def review_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, own
     v = get_version(fig, version_id)
     if not v.png_path or not os.path.exists(v.png_path):
         raise BadRequestError("Rendered image not available for review", error_code="NO_IMAGE")
-    result = ai_client.review_figure(db, v.png_path, fig.plot_type, v.mapping or {}, v.options or {},
-                                     project_context=_project_context(db, fig.project_id))
+    result = ai_client.review_figure(
+        db, v.png_path, fig.plot_type, v.mapping or {}, v.options or {},
+        project_context=_project_context(db, fig.project_id), user_id=owner_id
+    )
     rev = Review(
         figure_version_id=version_id,
         publication_score=result.get("publication_score"),
@@ -349,7 +352,7 @@ def improve_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, ow
     suggestions = ai_client.improve_figure(
         db, fig.plot_type, v.mapping or {}, v.options or {}, fig.style_preset,
         last_review.payload if last_review else None, [available],
-        project_context=_project_context(db, fig.project_id),
+        project_context=_project_context(db, fig.project_id), user_id=owner_id,
     )
     rows = []
     for s in suggestions:
@@ -498,7 +501,7 @@ def ai_recommend(db: Session, dataset_id: uuid.UUID, owner_id: uuid.UUID) -> lis
     ctx = _project_context(db, ds.project_id)
     if ds.description and ds.description.strip():
         ctx = ((ctx + " ") if ctx else "") + "Dataset: " + ds.description.strip()
-    return ai_client.recommend_charts(db, ds.column_profile, project_context=ctx)
+    return ai_client.recommend_charts(db, ds.column_profile, project_context=ctx, user_id=owner_id)
 
 
 # ---------------------------------------------------------------- export

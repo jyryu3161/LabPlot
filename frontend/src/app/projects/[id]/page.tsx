@@ -103,9 +103,9 @@ export default function ProjectWorkspace({ params }: { params: Promise<{ id: str
 
           <TabsContent value="datasets" className="space-y-6">
             <div className="space-y-1">
-              <Label className="text-xs text-muted-foreground">데이터셋 설명 (선택) — 업로드 전에 입력하면 AI 추천·리뷰·legend에 활용됩니다</Label>
+              <Label className="text-xs text-muted-foreground">Dataset description (optional). Add it before upload so AI recommendations, reviews, and legends can use the context.</Label>
               <Textarea value={uploadDesc} onChange={(e) => setUploadDesc(e.target.value)} rows={2}
-                placeholder="예: 종양 세포주에서 약물 A/B/C 처리 후 표적 유전자 발현 및 생존율 측정" />
+                placeholder="Example: target gene expression and viability measured after drug A/B/C treatment in tumor cell lines" />
               <Button size="sm" variant="outline" onClick={() => enhanceUpload.mutate()} disabled={enhanceUpload.isPending}>
                 {enhanceUpload.isPending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Sparkles className="mr-1 h-4 w-4" />} Enhance with AI
               </Button>
@@ -150,7 +150,7 @@ export default function ProjectWorkspace({ params }: { params: Promise<{ id: str
                   {figures.map((f) => (
                     <Card key={f.id} className="group overflow-hidden transition hover:shadow-md">
                       <Link href={`/figures/${f.id}`}>
-                        {f.thumb_url ? <img src={f.thumb_url} alt={f.name} className="aspect-[4/3] w-full bg-white object-contain" />
+                        {f.thumb_url ? <img src={f.thumb_url} alt={f.name} loading="lazy" decoding="async" className="aspect-[4/3] w-full bg-white object-contain" />
                           : <div className="flex aspect-[4/3] items-center justify-center bg-muted text-muted-foreground"><Images className="h-7 w-7" /></div>}
                       </Link>
                       <CardContent className="p-3">

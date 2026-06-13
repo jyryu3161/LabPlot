@@ -5,13 +5,16 @@ from __future__ import annotations
 import base64
 import json
 import os
+import uuid
 
 from sqlalchemy.orm import Session
 
 from app.ai import providers
 from app.ai.config_service import active_model_and_key, get_config
+from app.ai.models import AIUsage
 from app.ai.prompts import IMPROVE_SYSTEM, LEGEND_SYSTEM, RECOMMEND_SYSTEM, REVIEW_SYSTEM
 from app.common.exceptions import BadRequestError
+from app.database import SessionLocal
 
 _PLOT_TYPES = ["box", "violin", "scatter", "bar", "line", "heatmap", "volcano", "pca", "kaplan_meier"]
 _MAPPING_PATCH_SCHEMA = {
@@ -44,6 +47,70 @@ _OPTIONS_PATCH_SCHEMA = {
 }
 
 
+def _rates_per_million(provider: str, model: str) -> tuple[float, float] | None:
+    name = (model or "").lower()
+    if provider == "claude":
+        if "sonnet" in name:
+            return 3.00, 15.00
+        if "haiku" in name:
+            return 1.00, 5.00
+        if "opus" in name:
+            return 15.00, 75.00
+    if provider == "gemini":
+        if "flash-lite" in name or "flash_lite" in name:
+            return 0.10, 0.40
+        if "flash" in name:
+            return 0.30, 2.50
+        if "pro" in name:
+            return 1.25, 10.00
+    return None
+
+
+def _estimate_cost_usd(provider: str, model: str, usage: dict) -> float:
+    rates = _rates_per_million(provider, model)
+    if not rates:
+        return 0.0
+    input_rate, output_rate = rates
+    input_tokens = int(usage.get("input_tokens") or 0)
+    output_tokens = int(usage.get("output_tokens") or 0)
+    return round(((input_tokens / 1_000_000) * input_rate) + ((output_tokens / 1_000_000) * output_rate), 6)
+
+
+def _record_usage(user_id: uuid.UUID | None, provider: str, model: str, feature: str, usage: dict) -> None:
+    if not user_id:
+        return
+    input_tokens = int(usage.get("input_tokens") or 0)
+    output_tokens = int(usage.get("output_tokens") or 0)
+    total_tokens = int(usage.get("total_tokens") or (input_tokens + output_tokens))
+    row = AIUsage(
+        user_id=user_id,
+        provider=provider,
+        model=model,
+        feature=feature,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens,
+        estimated_cost_usd=_estimate_cost_usd(provider, model, usage),
+    )
+    try:
+        with SessionLocal() as usage_db:
+            usage_db.add(row)
+            usage_db.commit()
+    except Exception:
+        # Usage accounting should never block the user-facing AI workflow.
+        return
+
+
+def _run_logged(db: Session, user_id: uuid.UUID | None, feature: str, system: str, content: list[dict],
+                schema: dict, tool_name: str, max_tokens: int) -> dict:
+    cfg, model, key = _ready(db)
+    payload, usage = providers.run_structured_with_usage(
+        cfg.provider, model, key, system, content, schema, tool_name, max_tokens
+    )
+    _record_usage(user_id, cfg.provider, model, feature, usage)
+    return payload
+
+
 def _ctx_block(project_context: str | None) -> list[dict]:
     if project_context and project_context.strip():
         return [{"kind": "text", "text": "PROJECT RESEARCH CONTEXT (use to interpret variables; do NOT invent findings):\n" + project_context.strip()}]
@@ -66,8 +133,11 @@ def active_provider_label(db: Session) -> str:
 
 
 # ----------------------------------------------------------------- recommend
-def recommend_charts(db: Session, column_profile: list[dict], project_context: str | None = None) -> list[dict]:
-    cfg, model, key = _ready(db)
+def recommend_charts(db: Session, column_profile: list[dict], project_context: str | None = None,
+                     user_id: uuid.UUID | None = None) -> list[dict]:
+    cfg = get_config(db)
+    if not cfg.enabled:
+        raise BadRequestError("AI features are disabled", error_code="AI_DISABLED")
     cols = [{"name": c["name"], "dtype": c["dtype"], "role": c["role"],
              "n_unique": c["n_unique"], "sample": c.get("sample_values", [])[:4]} for c in column_profile]
     system = RECOMMEND_SYSTEM
@@ -92,7 +162,7 @@ def recommend_charts(db: Session, column_profile: list[dict], project_context: s
         "required": ["recommendations"],
     }
     content = _ctx_block(project_context) + [{"kind": "text", "text": "Column profile:\n" + json.dumps(cols, ensure_ascii=False)}]
-    out = providers.run_structured(cfg.provider, model, key, system, content, schema, "chart_recommendations", 2000)
+    out = _run_logged(db, user_id, "chart_recommendations", system, content, schema, "chart_recommendations", 2000)
     recs = out.get("recommendations", [])
     for r in recs:
         r["source"] = cfg.provider
@@ -102,8 +172,8 @@ def recommend_charts(db: Session, column_profile: list[dict], project_context: s
 
 
 # ----------------------------------------------------------------- review
-def review_figure(db: Session, png_path: str, plot_type: str, mapping: dict, options: dict, project_context: str | None = None) -> dict:
-    cfg, model, key = _ready(db)
+def review_figure(db: Session, png_path: str, plot_type: str, mapping: dict, options: dict,
+                  project_context: str | None = None, user_id: uuid.UUID | None = None) -> dict:
     if not os.path.exists(png_path):
         raise BadRequestError("Rendered image not found for review", error_code="NO_IMAGE")
     with open(png_path, "rb") as f:
@@ -136,7 +206,7 @@ def review_figure(db: Session, png_path: str, plot_type: str, mapping: dict, opt
         {"kind": "image", "mime": "image/png", "b64": b64},
     ]
     return _normalize_review_payload(
-        providers.run_structured(cfg.provider, model, key, system, content, schema, "figure_review", 2500)
+        _run_logged(db, user_id, "figure_review", system, content, schema, "figure_review", 2500)
     )
 
 
@@ -172,8 +242,8 @@ def _normalize_review_payload(payload: dict) -> dict:
 
 # ----------------------------------------------------------------- improve
 def improve_figure(db: Session, plot_type: str, mapping: dict, options: dict, style_preset: str,
-                   review: dict | None, available_options: list[dict], project_context: str | None = None) -> list[dict]:
-    cfg, model, key = _ready(db)
+                   review: dict | None, available_options: list[dict], project_context: str | None = None,
+                   user_id: uuid.UUID | None = None) -> list[dict]:
     system = IMPROVE_SYSTEM
     schema = {
         "type": "object",
@@ -193,7 +263,7 @@ def improve_figure(db: Session, plot_type: str, mapping: dict, options: dict, st
            "prior_review": review or {}}
     content = _ctx_block(project_context) + [{"kind": "text", "text": "Context:\n" + json.dumps(ctx, ensure_ascii=False)}]
     try:
-        out = providers.run_structured(cfg.provider, model, key, system, content, schema, "figure_improvements", 2000)
+        out = _run_logged(db, user_id, "figure_improvements", system, content, schema, "figure_improvements", 2000)
     except BadRequestError as e:
         if getattr(e, "error_code", None) == "AI_BAD_RESPONSE":
             return _fallback_improvements(options, style_preset)
@@ -219,14 +289,13 @@ def _fallback_improvements(options: dict, style_preset: str) -> list[dict]:
 # ----------------------------------------------------------------- figure legend
 def generate_legend(db: Session, plot_type: str, mapping: dict, options: dict,
                     dataset_summary: dict, author_notes: str | None, style: str = "nature",
-                    project_context: str | None = None) -> str:
-    cfg, model, key = _ready(db)
+                    project_context: str | None = None, user_id: uuid.UUID | None = None) -> str:
     system = LEGEND_SYSTEM
     schema = {"type": "object", "properties": {"legend": {"type": "string"}}, "required": ["legend"]}
     ctx = {"plot_type": plot_type, "mapping": mapping, "options": options,
            "dataset_summary": dataset_summary, "author_notes": author_notes or "", "journal_style": style}
     content = _ctx_block(project_context) + [{"kind": "text", "text": "Context:\n" + json.dumps(ctx, ensure_ascii=False)}]
-    out = providers.run_structured(cfg.provider, model, key, system, content, schema, "figure_legend", 900)
+    out = _run_logged(db, user_id, "figure_legend", system, content, schema, "figure_legend", 900)
     return out.get("legend", "")
 
 
@@ -240,8 +309,8 @@ _ENHANCE_TARGET = {
 }
 
 
-def enhance_prompt(db: Session, draft: str, kind: str = "dataset_description", context: str | None = None) -> str:
-    cfg, model, key = _ready(db)
+def enhance_prompt(db: Session, draft: str, kind: str = "dataset_description", context: str | None = None,
+                   user_id: uuid.UUID | None = None) -> str:
     target = _ENHANCE_TARGET.get(kind, "a prompt")
     system = (
         f"You are a writing assistant. Improve the user's rough draft into a clear, specific, well-phrased {target}. "
@@ -252,5 +321,5 @@ def enhance_prompt(db: Session, draft: str, kind: str = "dataset_description", c
     schema = {"type": "object", "properties": {"enhanced": {"type": "string"}}, "required": ["enhanced"]}
     draft_text = draft.strip() if draft and draft.strip() else "(empty — propose a reasonable starting point from the context)"
     content = _ctx_block(context) + [{"kind": "text", "text": "Draft to improve:\n" + draft_text}]
-    out = providers.run_structured(cfg.provider, model, key, system, content, schema, "enhanced_prompt", 700)
+    out = _run_logged(db, user_id, "enhanced_prompt", system, content, schema, "enhanced_prompt", 700)
     return out.get("enhanced", "")

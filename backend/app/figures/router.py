@@ -46,9 +46,9 @@ def palettes(_: User = Depends(get_current_user)):
 
 
 @meta_router.post("/ai/enhance-prompt", response_model=EnhancePromptResponse)
-def enhance_prompt(data: EnhancePromptRequest, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+def enhance_prompt(data: EnhancePromptRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     from app.ai import client as ai_client
-    return {"enhanced": ai_client.enhance_prompt(db, data.draft, data.kind, data.context)}
+    return {"enhanced": ai_client.enhance_prompt(db, data.draft, data.kind, data.context, user_id=current_user.id)}
 
 
 @meta_router.post("/datasets/{dataset_id}/recommend", response_model=list[RecommendationItem])

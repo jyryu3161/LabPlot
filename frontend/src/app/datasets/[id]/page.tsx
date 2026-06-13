@@ -1,6 +1,6 @@
 'use client';
 
-import { use, useEffect, useMemo, useState } from 'react';
+import { use, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
@@ -35,7 +35,11 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
   const { data: ruleSug } = useQuery({ queryKey: ['suggest', id], queryFn: () => getChartSuggestions(id) });
   const { data: plotTypesData } = useQuery({ queryKey: ['plot-types'], queryFn: getPlotTypes });
   const { data: stylesData } = useQuery({ queryKey: ['styles'], queryFn: getStyles });
-  const { data: figures } = useQuery({ queryKey: ['figures'], queryFn: () => listFigures() });
+  const { data: figures } = useQuery({
+    queryKey: ['figures', ds?.project_id ?? 'all'],
+    queryFn: () => listFigures(ds?.project_id ?? undefined),
+    enabled: !!ds,
+  });
 
   const [aiSug, setAiSug] = useState<ChartSuggestion[] | null>(null);
   const aiRecommend = useMutation({
@@ -45,16 +49,16 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
   });
 
   const qc = useQueryClient();
-  const [dsDesc, setDsDesc] = useState('');
-  useEffect(() => { if (ds) setDsDesc((d) => (d || ds.description || '')); }, [ds]);
+  const [dsDesc, setDsDesc] = useState<string | null>(null);
+  const dsDescValue = dsDesc ?? ds?.description ?? '';
   const saveDsDesc = useMutation({
-    mutationFn: () => updateDataset(id, { description: dsDesc }),
-    onSuccess: () => { toast.success('Description saved'); qc.invalidateQueries({ queryKey: ['dataset', id] }); },
+    mutationFn: () => updateDataset(id, { description: dsDescValue }),
+    onSuccess: () => { toast.success('Description saved'); setDsDesc(null); qc.invalidateQueries({ queryKey: ['dataset', id] }); },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Save failed'),
   });
 
-  const plotTypes = plotTypesData?.plot_types ?? [];
-  const styles = stylesData?.styles ?? [];
+  const plotTypes = useMemo(() => plotTypesData?.plot_types ?? [], [plotTypesData?.plot_types]);
+  const styles = useMemo(() => stylesData?.styles ?? [], [stylesData?.styles]);
   const columns = ds?.column_profile ?? [];
 
   // ── builder state ──
@@ -162,8 +166,8 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
             <Card>
               <CardHeader className="pb-2"><CardTitle className="text-base">Dataset description</CardTitle></CardHeader>
               <CardContent className="space-y-2">
-                <Textarea value={dsDesc} onChange={(e) => setDsDesc(e.target.value)} rows={2}
-                  placeholder="이 데이터가 무엇인지 설명하세요 (AI 추천·리뷰·legend에 활용됩니다)." />
+                <Textarea value={dsDescValue} onChange={(e) => setDsDesc(e.target.value)} rows={2}
+                  placeholder="Describe what this dataset contains. AI recommendations, reviews, and legends use this context." />
                 <Button size="sm" variant="secondary" onClick={() => saveDsDesc.mutate()} disabled={saveDsDesc.isPending}>Save description</Button>
               </CardContent>
             </Card>
@@ -330,7 +334,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                 {datasetFigures.map((f) => (
                   <Link key={f.id} href={`/figures/${f.id}`}>
                     <Card className="overflow-hidden transition hover:shadow-md">
-                      {f.thumb_url && <img src={f.thumb_url} alt={f.name} className="aspect-[4/3] w-full bg-white object-contain" />}
+                      {f.thumb_url && <img src={f.thumb_url} alt={f.name} loading="lazy" decoding="async" className="aspect-[4/3] w-full bg-white object-contain" />}
                       <CardContent className="p-3">
                         <p className="truncate text-sm font-medium">{f.name}</p>
                         <p className="text-xs text-muted-foreground">{f.plot_type} · {f.style_preset}</p>

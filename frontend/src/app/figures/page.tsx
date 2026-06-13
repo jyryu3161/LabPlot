@@ -36,7 +36,7 @@ export default function FiguresPage() {
               <Card key={f.id} className="group overflow-hidden transition hover:shadow-md">
                 <Link href={`/figures/${f.id}`}>
                   {f.thumb_url
-                    ? <img src={f.thumb_url} alt={f.name} className="aspect-[4/3] w-full bg-white object-contain" />
+                    ? <img src={f.thumb_url} alt={f.name} loading="lazy" decoding="async" className="aspect-[4/3] w-full bg-white object-contain" />
                     : <div className="flex aspect-[4/3] items-center justify-center bg-muted text-muted-foreground"><Images className="h-8 w-8" /></div>}
                 </Link>
                 <CardContent className="p-3">

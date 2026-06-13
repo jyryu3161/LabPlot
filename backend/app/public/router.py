@@ -18,20 +18,26 @@ router = APIRouter(prefix="/api/public", tags=["public"])
 
 @router.get("/gallery")
 def public_gallery(limit: int = 12, db: Session = Depends(get_db)):
+    limit = max(1, min(limit, 200))
     root = db.query(User).filter(User.email == settings.ROOT_EMAIL).first()
     if not root:
         return {"figures": []}
-    figs = (db.query(Figure)
-            .filter(Figure.owner_id == root.id, Figure.status == "ready")
-            .order_by(Figure.updated_at.desc())
-            .all())
+    rows = (
+        db.query(Figure, FigureVersion)
+        .join(FigureVersion, Figure.current_version_id == FigureVersion.id)
+        .filter(
+            Figure.owner_id == root.id,
+            Figure.status == "ready",
+            FigureVersion.png_path.isnot(None),
+        )
+        .order_by(Figure.updated_at.desc())
+        .limit(max(50, limit * 3))
+        .all()
+    )
     seen_types: set[str] = set()
     primary, extra = [], []
-    for f in figs:
-        v = db.query(FigureVersion).filter(FigureVersion.id == f.current_version_id).first()
-        thumb = _url(v.png_path) if v else None
-        if not thumb:
-            continue
+    for f, v in rows:
+        thumb = _url(v.png_path)
         dom = PLOT_DOMAINS.get(f.plot_type, "basic")
         item = {"name": f.name, "plot_type": f.plot_type, "style_preset": f.style_preset, "thumb_url": thumb,
                 "domain": dom, "domain_label": DOMAIN_LABELS.get(dom, dom)}

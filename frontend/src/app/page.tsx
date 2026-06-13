@@ -1,14 +1,11 @@
-'use client';
-
 import Link from 'next/link';
-import { useQuery } from '@tanstack/react-query';
-import { getPublicGallery } from '@/lib/api';
-import { useAuthContext } from '@/components/auth/AuthProvider';
 import { PublicHeader } from '@/components/layout/PublicHeader';
 import { Button } from '@/components/ui/button';
+import { LandingGalleryStrip } from '@/components/landing/LandingGalleryStrip';
+import { LandingPrimaryCta } from '@/components/landing/LandingPrimaryCta';
 import {
   Sparkles, BarChart3, Star, FileCode2, FolderKanban, FileText,
-  ArrowRight, Upload, Wand2, Palette, Download, ShieldCheck, Eye, RefreshCw, Award, Check,
+  Upload, Wand2, Palette, Download, ShieldCheck, Eye, RefreshCw, Award, Check,
 } from 'lucide-react';
 
 const FEATURES = [
@@ -36,14 +33,6 @@ const STEPS = [
 ];
 
 export default function LandingPage() {
-  const { isAuthenticated } = useAuthContext();
-  const { data } = useQuery({ queryKey: ['public-gallery', 8], queryFn: () => getPublicGallery(8) });
-  const figures = data?.figures ?? [];
-
-  const primaryCta = isAuthenticated
-    ? <Link href="/projects"><Button size="lg" className="h-11 px-6">Open the app <ArrowRight className="ml-2 h-4 w-4" /></Button></Link>
-    : <Link href="/register"><Button size="lg" className="h-11 px-6">Get started — it&apos;s free <ArrowRight className="ml-2 h-4 w-4" /></Button></Link>;
-
   return (
     <div className="min-h-screen bg-background">
       <PublicHeader />
@@ -64,7 +53,7 @@ export default function LandingPage() {
             quality, reviews it like a peer reviewer, and hands you the reproducible R code.
           </p>
           <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
-            {primaryCta}
+            <LandingPrimaryCta />
             <Link href="/gallery"><Button size="lg" variant="outline" className="h-11 px-6">Explore the gallery</Button></Link>
           </div>
           <div className="mt-8 flex flex-wrap items-center justify-center gap-x-6 gap-y-2 text-sm text-muted-foreground">
@@ -75,28 +64,7 @@ export default function LandingPage() {
         </div>
       </section>
 
-      {/* gallery strip */}
-      {figures.length > 0 && (
-        <section className="bg-muted/30 py-12">
-          <div className="mx-auto max-w-6xl px-4">
-            <div className="mb-5 flex items-end justify-between">
-              <div>
-                <h2 className="text-lg font-semibold">Made with LabPlot AI</h2>
-                <p className="text-sm text-muted-foreground">Real figures across every supported chart type.</p>
-              </div>
-              <Link href="/gallery" className="text-sm font-medium text-primary hover:underline">View full gallery →</Link>
-            </div>
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-              {figures.slice(0, 8).map((f, i) => (
-                <div key={i} className="group overflow-hidden rounded-xl border bg-white shadow-sm">
-                  <img src={f.thumb_url} alt={f.name} className="aspect-[4/3] w-full object-contain" />
-                  <div className="border-t px-2.5 py-1.5 text-xs capitalize text-muted-foreground">{f.plot_type.replace('_', ' ')}</div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </section>
-      )}
+      <LandingGalleryStrip />
 
       {/* features */}
       <section className="mx-auto max-w-6xl px-4 py-20">
@@ -171,7 +139,7 @@ export default function LandingPage() {
           <h2 className="text-3xl font-bold tracking-tight">Make your first figure today</h2>
           <p className="mt-3 text-muted-foreground">Create an account, upload your data, and get a publication-ready figure in under a minute.</p>
           <div className="mt-7 flex flex-wrap justify-center gap-3">
-            {primaryCta}
+            <LandingPrimaryCta />
             <Link href="/gallery"><Button size="lg" variant="outline" className="h-11 px-6">See examples</Button></Link>
           </div>
         </div>

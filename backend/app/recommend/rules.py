@@ -40,57 +40,57 @@ def suggest_charts(columns: list[dict]) -> list[dict]:
 
     if log2fc and pvalue:
         add("volcano", "Volcano plot", 0.97,
-            "log2 fold-change와 p-value 컬럼이 감지되어 차등발현(DEG) 시각화에 적합합니다.",
+            "Detected log2 fold-change and p-value columns, which are suitable for differential expression visualization.",
             {"log2fc": log2fc[0], "pvalue": pvalue[0], "gene_label": (gene[0] if gene else None)},
             {"log2fc": log2fc[:3], "pvalue": pvalue[:3]})
 
     if time and status:
         add("kaplan_meier", "Kaplan-Meier plot", 0.95,
-            "time과 status(event) 컬럼이 있어 생존 곡선 분석에 적합합니다.",
+            "Detected time and status/event columns, which are suitable for survival curve analysis.",
             {"time": time[0], "status": status[0], "group": (group[0] if group else None)},
             {"time": time[:3], "status": status[:3]})
 
     if group and numeric:
         add("box", "Box plot", 0.9,
-            f"범주형 '{group[0]}'에 따른 수치형 '{numeric[0]}' 분포 비교에 적합합니다.",
+            f"Compare the distribution of numeric column '{numeric[0]}' across categorical groups in '{group[0]}'.",
             {"x": group[0], "y": numeric[0], "color": group[0]},
             {"x": group[:3], "y": numeric[:5]})
         add("violin", "Violin plot", 0.84,
-            "그룹별 분포의 형태(밀도)까지 보고 싶을 때 적합합니다.",
+            "Use this when the distribution shape and density by group are important.",
             {"x": group[0], "y": numeric[0], "color": group[0]},
             {"x": group[:3], "y": numeric[:5]})
         add("bar", "Bar plot", 0.7,
-            "그룹별 요약값(평균/합)을 강조해 표시합니다.",
+            "Highlight grouped summary values such as mean or sum.",
             {"x": group[0], "y": numeric[0], "stat": "mean"},
             {"x": group[:3], "y": numeric[:5]})
 
     if len(numeric) >= 2:
         add("scatter", "Scatter plot", 0.88,
-            f"두 수치형 변수 '{numeric[0]}'와 '{numeric[1]}'의 관계를 봅니다.",
+            f"Inspect the relationship between numeric variables '{numeric[0]}' and '{numeric[1]}'.",
             {"x": numeric[0], "y": numeric[1], "color": (group[0] if group else None)},
             {"x": numeric[:5], "y": numeric[:5]})
 
     if time and numeric:
         add("line", "Line plot", 0.8,
-            f"'{time[0]}'에 따른 '{numeric[0]}' 변화(time-course)를 봅니다.",
+            f"Show how '{numeric[0]}' changes over '{time[0]}' in a time-course view.",
             {"x": time[0], "y": numeric[0], "group": (group[0] if group else None)},
             {"x": time[:3], "y": numeric[:5]})
 
     if len(matrix_cols) >= 2:
         add("heatmap", "Heatmap", 0.72,
-            f"{len(matrix_cols)}개 수치형 컬럼을 행렬로 보고 패턴을 색으로 표시합니다.",
+            f"Display {len(matrix_cols)} numeric columns as a matrix and encode patterns with color.",
             {"columns": matrix_cols[:50], "row_label": (gene[0] if gene else None)},
             {"columns": matrix_cols[:50]})
 
     if len(numeric) >= 3:
         add("pca", "PCA plot", 0.68,
-            f"{len(numeric)}개 수치형 변수로 주성분 분석(PCA)을 수행해 샘플 군집을 봅니다.",
+            f"Run PCA across {len(numeric)} numeric variables to inspect sample clustering.",
             {"columns": numeric[:50], "color": (group[0] if group else None)},
             {"columns": numeric[:50]})
 
     if group and not numeric:
         add("bar", "Bar plot (count)", 0.6,
-            "범주형 변수의 빈도(count)를 막대로 표시합니다.",
+            "Show category frequencies as bars.",
             {"x": group[0], "stat": "count"},
             {"x": group[:3]})
 

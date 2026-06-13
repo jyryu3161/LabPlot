@@ -25,15 +25,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const auth = useAuth();
   const pathname = usePathname();
   const router = useRouter();
+  const isPublic = PUBLIC_PATHS.includes(pathname);
 
   useEffect(() => {
     if (auth.loading) return;
-    const isPublic = PUBLIC_PATHS.includes(pathname);
     if (!auth.isAuthenticated && !isPublic) router.push('/login');
     if (auth.isAuthenticated && AUTH_ONLY_PATHS.includes(pathname)) router.push('/projects');
-  }, [auth.loading, auth.isAuthenticated, pathname, router]);
+  }, [auth.loading, auth.isAuthenticated, isPublic, pathname, router]);
 
-  if (auth.loading) {
+  if (auth.loading && !isPublic) {
     return (
       <div className="flex h-screen items-center justify-center">
         <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />

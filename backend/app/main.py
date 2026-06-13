@@ -99,6 +99,27 @@ _MIGRATIONS = [
     "ALTER TABLE figures ADD COLUMN IF NOT EXISTS project_id UUID",
     "ALTER TABLE figures ADD COLUMN IF NOT EXISTS description TEXT",
     "ALTER TABLE figures ADD COLUMN IF NOT EXISTS legend TEXT",
+    "CREATE INDEX IF NOT EXISTS ix_projects_owner_created ON projects (owner_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS ix_datasets_owner_project_created ON datasets (owner_id, project_id, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS ix_figures_owner_updated ON figures (owner_id, updated_at DESC)",
+    "CREATE INDEX IF NOT EXISTS ix_figures_owner_project_updated ON figures (owner_id, project_id, updated_at DESC)",
+    "CREATE INDEX IF NOT EXISTS ix_figures_owner_status_updated ON figures (owner_id, status, updated_at DESC)",
+    """
+    CREATE TABLE IF NOT EXISTS ai_usage (
+        id UUID PRIMARY KEY,
+        user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+        provider VARCHAR(20) NOT NULL,
+        model VARCHAR(128) NOT NULL,
+        feature VARCHAR(64) NOT NULL,
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        total_tokens INTEGER NOT NULL DEFAULT 0,
+        estimated_cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS ix_ai_usage_user_created ON ai_usage (user_id, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS ix_ai_usage_provider_model ON ai_usage (provider, model)",
 ]
 
 
@@ -113,6 +134,16 @@ def _backfill_projects():
     from app.auth.models import User
     from app.projects.service import ensure_default_project
     with Session(engine) as db:
+        needs_work = db.execute(text("""
+            SELECT EXISTS (
+                SELECT 1 FROM users u
+                WHERE NOT EXISTS (SELECT 1 FROM projects p WHERE p.owner_id = u.id)
+            )
+            OR EXISTS (SELECT 1 FROM datasets WHERE project_id IS NULL)
+            OR EXISTS (SELECT 1 FROM figures WHERE project_id IS NULL)
+        """)).scalar()
+        if not needs_work:
+            return
         for u in db.query(User).all():
             proj = ensure_default_project(db, u.id)
             db.execute(text("UPDATE datasets SET project_id = :p WHERE owner_id = :o AND project_id IS NULL"),

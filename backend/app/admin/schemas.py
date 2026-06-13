@@ -16,6 +16,11 @@ class AdminUserItem(BaseModel):
     created_at: datetime
     dataset_count: int = 0
     figure_count: int = 0
+    ai_request_count: int = 0
+    ai_input_tokens: int = 0
+    ai_output_tokens: int = 0
+    ai_total_tokens: int = 0
+    ai_estimated_cost_usd: float = 0.0
 
 
 class AdminUserUpdate(BaseModel):

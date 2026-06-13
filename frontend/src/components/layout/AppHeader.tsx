@@ -43,7 +43,10 @@ export function AppHeader() {
         </nav>
         <div className="ml-auto flex items-center gap-3">
           <span className="text-sm text-muted-foreground">{user?.display_name}{user?.is_admin ? ' (admin)' : ''}</span>
-          <Button variant="ghost" size="sm" onClick={logout}><LogOut className="h-4 w-4" /></Button>
+          <Button variant="outline" size="sm" onClick={logout}>
+            <LogOut className="h-4 w-4" />
+            <span>Log out</span>
+          </Button>
         </div>
       </div>
     </header>

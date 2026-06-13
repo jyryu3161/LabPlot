@@ -25,10 +25,12 @@ export interface ColumnProfile {
 export interface DatasetListItem {
   id: string;
   name: string;
+  description?: string;
   original_filename: string;
   format: string;
   n_rows: number;
   n_cols: number;
+  project_id?: string;
   created_at: string;
 }
 
@@ -47,7 +49,6 @@ export interface Project { id: string; name: string; description?: string; creat
 export interface ProjectListItem extends Project { dataset_count: number; figure_count: number; }
 
 export interface DatasetDetail extends DatasetListItem {
-  project_id?: string;
   column_profile: ColumnProfile[];
   preview: Record<string, unknown>[];
   statistics?: DatasetStatistics;
@@ -99,6 +100,7 @@ export interface FigureListItem {
   style_preset: string;
   status: string;
   dataset_id: string;
+  project_id?: string;
   created_at: string;
   updated_at: string;
   thumb_url?: string;
@@ -178,4 +180,9 @@ export interface AdminUser {
   created_at: string;
   dataset_count: number;
   figure_count: number;
+  ai_request_count: number;
+  ai_input_tokens: number;
+  ai_output_tokens: number;
+  ai_total_tokens: number;
+  ai_estimated_cost_usd: number;
 }

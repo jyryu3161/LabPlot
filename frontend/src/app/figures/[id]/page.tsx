@@ -1,6 +1,6 @@
 'use client';
 
-import { use, useEffect, useState } from 'react';
+import { use, useState } from 'react';
 import Link from 'next/link';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { toast } from 'sonner';
@@ -34,47 +34,39 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
   const [improvements, setImprovements] = useState<Improvement[] | null>(null);
 
   // edit panel
-  const [plotType, setPlotType] = useState('');
-  const [mapping, setMapping] = useState<Record<string, unknown>>({});
-  const [options, setOptions] = useState<Record<string, unknown>>({});
-  const [style, setStyle] = useState('');
-  const [description, setDescription] = useState('');
-  const [legend, setLegend] = useState('');
-
-  useEffect(() => {
-    if (!fig) return;
-    const vid = fig.current_version_id ?? fig.versions[fig.versions.length - 1]?.id ?? null;
-    setSelectedVid((prev) => prev ?? vid);
-    const v = fig.versions.find((x) => x.id === (fig.current_version_id ?? vid));
-    setPlotType((p) => p || fig.plot_type);
-    setStyle((s) => s || fig.style_preset);
-    if (v) {
-      setMapping((m) => (Object.keys(m).length ? m : (v.mapping || {})));
-      setOptions((o) => (Object.keys(o).length ? o : (v.options || {})));
-    }
-    setDescription((d) => (d || fig.description || ''));
-    setLegend((l) => (l || fig.legend || ''));
-  }, [fig]);
+  const [plotType, setPlotType] = useState<string | null>(null);
+  const [mapping, setMapping] = useState<Record<string, unknown> | null>(null);
+  const [options, setOptions] = useState<Record<string, unknown> | null>(null);
+  const [style, setStyle] = useState<string | null>(null);
+  const [description, setDescription] = useState<string | null>(null);
+  const [legend, setLegend] = useState<string | null>(null);
 
   const plotTypes = plotTypesData?.plot_types ?? [];
   const styles = stylesData?.styles ?? [];
   const palettes = palettesData?.palettes ?? [];
   const columns: ColumnProfile[] = dataset?.column_profile ?? [];
-  const currentDef: PlotTypeDef | undefined = plotTypes.find((p) => p.type === plotType);
-  const version: FigureVersion | undefined = fig?.versions.find((v) => v.id === selectedVid);
+  const effectiveSelectedVid = selectedVid ?? fig?.current_version_id ?? fig?.versions[fig.versions.length - 1]?.id ?? null;
+  const version: FigureVersion | undefined = fig?.versions.find((v) => v.id === effectiveSelectedVid);
+  const effectivePlotType = plotType ?? fig?.plot_type ?? '';
+  const effectiveStyle = style ?? fig?.style_preset ?? '';
+  const effectiveMapping = mapping ?? version?.mapping ?? {};
+  const effectiveOptions = options ?? version?.options ?? {};
+  const descriptionValue = description ?? fig?.description ?? '';
+  const legendValue = legend ?? fig?.legend ?? '';
+  const currentDef: PlotTypeDef | undefined = plotTypes.find((p) => p.type === effectivePlotType);
 
   const apply = useMutation({
-    mutationFn: () => rerenderFigure(id, { plot_type: plotType, mapping, options, style_preset: style, change_note: 'Edited in figure editor' }),
+    mutationFn: () => rerenderFigure(id, { plot_type: effectivePlotType, mapping: effectiveMapping, options: effectiveOptions, style_preset: effectiveStyle, change_note: 'Edited in figure editor' }),
     onSuccess: (v) => { toast.success(`Re-rendered (v${v.version_number})`); setSelectedVid(v.id); setReview(null); setImprovements(null); qc.invalidateQueries({ queryKey: ['figure', id] }); qc.invalidateQueries({ queryKey: ['figures'] }); },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Render failed'),
   });
   const runReview = useMutation({
-    mutationFn: () => reviewVersion(id, selectedVid!),
+    mutationFn: () => reviewVersion(id, effectiveSelectedVid!),
     onSuccess: (r) => { setReview(r); toast.success('Review complete'); },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Review failed'),
   });
   const runImprove = useMutation({
-    mutationFn: () => improveVersion(id, selectedVid!),
+    mutationFn: () => improveVersion(id, effectiveSelectedVid!),
     onSuccess: (l) => { setImprovements(l); toast.success(`${l.length} suggestions`); },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Improve failed'),
   });
@@ -84,20 +76,20 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Apply failed'),
   });
   const saveDesc = useMutation({
-    mutationFn: () => updateFigure(id, { description }),
+    mutationFn: () => updateFigure(id, { description: descriptionValue }),
     onSuccess: () => { toast.success('Interpretation saved'); qc.invalidateQueries({ queryKey: ['figure', id] }); },
   });
   const enhanceNotes = useMutation({
-    mutationFn: () => enhancePrompt(description, 'interpretation', fig ? `${fig.plot_type} figure: ${fig.name}` : undefined),
+    mutationFn: () => enhancePrompt(descriptionValue, 'interpretation', fig ? `${fig.plot_type} figure: ${fig.name}` : undefined),
     onSuccess: (r) => { setDescription(r.enhanced); toast.success('Enhanced'); },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Enhance failed'),
   });
   const saveLegend = useMutation({
-    mutationFn: () => updateFigure(id, { legend }),
+    mutationFn: () => updateFigure(id, { legend: legendValue }),
     onSuccess: () => { toast.success('Legend saved'); qc.invalidateQueries({ queryKey: ['figure', id] }); },
   });
   const aiLegend = useMutation({
-    mutationFn: () => generateLegend(id, selectedVid!),
+    mutationFn: () => generateLegend(id, effectiveSelectedVid!),
     onSuccess: (r) => { setLegend(r.legend); toast.success('AI legend generated'); },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Legend failed'),
   });
@@ -111,7 +103,7 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
   function selectPlotType(pt: string) {
     setPlotType(pt);
     const def = plotTypes.find((p) => p.type === pt);
-    const opt = { ...options };
+    const opt = { ...effectiveOptions };
     def?.options.forEach((o) => { if (opt[o.key] === undefined && o.default !== undefined) opt[o.key] = o.default; });
     setOptions(opt);
   }
@@ -140,7 +132,7 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
           {/* left: image + paper-writing */}
           <div className="space-y-4 lg:col-span-2">
             <Card><CardContent className="p-4">
-              {version?.png_url ? <img src={version.png_url} alt={fig.name} className="mx-auto max-h-[58vh] w-auto rounded bg-white object-contain" />
+              {version?.png_url ? <img src={version.png_url} alt={fig.name} decoding="async" className="mx-auto max-h-[58vh] w-auto rounded bg-white object-contain" />
                 : <div className="py-20 text-center text-muted-foreground">No image</div>}
             </CardContent></Card>
 
@@ -155,12 +147,12 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
             <Card>
               <CardHeader className="pb-2 flex flex-row items-center justify-between">
                 <CardTitle className="flex items-center gap-2 text-base"><FileText className="h-4 w-4" /> Figure legend</CardTitle>
-                <Button size="sm" variant="outline" onClick={() => aiLegend.mutate()} disabled={aiLegend.isPending || !selectedVid}>
+                <Button size="sm" variant="outline" onClick={() => aiLegend.mutate()} disabled={aiLegend.isPending || !effectiveSelectedVid}>
                   {aiLegend.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Sparkles className="mr-2 h-4 w-4" />} AI generate
                 </Button>
               </CardHeader>
               <CardContent className="space-y-2">
-                <Textarea value={legend} onChange={(e) => setLegend(e.target.value)} rows={4} placeholder="AI-generated or hand-written figure legend for your manuscript…" />
+                <Textarea value={legendValue} onChange={(e) => setLegend(e.target.value)} rows={4} placeholder="AI-generated or hand-written figure legend for your manuscript…" />
                 <Button size="sm" variant="secondary" onClick={() => saveLegend.mutate()} disabled={saveLegend.isPending}>Save legend</Button>
               </CardContent>
             </Card>
@@ -169,7 +161,7 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
             <Card>
               <CardHeader className="pb-2"><CardTitle className="flex items-center gap-2 text-base"><Pencil className="h-4 w-4" /> Interpretation / notes</CardTitle></CardHeader>
               <CardContent className="space-y-2">
-                <Textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={3} placeholder="Your interpretation of this figure (results, takeaways) for the paper…" />
+                <Textarea value={descriptionValue} onChange={(e) => setDescription(e.target.value)} rows={3} placeholder="Your interpretation of this figure (results, takeaways) for the paper…" />
                 <div className="flex gap-2">
                   <Button size="sm" variant="outline" onClick={() => enhanceNotes.mutate()} disabled={enhanceNotes.isPending}>
                     {enhanceNotes.isPending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Sparkles className="mr-1 h-4 w-4" />} Enhance
@@ -188,7 +180,7 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
               <CardContent className="space-y-3">
                 <div className="space-y-1">
                   <Label>Chart type</Label>
-                  <select className="w-full rounded-md border px-3 py-2 text-sm" value={plotType} onChange={(e) => selectPlotType(e.target.value)}>
+                  <select className="w-full rounded-md border px-3 py-2 text-sm" value={effectivePlotType} onChange={(e) => selectPlotType(e.target.value)}>
                     {plotTypes.map((pt) => <option key={pt.type} value={pt.type}>{pt.label}</option>)}
                   </select>
                 </div>
@@ -198,19 +190,19 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
                     {f.multi ? (
                       <div className="max-h-28 overflow-y-auto rounded-md border p-2">
                         {columns.map((c) => {
-                          const arr = (mapping[f.key] as string[]) || [];
+                          const arr = (effectiveMapping[f.key] as string[]) || [];
                           return (
                             <label key={c.name} className="flex items-center gap-2 py-0.5 text-xs">
                               <input type="checkbox" checked={arr.includes(c.name)} onChange={(e) => {
                                 const next = e.target.checked ? [...arr, c.name] : arr.filter((x) => x !== c.name);
-                                setMapping({ ...mapping, [f.key]: next });
+                                setMapping({ ...effectiveMapping, [f.key]: next });
                               }} /> {c.name}
                             </label>
                           );
                         })}
                       </div>
                     ) : (
-                      <select className="w-full rounded-md border px-2 py-1.5 text-sm" value={(mapping[f.key] as string) ?? ''} onChange={(e) => setMapping({ ...mapping, [f.key]: e.target.value || null })}>
+                      <select className="w-full rounded-md border px-2 py-1.5 text-sm" value={(effectiveMapping[f.key] as string) ?? ''} onChange={(e) => setMapping({ ...effectiveMapping, [f.key]: e.target.value || null })}>
                         <option value="">{f.req ? 'Select…' : '(none)'}</option>
                         {columns.map((c) => <option key={c.name} value={c.name}>{c.name} ({c.role})</option>)}
                       </select>
@@ -223,43 +215,43 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
                   <div key={o.key} className="space-y-1">
                     <Label className="text-xs">{o.label}</Label>
                     {o.type === 'bool' ? (
-                      <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={Boolean(options[o.key])} onChange={(e) => setOptions({ ...options, [o.key]: e.target.checked })} /> enabled</label>
+                      <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={Boolean(effectiveOptions[o.key])} onChange={(e) => setOptions({ ...effectiveOptions, [o.key]: e.target.checked })} /> enabled</label>
                     ) : o.type === 'select' ? (
-                      <select className="w-full rounded-md border px-2 py-1.5 text-sm" value={String(options[o.key] ?? o.default ?? '')} onChange={(e) => setOptions({ ...options, [o.key]: e.target.value })}>{o.choices?.map((c) => <option key={c} value={c}>{c}</option>)}</select>
+                      <select className="w-full rounded-md border px-2 py-1.5 text-sm" value={String(effectiveOptions[o.key] ?? o.default ?? '')} onChange={(e) => setOptions({ ...effectiveOptions, [o.key]: e.target.value })}>{o.choices?.map((c) => <option key={c} value={c}>{c}</option>)}</select>
                     ) : o.type === 'number' ? (
-                      <Input type="number" value={String(options[o.key] ?? o.default ?? '')} onChange={(e) => setOptions({ ...options, [o.key]: parseFloat(e.target.value) })} />
-                    ) : <Input value={String(options[o.key] ?? '')} onChange={(e) => setOptions({ ...options, [o.key]: e.target.value })} />}
+                      <Input type="number" value={String(effectiveOptions[o.key] ?? o.default ?? '')} onChange={(e) => setOptions({ ...effectiveOptions, [o.key]: parseFloat(e.target.value) })} />
+                    ) : <Input value={String(effectiveOptions[o.key] ?? '')} onChange={(e) => setOptions({ ...effectiveOptions, [o.key]: e.target.value })} />}
                   </div>
                 ))}
 
                 {/* universal label/axis/appearance controls */}
                 <div className="grid grid-cols-1 gap-2 border-t pt-2">
-                  <div className="space-y-1"><Label className="text-xs">Title</Label><Input className="text-sm" value={String(options.title ?? '')} onChange={(e) => setOptions({ ...options, title: e.target.value })} /></div>
+                  <div className="space-y-1"><Label className="text-xs">Title</Label><Input className="text-sm" value={String(effectiveOptions.title ?? '')} onChange={(e) => setOptions({ ...effectiveOptions, title: e.target.value })} /></div>
                   <div className="grid grid-cols-2 gap-2">
-                    <div className="space-y-1"><Label className="text-xs">X label</Label><Input className="text-sm" value={String(options.x_label ?? '')} onChange={(e) => setOptions({ ...options, x_label: e.target.value })} /></div>
-                    <div className="space-y-1"><Label className="text-xs">Y label</Label><Input className="text-sm" value={String(options.y_label ?? '')} onChange={(e) => setOptions({ ...options, y_label: e.target.value })} /></div>
+                    <div className="space-y-1"><Label className="text-xs">X label</Label><Input className="text-sm" value={String(effectiveOptions.x_label ?? '')} onChange={(e) => setOptions({ ...effectiveOptions, x_label: e.target.value })} /></div>
+                    <div className="space-y-1"><Label className="text-xs">Y label</Label><Input className="text-sm" value={String(effectiveOptions.y_label ?? '')} onChange={(e) => setOptions({ ...effectiveOptions, y_label: e.target.value })} /></div>
                   </div>
-                  <div className="space-y-1"><Label className="text-xs">Legend title</Label><Input className="text-sm" value={String(options.legend_title ?? '')} onChange={(e) => setOptions({ ...options, legend_title: e.target.value })} /></div>
+                  <div className="space-y-1"><Label className="text-xs">Legend title</Label><Input className="text-sm" value={String(effectiveOptions.legend_title ?? '')} onChange={(e) => setOptions({ ...effectiveOptions, legend_title: e.target.value })} /></div>
                   <div className="grid grid-cols-2 gap-2">
                     <div className="space-y-1">
                       <Label className="text-xs">Color mode</Label>
-                      <select className="w-full rounded-md border px-2 py-1.5 text-sm" value={String(options.color_mode ?? 'color')} onChange={(e) => setOptions({ ...options, color_mode: e.target.value })}>
+                      <select className="w-full rounded-md border px-2 py-1.5 text-sm" value={String(effectiveOptions.color_mode ?? 'color')} onChange={(e) => setOptions({ ...effectiveOptions, color_mode: e.target.value })}>
                         <option value="color">Color</option><option value="grayscale">Grayscale</option>
                       </select>
                     </div>
                     <div className="space-y-1">
                       <Label className="text-xs">Style</Label>
-                      <select className="w-full rounded-md border px-2 py-1.5 text-sm" value={style} onChange={(e) => setStyle(e.target.value)}>{styles.map((s) => <option key={s.key} value={s.key}>{s.label}</option>)}</select>
+                      <select className="w-full rounded-md border px-2 py-1.5 text-sm" value={effectiveStyle} onChange={(e) => setStyle(e.target.value)}>{styles.map((s) => <option key={s.key} value={s.key}>{s.label}</option>)}</select>
                     </div>
                   </div>
                   {/* color palette */}
                   <div className="space-y-1">
                     <Label className="text-xs">Color palette</Label>
-                    <select className="w-full rounded-md border px-2 py-1.5 text-sm" value={String(options.palette_name ?? 'preset')} onChange={(e) => setOptions({ ...options, palette_name: e.target.value })}>
+                    <select className="w-full rounded-md border px-2 py-1.5 text-sm" value={String(effectiveOptions.palette_name ?? 'preset')} onChange={(e) => setOptions({ ...effectiveOptions, palette_name: e.target.value })}>
                       {palettes.map((pl) => <option key={pl.key} value={pl.key}>{pl.label}</option>)}
                     </select>
                     {(() => {
-                      const sel = palettes.find((pl) => pl.key === (options.palette_name ?? 'preset'));
+                      const sel = palettes.find((pl) => pl.key === (effectiveOptions.palette_name ?? 'preset'));
                       return sel?.hex?.length ? (
                         <div className="mt-1 flex gap-0.5">{sel.hex.map((h) => <span key={h} className="h-3 w-4 rounded-sm border" style={{ backgroundColor: h }} />)}</div>
                       ) : null;
@@ -269,7 +261,7 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
                   <div className="grid grid-cols-3 gap-2">
                     <div className="space-y-1">
                       <Label className="text-xs">Figure size</Label>
-                      <select className="w-full rounded-md border px-2 py-1.5 text-sm" value={String(options.size ?? 'wide')} onChange={(e) => setOptions({ ...options, size: e.target.value })}>
+                      <select className="w-full rounded-md border px-2 py-1.5 text-sm" value={String(effectiveOptions.size ?? 'wide')} onChange={(e) => setOptions({ ...effectiveOptions, size: e.target.value })}>
                         <option value="single_column">Single column</option>
                         <option value="wide">Wide (double)</option>
                         <option value="square">Square</option>
@@ -278,18 +270,18 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
                     </div>
                     <div className="space-y-1">
                       <Label className="text-xs">Width (in)</Label>
-                      <Input type="number" step="0.1" disabled={options.size !== 'custom'} value={String(options.width_in ?? 7)} onChange={(e) => setOptions({ ...options, width_in: parseFloat(e.target.value) })} />
+                      <Input type="number" step="0.1" disabled={effectiveOptions.size !== 'custom'} value={String(effectiveOptions.width_in ?? 7)} onChange={(e) => setOptions({ ...effectiveOptions, width_in: parseFloat(e.target.value) })} />
                     </div>
                     <div className="space-y-1">
                       <Label className="text-xs">Height (in)</Label>
-                      <Input type="number" step="0.1" disabled={options.size !== 'custom'} value={String(options.height_in ?? 4.2)} onChange={(e) => setOptions({ ...options, height_in: parseFloat(e.target.value) })} />
+                      <Input type="number" step="0.1" disabled={effectiveOptions.size !== 'custom'} value={String(effectiveOptions.height_in ?? 4.2)} onChange={(e) => setOptions({ ...effectiveOptions, height_in: parseFloat(e.target.value) })} />
                     </div>
                   </div>
                   <div className="flex flex-wrap gap-3 text-xs">
-                    <label className="flex items-center gap-1"><input type="checkbox" checked={Boolean(options.hide_legend)} onChange={(e) => setOptions({ ...options, hide_legend: e.target.checked })} /> Hide legend</label>
-                    <label className="flex items-center gap-1"><input type="checkbox" checked={Boolean(options.log_y)} onChange={(e) => setOptions({ ...options, log_y: e.target.checked })} /> log Y</label>
-                    <label className="flex items-center gap-1"><input type="checkbox" checked={Boolean(options.log_x)} onChange={(e) => setOptions({ ...options, log_x: e.target.checked })} /> log X</label>
-                    <label className="flex items-center gap-1"><input type="checkbox" checked={Boolean(options.flip_coords)} onChange={(e) => setOptions({ ...options, flip_coords: e.target.checked })} /> flip</label>
+                    <label className="flex items-center gap-1"><input type="checkbox" checked={Boolean(effectiveOptions.hide_legend)} onChange={(e) => setOptions({ ...effectiveOptions, hide_legend: e.target.checked })} /> Hide legend</label>
+                    <label className="flex items-center gap-1"><input type="checkbox" checked={Boolean(effectiveOptions.log_y)} onChange={(e) => setOptions({ ...effectiveOptions, log_y: e.target.checked })} /> log Y</label>
+                    <label className="flex items-center gap-1"><input type="checkbox" checked={Boolean(effectiveOptions.log_x)} onChange={(e) => setOptions({ ...effectiveOptions, log_x: e.target.checked })} /> log X</label>
+                    <label className="flex items-center gap-1"><input type="checkbox" checked={Boolean(effectiveOptions.flip_coords)} onChange={(e) => setOptions({ ...effectiveOptions, flip_coords: e.target.checked })} /> flip</label>
                   </div>
                 </div>
                 <Button className="w-full" onClick={() => apply.mutate()} disabled={apply.isPending}>
@@ -304,7 +296,7 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
               <CardContent className="space-y-1">
                 {fig.versions.slice().reverse().map((v) => (
                   <button key={v.id} onClick={() => { setSelectedVid(v.id); setReview(null); setImprovements(null); }}
-                    className={`flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs ${v.id === selectedVid ? 'bg-muted font-medium' : 'hover:bg-muted/50'}`}>
+                    className={`flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs ${v.id === effectiveSelectedVid ? 'bg-muted font-medium' : 'hover:bg-muted/50'}`}>
                     <span>v{v.version_number} · {v.style_preset} · {v.change_note || ''}</span>
                     {v.id === fig.current_version_id && <Badge variant="secondary" className="text-[10px]">latest</Badge>}
                   </button>
@@ -316,7 +308,7 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
             <Card>
               <CardHeader className="pb-2"><CardTitle className="flex items-center gap-2 text-base"><Star className="h-4 w-4 text-amber-500" /> AI Figure Review</CardTitle></CardHeader>
               <CardContent className="space-y-3">
-                <Button size="sm" variant="outline" className="w-full" onClick={() => runReview.mutate()} disabled={runReview.isPending || !selectedVid}>
+                <Button size="sm" variant="outline" className="w-full" onClick={() => runReview.mutate()} disabled={runReview.isPending || !effectiveSelectedVid}>
                   {runReview.isPending ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Reviewing…</> : 'Review this figure'}
                 </Button>
                 {p && (
@@ -350,7 +342,7 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
             <Card>
               <CardHeader className="pb-2"><CardTitle className="flex items-center gap-2 text-base"><Wand2 className="h-4 w-4 text-primary" /> AI Improve</CardTitle></CardHeader>
               <CardContent className="space-y-3">
-                <Button size="sm" variant="outline" className="w-full" onClick={() => runImprove.mutate()} disabled={runImprove.isPending || !selectedVid}>
+                <Button size="sm" variant="outline" className="w-full" onClick={() => runImprove.mutate()} disabled={runImprove.isPending || !effectiveSelectedVid}>
                   {runImprove.isPending ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Thinking…</> : 'Suggest improvements'}
                 </Button>
                 {improvements?.map((imp) => (
