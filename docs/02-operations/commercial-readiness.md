@@ -265,8 +265,8 @@ Review these areas from the Admin page:
 - User quotas: set AI, render, and storage limits for heavy users.
 - Audit log: review recent account, admin, dataset, and figure events.
 
-## Remaining Production Roadmap
+## Hosting Account Checklist
 
-These are not blockers for the current single-server deployment, but they are the next hardening steps for a larger service:
+These are external account settings to apply when enabling S3/R2/MinIO-backed storage or a CDN. The application code paths and local filesystem-object smoke tests are included in this repository.
 
 - Configure a production object-storage bucket, lifecycle policy, and optional CDN in the hosting account.
