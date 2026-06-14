@@ -54,6 +54,28 @@ OBJECT_STORAGE_PUBLIC_BASE_URL=<optional CDN/public base URL for rendered assets
 
 When `STORAGE_BACKEND=s3`, new private dataset uploads and new rendered figure assets are written to `s3://...` object URIs. Dataset objects remain encrypted by LabPlot before upload; the object-storage client also sets server-side encryption headers. If `OBJECT_STORAGE_PUBLIC_BASE_URL` is not set, rendered assets are streamed by LabPlot through `/api/assets/...`.
 
+Migrate existing local uploads and rendered assets after the bucket is ready:
+
+```bash
+docker cp scripts/migrate_assets_to_object_storage.py labplot-backend:/tmp/migrate_assets_to_object_storage.py
+docker exec \
+  -e STORAGE_BACKEND=s3 \
+  -e OBJECT_STORAGE_BUCKET=labplot-prod \
+  -e OBJECT_STORAGE_PREFIX=labplot \
+  -e OBJECT_STORAGE_REGION=us-east-1 \
+  -e OBJECT_STORAGE_ACCESS_KEY_ID="$OBJECT_STORAGE_ACCESS_KEY_ID" \
+  -e OBJECT_STORAGE_SECRET_ACCESS_KEY="$OBJECT_STORAGE_SECRET_ACCESS_KEY" \
+  labplot-backend sh -lc "cd /app/backend && /app/.pixi/envs/default/bin/python /tmp/migrate_assets_to_object_storage.py --dry-run"
+docker exec \
+  -e STORAGE_BACKEND=s3 \
+  -e OBJECT_STORAGE_BUCKET=labplot-prod \
+  -e OBJECT_STORAGE_PREFIX=labplot \
+  -e OBJECT_STORAGE_REGION=us-east-1 \
+  -e OBJECT_STORAGE_ACCESS_KEY_ID="$OBJECT_STORAGE_ACCESS_KEY_ID" \
+  -e OBJECT_STORAGE_SECRET_ACCESS_KEY="$OBJECT_STORAGE_SECRET_ACCESS_KEY" \
+  labplot-backend sh -lc "cd /app/backend && /app/.pixi/envs/default/bin/python /tmp/migrate_assets_to_object_storage.py --apply --delete-local"
+```
+
 Validate object-storage code paths with the local filesystem object backend:
 
 ```bash

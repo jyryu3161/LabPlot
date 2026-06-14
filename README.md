@@ -130,7 +130,7 @@ Cost estimates are operational guidance, not a billing ledger. Provider invoices
 - Database schema changes are tracked through Alembic and applied on backend startup.
 - Scheduled GitHub Actions uptime checks validate the public home page and API health endpoint, with optional webhook alerts.
 - Browser client-error volume can be checked with `scripts/check_client_error_alerts.py` and routed to a webhook.
-- `STORAGE_BACKEND=s3` stores new private uploads and rendered figure assets in S3-compatible object storage.
+- `STORAGE_BACKEND=s3` stores new private uploads and rendered figure assets in S3-compatible object storage; `scripts/migrate_assets_to_object_storage.py` moves existing local assets.
 - `scripts/dr_restore_drill.sh` validates backup restore into an isolated temporary Postgres container.
 - See `docs/02-operations/commercial-readiness.md` for the deployment, backup, smoke-test, quota, audit, and security runbook.
 
