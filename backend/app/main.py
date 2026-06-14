@@ -6,7 +6,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
 from app.common.exceptions import AppError, app_error_handler
-from app.common.security import SECURITY_HEADERS, allowed_origins
+from app.common.security import allowed_origins
 
 # import models so metadata is registered before create_all
 from sqlalchemy import text
@@ -34,14 +34,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-@app.middleware("http")
-async def add_security_headers(request, call_next):
-    response = await call_next(request)
-    for key, value in SECURITY_HEADERS.items():
-        response.headers.setdefault(key, value)
-    return response
 
 
 app.add_exception_handler(AppError, app_error_handler)
