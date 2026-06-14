@@ -35,6 +35,8 @@ PASSWORD_RESET_TOKEN_RETENTION_DAYS=30
 CLIENT_ERROR_RETENTION_DAYS=90
 ```
 
+`NEXT_PUBLIC_GA_ID` is the GA4 Measurement ID from Admin -> Data streams -> Web stream. Because the public ID is baked into the Next.js static output, rebuild and restart `labplot-frontend` after changing it.
+
 `DATA_ENCRYPTION_KEY` protects newly uploaded private datasets at rest. Existing plaintext uploads remain readable for backward compatibility. During key rotation, put the old key in `DATA_ENCRYPTION_PREVIOUS_KEYS`, deploy, run the rotation script below, then remove the old key after a verified backup.
 
 Object storage for new uploads and rendered assets:

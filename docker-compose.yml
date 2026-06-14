@@ -54,11 +54,14 @@ services:
   labplot-frontend:
     build:
       context: ./frontend
+      args:
+        NEXT_PUBLIC_GA_ID: ${NEXT_PUBLIC_GA_ID:-}
     container_name: labplot-frontend
     restart: unless-stopped
     logging: *default-logging
     environment:
       NEXT_PUBLIC_API_URL: ""
+      NEXT_PUBLIC_GA_ID: ${NEXT_PUBLIC_GA_ID:-}
       NEXT_TELEMETRY_DISABLED: "1"
       NODE_ENV: production
     healthcheck:

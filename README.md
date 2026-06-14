@@ -65,6 +65,7 @@ Create a `.env` file or provide equivalent environment variables to Docker Compo
 | `AUDIT_LOG_RETENTION_DAYS` | Retention window for audit cleanup script |
 | `CLIENT_ERROR_RETENTION_DAYS` | Retention window for browser error events |
 | `NEXT_PUBLIC_API_URL` | Frontend API base URL, usually empty for same-origin deployment |
+| `NEXT_PUBLIC_GA_ID` | Optional GA4 Measurement ID (`G-...`) for Google Analytics tracking |
 
 Admins can also update the active AI provider, model names, and API keys from the Admin page.
 
