@@ -106,6 +106,14 @@ cat backups/labplot.dump | docker exec -i labplot-db pg_restore -U labplot -d la
 
 Restore file assets only from trusted backups. Keep `DATA_ENCRYPTION_KEY` with the backup metadata; encrypted datasets cannot be recovered without it.
 
+Disaster recovery drill:
+
+```bash
+scripts/dr_restore_drill.sh
+```
+
+The drill creates a fresh database dump, validates the file asset archive, restores the dump into an isolated temporary Postgres container, checks the Alembic revision and core tables, reports elapsed restore time, and removes the temporary container unless `KEEP_RESTORE_CONTAINER=1` is set.
+
 ## Dataset Key Rotation
 
 Use this when changing `DATA_ENCRYPTION_KEY`:
@@ -177,4 +185,3 @@ These are not blockers for the current single-server deployment, but they are th
 
 - Move private uploads and rendered assets to object storage with server-side encryption and lifecycle policies.
 - Add external alert routing for backend exceptions, frontend client errors, and uptime failures.
-- Add disaster recovery drills with timed restore validation.
