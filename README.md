@@ -59,6 +59,7 @@ Create a `.env` file or provide equivalent environment variables to Docker Compo
 | `DATA_ENCRYPTION_PREVIOUS_KEYS` | Optional comma-separated old encryption keys during dataset key rotation |
 | `SENTRY_DSN` | Optional backend error monitoring DSN |
 | `AUDIT_LOG_RETENTION_DAYS` | Retention window for audit cleanup script |
+| `CLIENT_ERROR_RETENTION_DAYS` | Retention window for browser error events |
 | `NEXT_PUBLIC_API_URL` | Frontend API base URL, usually empty for same-origin deployment |
 
 Admins can also update the active AI provider, model names, and API keys from the Admin page.
@@ -132,3 +133,4 @@ Cost estimates are operational guidance, not a billing ledger. Provider invoices
 - The R renderer uses fixed templates and sanitized parameters rather than executing arbitrary user-provided R code.
 - Newly uploaded private datasets are encrypted at rest and remain inaccessible through public static routes.
 - Admin-visible audit logs record account, dataset, figure, SVG edit, quota, and AI configuration events.
+- Browser-side errors are captured through the client error endpoint for admin review.

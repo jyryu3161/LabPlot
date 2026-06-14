@@ -5,7 +5,7 @@ import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import {
   adminListUsers, adminCreateUser, adminUpdateUser, adminResetPassword, adminDeleteUser,
-  adminListAuditLogs, getAiConfig, updateAiConfig,
+  adminListAuditLogs, adminListClientErrors, getAiConfig, updateAiConfig,
 } from '@/lib/api';
 import { useAuthContext } from '@/components/auth/AuthProvider';
 import { AppHeader } from '@/components/layout/AppHeader';
@@ -30,6 +30,7 @@ export default function AdminPage() {
   const { user } = useAuthContext();
   const { data: users, isLoading, error } = useQuery({ queryKey: ['admin-users'], queryFn: adminListUsers });
   const { data: auditLogs } = useQuery({ queryKey: ['admin-audit-logs'], queryFn: () => adminListAuditLogs(100) });
+  const { data: clientErrors } = useQuery({ queryKey: ['admin-client-errors'], queryFn: () => adminListClientErrors(50) });
 
   const [email, setEmail] = useState('');
   const [name, setName] = useState('');
@@ -250,6 +251,30 @@ export default function AdminPage() {
                 ))}
                 {(!auditLogs || auditLogs.length === 0) && (
                   <tr><td colSpan={5} className="px-2 py-6 text-center text-muted-foreground">No audit events yet.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </CardContent>
+        </Card>
+
+        <Card className="mt-6">
+          <CardHeader className="pb-2"><CardTitle className="flex items-center gap-2 text-base"><Activity className="h-4 w-4" /> Client errors</CardTitle></CardHeader>
+          <CardContent className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead><tr className="border-b text-left text-muted-foreground">
+                <th className="px-2 py-2">Time</th><th className="px-2 py-2">Source</th><th className="px-2 py-2">Path</th><th className="px-2 py-2">Message</th>
+              </tr></thead>
+              <tbody>
+                {(clientErrors ?? []).slice(0, 30).map((row) => (
+                  <tr key={row.id} className="border-b last:border-0">
+                    <td className="whitespace-nowrap px-2 py-2 text-muted-foreground">{new Date(row.created_at).toLocaleString()}</td>
+                    <td className="px-2 py-2 text-muted-foreground">{row.source}</td>
+                    <td className="max-w-xs truncate px-2 py-2 text-muted-foreground">{row.path ?? '-'}</td>
+                    <td className="max-w-lg truncate px-2 py-2 font-medium" title={row.stack ?? row.message}>{row.message}</td>
+                  </tr>
+                ))}
+                {(!clientErrors || clientErrors.length === 0) && (
+                  <tr><td colSpan={4} className="px-2 py-6 text-center text-muted-foreground">No client errors.</td></tr>
                 )}
               </tbody>
             </table>

@@ -204,3 +204,14 @@ export interface AuditLogItem {
   metadata_json: Record<string, unknown>;
   created_at: string;
 }
+
+export interface ClientErrorItem {
+  id: string;
+  user_id?: string;
+  source: string;
+  message: string;
+  path?: string;
+  stack?: string;
+  user_agent?: string;
+  created_at: string;
+}

@@ -18,10 +18,12 @@ from app.datasets import models as _ds_models  # noqa: F401
 from app.figures import models as _fig_models  # noqa: F401
 from app.ai import models as _ai_models  # noqa: F401
 from app.audit import models as _audit_models  # noqa: F401
+from app.client_errors import models as _client_error_models  # noqa: F401
 from app.database import Base, engine
 
 from app.auth.router import router as auth_router
 from app.admin.router import router as admin_router
+from app.client_errors.router import router as client_errors_router
 from app.projects.router import router as projects_router
 from app.datasets.router import router as datasets_router
 from app.figures.router import router as figures_router, meta_router
@@ -65,6 +67,7 @@ app.add_exception_handler(AppError, app_error_handler)
 app.include_router(auth_router)
 app.include_router(account_router)
 app.include_router(admin_router)
+app.include_router(client_errors_router)
 app.include_router(projects_router)
 app.include_router(datasets_router)
 app.include_router(figures_router)
@@ -202,6 +205,20 @@ _MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS ix_audit_logs_actor_id ON audit_logs (actor_id)",
     "CREATE INDEX IF NOT EXISTS ix_audit_logs_action ON audit_logs (action)",
     "CREATE INDEX IF NOT EXISTS ix_audit_logs_created_at ON audit_logs (created_at DESC)",
+    """
+    CREATE TABLE IF NOT EXISTS client_error_events (
+        id UUID PRIMARY KEY,
+        user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+        source VARCHAR(80) NOT NULL DEFAULT 'browser',
+        message VARCHAR(1000) NOT NULL,
+        path VARCHAR(512),
+        stack TEXT,
+        user_agent VARCHAR(512),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS ix_client_error_events_user_id ON client_error_events (user_id)",
+    "CREATE INDEX IF NOT EXISTS ix_client_error_events_created_at ON client_error_events (created_at DESC)",
 ]
 
 

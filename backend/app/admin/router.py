@@ -6,11 +6,12 @@ from sqlalchemy.orm import Session
 from app.admin import service
 from app.admin.schemas import (
     AdminPasswordReset, AdminUserCreate, AdminUserItem, AdminUserUpdate,
-    AIConfigUpdate, AIConfigView, AuditLogItem,
+    AIConfigUpdate, AIConfigView, AuditLogItem, ClientErrorItem,
 )
 from app.ai import config_service
 from app.audit import service as audit_service
 from app.auth.models import User
+from app.client_errors import service as client_error_service
 from app.auth.schemas import UserResponse
 from app.common.deps import get_current_admin, get_db
 
@@ -83,3 +84,8 @@ def delete_user(
 @router.get("/audit-logs", response_model=list[AuditLogItem])
 def audit_logs(limit: int = 200, db: Session = Depends(get_db), _: User = Depends(get_current_admin)):
     return service.list_audit_logs(db, limit=limit)
+
+
+@router.get("/client-errors", response_model=list[ClientErrorItem])
+def client_errors(limit: int = 100, db: Session = Depends(get_db), _: User = Depends(get_current_admin)):
+    return client_error_service.list_client_errors(db, limit=limit)

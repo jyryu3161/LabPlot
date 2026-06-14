@@ -32,6 +32,7 @@ SENTRY_ENVIRONMENT=production
 SENTRY_RELEASE=<git sha or release version>
 AUDIT_LOG_RETENTION_DAYS=365
 PASSWORD_RESET_TOKEN_RETENTION_DAYS=30
+CLIENT_ERROR_RETENTION_DAYS=90
 ```
 
 `DATA_ENCRYPTION_KEY` protects newly uploaded private datasets at rest. Existing plaintext uploads remain readable for backward compatibility. During key rotation, put the old key in `DATA_ENCRYPTION_PREVIOUS_KEYS`, deploy, run the rotation script below, then remove the old key after a verified backup.
@@ -127,7 +128,7 @@ docker exec labplot-backend sh -lc "cd /app/backend && /app/.pixi/envs/default/b
 docker exec labplot-backend sh -lc "cd /app/backend && /app/.pixi/envs/default/bin/python /tmp/retention_cleanup.py --orphan-files"
 ```
 
-The cleanup removes audit logs older than `AUDIT_LOG_RETENTION_DAYS`, expired or used password reset tokens older than `PASSWORD_RESET_TOKEN_RETENTION_DAYS`, and optionally orphaned upload/render files.
+The cleanup removes audit logs older than `AUDIT_LOG_RETENTION_DAYS`, expired or used password reset tokens older than `PASSWORD_RESET_TOKEN_RETENTION_DAYS`, client errors older than `CLIENT_ERROR_RETENTION_DAYS`, and optionally orphaned upload/render files.
 
 ## Security Controls
 
@@ -144,6 +145,7 @@ The cleanup removes audit logs older than `AUDIT_LOG_RETENTION_DAYS`, expired or
 - Abuse control: rate limits are applied to auth, uploads, renders, SVG edits, and AI-heavy endpoints.
 - Cost control: admin users can set per-user monthly AI request limits, render limits, and storage limits.
 - Error monitoring: configure `SENTRY_DSN` to capture backend exceptions.
+- Client monitoring: browser errors are posted to `/api/client-errors` and visible to admins.
 - Log retention: Docker services use capped json-file logs to prevent unbounded disk growth.
 
 ## Admin Operations

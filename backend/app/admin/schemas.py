@@ -83,3 +83,16 @@ class AuditLogItem(BaseModel):
     user_agent: str | None = None
     metadata_json: dict
     created_at: datetime
+
+
+class ClientErrorItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    user_id: uuid.UUID | None = None
+    source: str
+    message: str
+    path: str | None = None
+    stack: str | None = None
+    user_agent: str | None = None
+    created_at: datetime

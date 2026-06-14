@@ -2,7 +2,7 @@ import type {
   User, TokenResponse, LoginRequest, RegisterRequest,
   DatasetListItem, DatasetDetail, ChartSuggestion, PlotTypeDef, StyleDef,
   FigureListItem, FigureDetail, FigureVersion, Review, Improvement, AdminUser, AIConfig, GalleryFigureItem, AuditLogItem,
-  Project, ProjectListItem,
+  ClientErrorItem, Project, ProjectListItem,
 } from './types';
 
 // Same-origin by default (Caddy proxies /api and /static on :7070).
@@ -255,6 +255,10 @@ export async function deleteAccount(password: string, confirm: string): Promise<
   return fetcher('/api/account', { method: 'DELETE', body: JSON.stringify({ password, confirm }) });
 }
 
+export async function reportClientError(data: { source: string; message: string; path?: string; stack?: string }): Promise<void> {
+  return fetcher('/api/client-errors', { method: 'POST', body: JSON.stringify(data) });
+}
+
 // ── admin ──
 export async function adminListUsers(): Promise<AdminUser[]> { return fetcher('/api/admin/users'); }
 export async function adminCreateUser(data: { email: string; password: string; display_name: string; is_admin: boolean }): Promise<User> {
@@ -269,6 +273,9 @@ export async function adminResetPassword(id: string, password: string): Promise<
 export async function adminDeleteUser(id: string): Promise<void> { return fetcher(`/api/admin/users/${id}`, { method: 'DELETE' }); }
 export async function adminListAuditLogs(limit = 200): Promise<AuditLogItem[]> {
   return fetcher(`/api/admin/audit-logs?limit=${limit}`);
+}
+export async function adminListClientErrors(limit = 100): Promise<ClientErrorItem[]> {
+  return fetcher(`/api/admin/client-errors?limit=${limit}`);
 }
 
 // ── admin: AI config ──

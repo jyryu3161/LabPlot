@@ -19,6 +19,7 @@ from app.ai import models as _ai_models  # noqa: F401
 from app.audit.models import AuditLog
 from app.auth import models as _auth_models  # noqa: F401
 from app.auth.models import PasswordResetToken
+from app.client_errors.models import ClientErrorEvent
 from app.config import settings
 from app.database import SessionLocal
 from app.datasets.models import Dataset
@@ -44,6 +45,7 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--audit-days", type=int, default=int(os.environ.get("AUDIT_LOG_RETENTION_DAYS", "365")))
     parser.add_argument("--password-reset-days", type=int, default=int(os.environ.get("PASSWORD_RESET_TOKEN_RETENTION_DAYS", "30")))
+    parser.add_argument("--client-error-days", type=int, default=int(os.environ.get("CLIENT_ERROR_RETENTION_DAYS", "90")))
     parser.add_argument("--orphan-files", action="store_true")
     args = parser.parse_args()
 
@@ -52,8 +54,10 @@ def main() -> None:
         reset_q = db.query(PasswordResetToken).filter(
             (PasswordResetToken.used_at.isnot(None)) | (PasswordResetToken.expires_at < _cutoff(args.password_reset_days))
         )
+        client_error_q = db.query(ClientErrorEvent).filter(ClientErrorEvent.created_at < _cutoff(args.client_error_days))
         audit_count = audit_q.count()
         reset_count = reset_q.count()
+        client_error_count = client_error_q.count()
 
         orphan_uploads: list[str] = []
         orphan_figure_dirs: list[str] = []
@@ -74,6 +78,7 @@ def main() -> None:
         if not args.dry_run:
             audit_q.delete(synchronize_session=False)
             reset_q.delete(synchronize_session=False)
+            client_error_q.delete(synchronize_session=False)
             for path in orphan_uploads:
                 try:
                     os.remove(path)
@@ -86,7 +91,8 @@ def main() -> None:
     mode = "DRY-RUN" if args.dry_run else "UPDATED"
     print(
         f"{mode} retention cleanup: audit_logs={audit_count} password_reset_tokens={reset_count} "
-        f"orphan_uploads={len(orphan_uploads)} orphan_figure_dirs={len(orphan_figure_dirs)}"
+        f"client_errors={client_error_count} orphan_uploads={len(orphan_uploads)} "
+        f"orphan_figure_dirs={len(orphan_figure_dirs)}"
     )
 
 

@@ -96,6 +96,7 @@ def db_helpers():
         from app.ai.models import AIUsage
         from app.audit import models as _audit_models  # noqa: F401
         from app.auth import models as _auth_models  # noqa: F401
+        from app.client_errors.models import ClientErrorEvent
         from app.projects import models as _project_models  # noqa: F401
         from app.common.encryption import is_encrypted_private_file
         from app.database import SessionLocal
@@ -103,7 +104,7 @@ def db_helpers():
         from app.figures.models import Figure, FigureCodeArtifact
     except Exception:
         return None
-    return SessionLocal, Dataset, Figure, FigureCodeArtifact, AIUsage, is_encrypted_private_file
+    return SessionLocal, Dataset, Figure, FigureCodeArtifact, AIUsage, ClientErrorEvent, is_encrypted_private_file
 
 
 def main() -> None:
@@ -153,7 +154,7 @@ def main() -> None:
     dataset_path = None
     figure_dir = None
     if helpers:
-        SessionLocal, Dataset, _, _, AIUsage, is_encrypted_private_file = helpers
+        SessionLocal, Dataset, _, _, AIUsage, _, is_encrypted_private_file = helpers
         with SessionLocal() as db:
             ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
             assert_ok(ds is not None, "dataset row missing")
@@ -162,11 +163,23 @@ def main() -> None:
             db.add(AIUsage(user_id=uuid.UUID(user_id), provider="claude", model="smoke", feature="smoke"))
             db.commit()
 
-        status, blocked, _ = request("POST", f"/api/datasets/{dataset_id}/recommend", headers=user_headers)
-        assert_ok(
-            status == 429 and error_code(blocked) == "AI_QUOTA_EXCEEDED",
-            f"AI quota did not block: {status} {blocked}",
-        )
+    status, blocked, _ = request("POST", f"/api/datasets/{dataset_id}/recommend", headers=user_headers)
+    assert_ok(
+        status == 429 and error_code(blocked) == "AI_QUOTA_EXCEEDED",
+        f"AI quota did not block: {status} {blocked}",
+    )
+
+    client_error_message = f"Smoke client error {suffix}"
+    status, _, _ = request(
+        "POST",
+        "/api/client-errors",
+        {"source": "smoke", "message": client_error_message, "path": "/smoke", "stack": "stack"},
+        user_headers,
+    )
+    assert_ok(status == 204, f"client error report failed: {status}")
+    status, client_errors, _ = request("GET", "/api/admin/client-errors?limit=50", headers=admin_headers)
+    assert_ok(status == 200, f"client error admin endpoint failed: {status}")
+    assert_ok(any(row.get("message") == client_error_message for row in client_errors), "reported client error not found")
 
     status, figure, _ = request(
         "POST",
@@ -187,7 +200,7 @@ def main() -> None:
     if helpers:
         import os as _os
 
-        SessionLocal, _, Figure, FigureCodeArtifact, _, _ = helpers
+        SessionLocal, _, Figure, FigureCodeArtifact, _, _, _ = helpers
         with SessionLocal() as db:
             fig = db.query(Figure).filter(Figure.id == figure_id).first()
             assert_ok(fig is not None, "figure row missing")
@@ -255,10 +268,12 @@ def main() -> None:
     if figure_dir:
         assert_ok(not os.path.exists(figure_dir), f"figure directory was not removed: {figure_dir}")
     if helpers:
-        SessionLocal, _, _, FigureCodeArtifact, _, _ = helpers
+        SessionLocal, _, _, FigureCodeArtifact, _, ClientErrorEvent, _ = helpers
         with SessionLocal() as db:
             artifact_count = db.query(FigureCodeArtifact).filter(FigureCodeArtifact.owner_id == uuid.UUID(user_id)).count()
             assert_ok(artifact_count == 0, f"figure code artifacts were not removed: {artifact_count}")
+            db.query(ClientErrorEvent).filter(ClientErrorEvent.message == client_error_message).delete(synchronize_session=False)
+            db.commit()
 
     print("PASS api scenario: encrypted upload, account export/delete, quotas, audit logs, delete cleanup")
 
