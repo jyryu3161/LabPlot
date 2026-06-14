@@ -28,6 +28,7 @@ class AIUsage(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    organization_id = Column(UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="SET NULL"), nullable=True, index=True)
     provider = Column(String(20), nullable=False)
     model = Column(String(128), nullable=False)
     feature = Column(String(64), nullable=False)

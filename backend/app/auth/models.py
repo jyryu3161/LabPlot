@@ -19,6 +19,7 @@ class User(Base):
     is_approved = Column(Boolean, nullable=False, default=False)
     is_admin = Column(Boolean, nullable=False, default=False)
     token_version = Column(Integer, nullable=False, default=0)
+    active_organization_id = Column(UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="SET NULL"), nullable=True, index=True)
     ai_monthly_limit = Column(Integer, nullable=False, default=200)
     render_monthly_limit = Column(Integer, nullable=False, default=300)
     storage_limit_mb = Column(Integer, nullable=False, default=1024)

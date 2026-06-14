@@ -20,6 +20,7 @@ from app.canvases import models as _canvas_models  # noqa: F401
 from app.client_errors import models as _client_error_models  # noqa: F401
 from app.datasets import models as _dataset_models  # noqa: F401
 from app.figures import models as _figure_models  # noqa: F401
+from app.organizations import models as _org_models  # noqa: F401
 from app.projects import models as _project_models  # noqa: F401
 
 revision = "20260614_0001"
@@ -31,6 +32,7 @@ depends_on = None
 _IDEMPOTENT_DDL = [
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_approved BOOLEAN NOT NULL DEFAULT TRUE",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS active_organization_id UUID",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS ai_monthly_limit INTEGER NOT NULL DEFAULT 200",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS render_monthly_limit INTEGER NOT NULL DEFAULT 300",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS storage_limit_mb INTEGER NOT NULL DEFAULT 1024",
@@ -46,6 +48,7 @@ _IDEMPOTENT_DDL = [
     "CREATE INDEX IF NOT EXISTS ix_figures_owner_project_updated ON figures (owner_id, project_id, updated_at DESC)",
     "CREATE INDEX IF NOT EXISTS ix_figures_owner_status_updated ON figures (owner_id, status, updated_at DESC)",
     "CREATE INDEX IF NOT EXISTS ix_ai_usage_user_created ON ai_usage (user_id, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS ix_ai_usage_organization_created ON ai_usage (organization_id, created_at DESC)",
     "CREATE INDEX IF NOT EXISTS ix_ai_usage_provider_model ON ai_usage (provider, model)",
     "CREATE INDEX IF NOT EXISTS ix_figure_code_artifacts_owner ON figure_code_artifacts (owner_id)",
     "CREATE INDEX IF NOT EXISTS ix_figure_code_artifacts_plot_type ON figure_code_artifacts (plot_type)",

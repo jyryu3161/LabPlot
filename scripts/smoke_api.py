@@ -99,6 +99,8 @@ def db_helpers():
         from app.canvases import models as _canvas_models  # noqa: F401
         from app.canvases.models import FigureCanvas
         from app.client_errors.models import ClientErrorEvent
+        from app.organizations import models as _org_models  # noqa: F401
+        from app.organizations.models import Organization
         from app.projects import models as _project_models  # noqa: F401
         from app.common.encryption import is_encrypted_private_file
         from app.database import SessionLocal
@@ -106,7 +108,7 @@ def db_helpers():
         from app.figures.models import Figure, FigureCodeArtifact
     except Exception:
         return None
-    return SessionLocal, Dataset, Figure, FigureCodeArtifact, FigureCanvas, AIUsage, ClientErrorEvent, is_encrypted_private_file
+    return SessionLocal, Dataset, Figure, FigureCodeArtifact, FigureCanvas, AIUsage, ClientErrorEvent, Organization, is_encrypted_private_file
 
 
 def main() -> None:
@@ -126,13 +128,52 @@ def main() -> None:
             f"unconfigured SMTP test did not fail clearly: {status} {blocked}",
         )
 
+    suffix = "".join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(8))
+    org_key = f"sk-ant-smoke-{suffix}"
+    status, org, _ = request("POST", "/api/organizations", {"name": f"Smoke Org {suffix}"}, admin_headers)
+    assert_ok(status == 201, f"organization create failed: {status} {org}")
+    org_id = org["id"]
+    status, org_ai, _ = request(
+        "PUT",
+        f"/api/organizations/{org_id}/ai-config",
+        {"provider": "claude", "claude_model": "claude-sonnet-4-6", "anthropic_api_key": org_key},
+        admin_headers,
+    )
+    assert_ok(status == 200 and org_ai["has_anthropic_key"] is True and org_key not in json.dumps(org_ai), f"org AI config leaked key or failed: {status} {org_ai}")
+
+    pending_email = f"smoke-pending-{suffix}@example.com"
+    pending_password = "SmokePass12345"
+    status, pending_user, _ = request(
+        "POST",
+        "/api/auth/register",
+        {"email": pending_email, "password": pending_password, "display_name": "Pending Smoke", "organization_id": org_id},
+        base_headers,
+    )
+    assert_ok(status == 201, f"org registration failed: {status} {pending_user}")
+    status, pending_login, _ = request("POST", "/api/auth/login", {"email": pending_email, "password": pending_password}, base_headers)
+    assert_ok(status == 400 and error_code(pending_login) == "ACCOUNT_PENDING_APPROVAL", f"pending org user could log in: {status} {pending_login}")
+    status, members, _ = request("GET", f"/api/organizations/{org_id}/members", headers=admin_headers)
+    assert_ok(status == 200, f"org members failed: {status} {members}")
+    pending_member = next((m for m in members if m["email"] == pending_email and m["status"] == "pending"), None)
+    assert_ok(pending_member is not None, "pending membership not found")
+    status, approved_member, _ = request(
+        "POST",
+        f"/api/organizations/{org_id}/members/{pending_member['id']}/approve",
+        {"role": "member"},
+        admin_headers,
+    )
+    assert_ok(status == 200 and approved_member["status"] == "active", f"membership approval failed: {status} {approved_member}")
+    status, pending_login, _ = request("POST", "/api/auth/login", {"email": pending_email, "password": pending_password}, base_headers)
+    assert_ok(status == 200, f"approved org user login failed: {status} {pending_login}")
+    status, _, _ = request("DELETE", f"/api/admin/users/{pending_user['id']}", headers=admin_headers)
+    assert_ok(status == 204, f"pending org user cleanup failed: {status}")
+
     status, users, _ = request("GET", "/api/admin/users", headers=admin_headers)
     assert_ok(status == 200, f"admin users failed: {status}")
     for row in users:
         if row["email"].startswith("smoke-") and row["email"].endswith("@example.com"):
             request("DELETE", f"/api/admin/users/{row['id']}", headers=admin_headers)
 
-    suffix = "".join(secrets.choice(string.ascii_lowercase + string.digits) for _ in range(8))
     email = f"smoke-{suffix}@example.com"
     password = "SmokePass12345"
     status, user, _ = request(
@@ -165,7 +206,7 @@ def main() -> None:
     dataset_path = None
     figure_dir = None
     if helpers:
-        SessionLocal, Dataset, _, _, _, AIUsage, _, is_encrypted_private_file = helpers
+        SessionLocal, Dataset, _, _, _, AIUsage, _, _, is_encrypted_private_file = helpers
         with SessionLocal() as db:
             ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
             assert_ok(ds is not None, "dataset row missing")
@@ -211,7 +252,7 @@ def main() -> None:
     if helpers:
         import os as _os
 
-        SessionLocal, _, Figure, FigureCodeArtifact, _, _, _, _ = helpers
+        SessionLocal, _, Figure, FigureCodeArtifact, _, _, _, _, _ = helpers
         with SessionLocal() as db:
             fig = db.query(Figure).filter(Figure.id == figure_id).first()
             assert_ok(fig is not None, "figure row missing")
@@ -317,16 +358,19 @@ def main() -> None:
     if figure_dir:
         assert_ok(not os.path.exists(figure_dir), f"figure directory was not removed: {figure_dir}")
     if helpers:
-        SessionLocal, _, _, FigureCodeArtifact, FigureCanvas, _, ClientErrorEvent, _ = helpers
+        SessionLocal, _, _, FigureCodeArtifact, FigureCanvas, _, ClientErrorEvent, Organization, _ = helpers
         with SessionLocal() as db:
             artifact_count = db.query(FigureCodeArtifact).filter(FigureCodeArtifact.owner_id == uuid.UUID(user_id)).count()
             assert_ok(artifact_count == 0, f"figure code artifacts were not removed: {artifact_count}")
             canvas_count = db.query(FigureCanvas).filter(FigureCanvas.owner_id == uuid.UUID(user_id)).count()
             assert_ok(canvas_count == 0, f"canvases were not removed: {canvas_count}")
+            org = db.query(Organization).filter(Organization.id == uuid.UUID(org_id)).first()
+            assert_ok(org and org.ai_config and org_key not in (org.ai_config.anthropic_api_key or ""), "organization AI key was not encrypted")
+            db.delete(org)
             db.query(ClientErrorEvent).filter(ClientErrorEvent.message == client_error_message).delete(synchronize_session=False)
             db.commit()
 
-    print("PASS api scenario: encrypted upload, canvas workflow, email config, account export/delete, quotas, audit logs, delete cleanup")
+    print("PASS api scenario: encrypted upload, canvas workflow, organization workflow, email config, account export/delete, quotas, audit logs, delete cleanup")
 
 
 if __name__ == "__main__":

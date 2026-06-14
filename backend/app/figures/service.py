@@ -568,7 +568,7 @@ def review_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, own
     rev = Review(
         figure_version_id=version_id,
         publication_score=result.get("publication_score"),
-        payload=result, model=ai_client.active_provider_label(db),
+        payload=result, model=ai_client.active_provider_label(db, owner_id),
     )
     db.add(rev)
     db.commit()

@@ -3,6 +3,7 @@ import type {
   DatasetListItem, DatasetDetail, ChartSuggestion, PlotTypeDef, StyleDef,
   FigureListItem, FigureDetail, FigureVersion, Review, Improvement, AdminUser, AIConfig, GalleryFigureItem, AuditLogItem,
   ClientErrorItem, Project, ProjectListItem, FigureCanvas, FigureCanvasListItem, CanvasState, CanvasStyleSuggestion, EmailDeliveryStatus,
+  MembershipItem, MyOrganizationItem, OrganizationAIConfig, OrganizationItem, OrganizationSearchItem, OrganizationUsageSummary,
 } from './types';
 
 // Same-origin by default; Caddy proxies /api and /static to the backend.
@@ -96,6 +97,39 @@ export async function refreshToken(): Promise<TokenResponse> {
 }
 export async function getMe(): Promise<User> { return fetcher<User>('/api/auth/me'); }
 export function logout(): void { clearTokens(); }
+
+// ── organizations ──
+export async function searchOrganizations(q = ''): Promise<OrganizationSearchItem[]> {
+  return fetcher(`/api/organizations/search${q ? `?q=${encodeURIComponent(q)}` : ''}`);
+}
+export async function listMyOrganizations(): Promise<MyOrganizationItem[]> { return fetcher('/api/organizations/my'); }
+export async function createOrganization(data: { name: string; slug?: string; domain?: string; description?: string }): Promise<OrganizationItem> {
+  return fetcher('/api/organizations', { method: 'POST', body: JSON.stringify(data) });
+}
+export async function joinOrganization(id: string): Promise<MembershipItem> {
+  return fetcher(`/api/organizations/${id}/join`, { method: 'POST', body: JSON.stringify({}) });
+}
+export async function setActiveOrganization(organization_id: string | null): Promise<User> {
+  return fetcher('/api/organizations/active', { method: 'POST', body: JSON.stringify({ organization_id }) });
+}
+export async function listOrganizationMembers(id: string): Promise<MembershipItem[]> {
+  return fetcher(`/api/organizations/${id}/members`);
+}
+export async function approveOrganizationMember(organizationId: string, membershipId: string, role: 'admin' | 'member' = 'member'): Promise<MembershipItem> {
+  return fetcher(`/api/organizations/${organizationId}/members/${membershipId}/approve`, { method: 'POST', body: JSON.stringify({ role }) });
+}
+export async function rejectOrganizationMember(organizationId: string, membershipId: string): Promise<MembershipItem> {
+  return fetcher(`/api/organizations/${organizationId}/members/${membershipId}/reject`, { method: 'POST' });
+}
+export async function getOrganizationAiConfig(id: string): Promise<OrganizationAIConfig> {
+  return fetcher(`/api/organizations/${id}/ai-config`);
+}
+export async function updateOrganizationAiConfig(id: string, data: Partial<OrganizationAIConfig> & { anthropic_api_key?: string; gemini_api_key?: string }): Promise<OrganizationAIConfig> {
+  return fetcher(`/api/organizations/${id}/ai-config`, { method: 'PUT', body: JSON.stringify(data) });
+}
+export async function getOrganizationUsage(id: string): Promise<OrganizationUsageSummary> {
+  return fetcher(`/api/organizations/${id}/usage`);
+}
 
 // ── projects ──
 export async function listProjects(): Promise<ProjectListItem[]> { return fetcher('/api/projects'); }

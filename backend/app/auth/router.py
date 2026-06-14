@@ -23,7 +23,14 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 @router.post("/register", response_model=UserResponse, status_code=201,
              dependencies=[Depends(rate_limit("auth_register", 10, 3600))])
 def register(data: UserRegister, request: Request, db: Session = Depends(get_db)):
-    user = service.register_user(db, data.email, data.password, data.display_name)
+    user = service.register_user(
+        db,
+        data.email,
+        data.password,
+        data.display_name,
+        organization_id=data.organization_id,
+        organization_name=data.organization_name,
+    )
     audit_service.log_event(db, actor_id=user.id, action="auth.register", target_type="user", target_id=user.id, metadata={"email": user.email}, request=request)
     db.commit()
     return user

@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     figures_dir: str = "/app/backend/static/figures"
     DATA_ENCRYPTION_KEY: str = ""
     DATA_ENCRYPTION_PREVIOUS_KEYS: str = ""
+    SECRET_ENCRYPTION_PROVIDER: str = "local"  # local | aws_kms
+    SECRET_AWS_KMS_KEY_ID: str = ""
+    SECRET_AWS_KMS_REGION: str = ""
     STORAGE_BACKEND: str = "local"  # local | s3 | filesystem_object
     OBJECT_STORAGE_BUCKET: str = ""
     OBJECT_STORAGE_PREFIX: str = "labplot"

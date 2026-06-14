@@ -1,8 +1,10 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useAuthContext } from '@/components/auth/AuthProvider';
+import { searchOrganizations } from '@/lib/api';
+import type { OrganizationSearchItem } from '@/lib/types';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -16,9 +18,28 @@ export default function RegisterPage() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
+  const [orgMode, setOrgMode] = useState<'join' | 'create' | 'none'>('join');
+  const [orgQuery, setOrgQuery] = useState('');
+  const [orgResults, setOrgResults] = useState<OrganizationSearchItem[]>([]);
+  const [selectedOrg, setSelectedOrg] = useState<OrganizationSearchItem | null>(null);
+  const [newOrgName, setNewOrgName] = useState('');
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (orgMode !== 'join') return;
+    let cancelled = false;
+    const timer = window.setTimeout(async () => {
+      try {
+        const out = await searchOrganizations(orgQuery);
+        if (!cancelled) setOrgResults(out);
+      } catch {
+        if (!cancelled) setOrgResults([]);
+      }
+    }, 250);
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [orgMode, orgQuery]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault(); setError(''); setSuccess('');
@@ -27,11 +48,29 @@ export default function RegisterPage() {
       setError('Password must be at least 10 characters and include a letter and a number');
       return;
     }
+    if (orgMode === 'join' && !selectedOrg) {
+      setError('Select an organization or choose another organization option');
+      return;
+    }
+    if (orgMode === 'create' && !newOrgName.trim()) {
+      setError('Enter an organization name');
+      return;
+    }
     setLoading(true);
     try {
-      await register({ email, password, display_name: displayName });
-      setSuccess('Account created. A root admin must approve it before you can sign in.');
-      setDisplayName(''); setEmail(''); setPassword(''); setConfirm('');
+      await register({
+        email,
+        password,
+        display_name: displayName,
+        ...(orgMode === 'join' && selectedOrg ? { organization_id: selectedOrg.id } : {}),
+        ...(orgMode === 'create' ? { organization_name: newOrgName.trim() } : {}),
+      });
+      setSuccess(orgMode === 'create'
+        ? 'Account and organization created. You can sign in as the organization admin.'
+        : orgMode === 'join'
+          ? 'Account created. Your organization admin must approve your request before you can sign in.'
+          : 'Account created. A platform admin must approve it before you can sign in.');
+      setDisplayName(''); setEmail(''); setPassword(''); setConfirm(''); setSelectedOrg(null); setNewOrgName('');
     }
     catch (err) { setError(err instanceof Error ? err.message : 'Registration failed'); }
     finally { setLoading(false); }
@@ -64,6 +103,40 @@ export default function RegisterPage() {
             <div className="space-y-2">
               <Label htmlFor="cpw">Confirm Password</Label>
               <Input id="cpw" type="password" value={confirm} onChange={(e) => setConfirm(e.target.value)} placeholder="••••••••" required />
+            </div>
+            <div className="space-y-3 rounded-md border p-3">
+              <Label>Organization</Label>
+              <div className="grid grid-cols-3 gap-2 text-sm">
+                {(['join', 'create', 'none'] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => { setOrgMode(mode); setSelectedOrg(null); }}
+                    className={`rounded-md border px-2 py-1.5 ${orgMode === mode ? 'bg-primary text-primary-foreground' : 'bg-background'}`}
+                  >
+                    {mode === 'join' ? 'Join' : mode === 'create' ? 'Create' : 'Later'}
+                  </button>
+                ))}
+              </div>
+              {orgMode === 'join' && (
+                <div className="space-y-2">
+                  <Input value={orgQuery} onChange={(e) => setOrgQuery(e.target.value)} placeholder="Search institution or lab" />
+                  <div className="max-h-32 space-y-1 overflow-auto">
+                    {orgResults.map((org) => (
+                      <button key={org.id} type="button" onClick={() => setSelectedOrg(org)}
+                        className={`w-full rounded-md border px-2 py-1.5 text-left text-sm ${selectedOrg?.id === org.id ? 'border-primary bg-primary/5' : 'bg-background'}`}>
+                        <span className="font-medium">{org.name}</span>
+                        <span className="ml-2 text-xs text-muted-foreground">{org.domain || org.slug}</span>
+                      </button>
+                    ))}
+                    {orgResults.length === 0 && <p className="text-xs text-muted-foreground">No organization found. Create one if your lab is not listed.</p>}
+                  </div>
+                </div>
+              )}
+              {orgMode === 'create' && (
+                <Input value={newOrgName} onChange={(e) => setNewOrgName(e.target.value)} placeholder="Organization or lab name" />
+              )}
+              {orgMode === 'none' && <p className="text-xs text-muted-foreground">You can request to join or create an organization later.</p>}
             </div>
             <Button type="submit" className="w-full" disabled={loading}>
               {loading ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Creating account...</> : 'Sign Up'}

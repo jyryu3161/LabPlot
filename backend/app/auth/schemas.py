@@ -10,6 +10,8 @@ class UserRegister(BaseModel):
     email: str = Field(..., min_length=3, max_length=255, pattern=EMAIL_PATTERN)
     password: str = Field(..., min_length=10, max_length=256)
     display_name: str = Field(..., min_length=1, max_length=100)
+    organization_id: uuid.UUID | None = None
+    organization_name: str | None = Field(default=None, min_length=2, max_length=255)
 
 
 class UserLogin(BaseModel):
@@ -26,6 +28,7 @@ class UserResponse(BaseModel):
     is_active: bool
     is_approved: bool
     is_admin: bool
+    active_organization_id: uuid.UUID | None = None
     created_at: datetime
 
 

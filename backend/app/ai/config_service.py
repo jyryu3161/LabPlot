@@ -1,23 +1,16 @@
 from sqlalchemy.orm import Session
 
 from app.ai.models import AIConfig
-from app.common.encryption import decrypt_private_bytes, encrypt_private_bytes, encrypted_with_primary_key
+from app.common.secrets import decrypt_secret, encrypt_secret
 from app.config import settings
 
 
 def _encrypt_secret(value: str | None) -> str | None:
-    if not value:
-        return None
-    raw = value.encode("utf-8")
-    if raw.startswith(b"LABPLOTENC1\n") and encrypted_with_primary_key(raw):
-        return value
-    return encrypt_private_bytes(decrypt_private_bytes(raw)).decode("utf-8")
+    return encrypt_secret(value, {"scope": "global_ai_config"})
 
 
 def _decrypt_secret(value: str | None) -> str | None:
-    if not value:
-        return None
-    return decrypt_private_bytes(value.encode("utf-8")).decode("utf-8")
+    return decrypt_secret(value, {"scope": "global_ai_config"})
 
 
 def _ensure_key_encryption(db: Session, cfg: AIConfig) -> AIConfig:

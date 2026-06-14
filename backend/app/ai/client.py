@@ -124,7 +124,7 @@ def _estimate_cost_usd(provider: str, model: str, usage: dict) -> float:
     return round(((input_tokens / 1_000_000) * input_rate) + ((output_tokens / 1_000_000) * output_rate), 6)
 
 
-def _record_usage(user_id: uuid.UUID | None, provider: str, model: str, feature: str, usage: dict) -> None:
+def _record_usage(user_id: uuid.UUID | None, organization_id: uuid.UUID | None, provider: str, model: str, feature: str, usage: dict) -> None:
     if not user_id:
         return
     input_tokens = int(usage.get("input_tokens") or 0)
@@ -132,6 +132,7 @@ def _record_usage(user_id: uuid.UUID | None, provider: str, model: str, feature:
     total_tokens = int(usage.get("total_tokens") or (input_tokens + output_tokens))
     row = AIUsage(
         user_id=user_id,
+        organization_id=organization_id,
         provider=provider,
         model=model,
         feature=feature,
@@ -151,6 +152,7 @@ def _record_usage(user_id: uuid.UUID | None, provider: str, model: str, feature:
 
 def _run_logged(db: Session, user_id: uuid.UUID | None, feature: str, system: str, content: list[dict],
                 schema: dict, tool_name: str, max_tokens: int) -> dict:
+    user = None
     if user_id:
         from app.auth.models import User
         from app.common.quotas import enforce_ai_quota
@@ -158,11 +160,11 @@ def _run_logged(db: Session, user_id: uuid.UUID | None, feature: str, system: st
         user = db.query(User).filter(User.id == user_id).first()
         if user:
             enforce_ai_quota(db, user)
-    cfg, model, key = _ready(db)
+    provider, model, key, organization_id = _ready(db, user)
     payload, usage = providers.run_structured_with_usage(
-        cfg.provider, model, key, system, content, schema, tool_name, max_tokens
+        provider, model, key, system, content, schema, tool_name, max_tokens
     )
-    _record_usage(user_id, cfg.provider, model, feature, usage)
+    _record_usage(user_id, organization_id, provider, model, feature, usage)
     return payload
 
 
@@ -199,27 +201,38 @@ def _neutralize_prompt_injection(text: str) -> str:
     return cleaned
 
 
-def _ready(db: Session):
+def _ready(db: Session, user=None):
+    if user is not None:
+        from app.organizations import service as org_service
+
+        org_cfg, org_id = org_service.active_ai_config_for_user(db, user)
+        if org_cfg is not None:
+            model, key = org_service.decrypt_org_ai_key(org_cfg)
+            if key:
+                return org_cfg.provider, model, key, org_id
     cfg = get_config(db)
     if not cfg.enabled:
         raise BadRequestError("AI features are disabled", error_code="AI_DISABLED")
     model, key = active_model_and_key(cfg)
     if not key:
         raise BadRequestError(f"No API key configured for provider '{cfg.provider}'", error_code="AI_NO_KEY")
-    return cfg, model, key
+    return cfg.provider, model, key, None
 
 
-def active_provider_label(db: Session) -> str:
-    cfg = get_config(db)
-    return f"{cfg.provider}:{active_model_and_key(cfg)[0]}"
+def active_provider_label(db: Session, user_id: uuid.UUID | None = None) -> str:
+    user = None
+    if user_id:
+        from app.auth.models import User
+
+        user = db.query(User).filter(User.id == user_id).first()
+    provider, model, _, org_id = _ready(db, user)
+    scope = f"org:{org_id}" if org_id else "global"
+    return f"{provider}:{model}:{scope}"
 
 
 # ----------------------------------------------------------------- recommend
 def recommend_charts(db: Session, column_profile: list[dict], project_context: str | None = None,
                      user_id: uuid.UUID | None = None) -> list[dict]:
-    cfg = get_config(db)
-    if not cfg.enabled:
-        raise BadRequestError("AI features are disabled", error_code="AI_DISABLED")
     cols = [{"name": c["name"], "dtype": c["dtype"], "role": c["role"],
              "n_unique": c["n_unique"], "sample": c.get("sample_values", [])[:4]} for c in column_profile]
     system = RECOMMEND_SYSTEM
@@ -227,8 +240,9 @@ def recommend_charts(db: Session, column_profile: list[dict], project_context: s
     content = _ctx_block(project_context) + [{"kind": "text", "text": "Column profile:\n" + json.dumps(cols, ensure_ascii=False)}]
     out = _run_logged(db, user_id, "chart_recommendations", system, content, schema, "chart_recommendations", 2000)
     recs = out.get("recommendations", [])
+    source = active_provider_label(db, user_id)
     for r in recs:
-        r["source"] = cfg.provider
+        r["source"] = source
         if not r.get("suggested_mapping") and isinstance(r.get("required_vars"), dict):
             r["suggested_mapping"] = {k: v for k, v in r["required_vars"].items() if v not in (None, "", [])}
     return sorted(recs, key=lambda r: float(r.get("score") or 0), reverse=True)[:5]
@@ -237,9 +251,6 @@ def recommend_charts(db: Session, column_profile: list[dict], project_context: s
 def recommend_from_reference_image(db: Session, column_profile: list[dict], image_bytes: bytes, mime: str,
                                    project_context: str | None = None,
                                    user_id: uuid.UUID | None = None) -> list[dict]:
-    cfg = get_config(db)
-    if not cfg.enabled:
-        raise BadRequestError("AI features are disabled", error_code="AI_DISABLED")
     if not image_bytes:
         raise BadRequestError("Reference image is empty", error_code="EMPTY_IMAGE")
     cols = [{"name": c["name"], "dtype": c["dtype"], "role": c["role"],
@@ -253,8 +264,9 @@ def recommend_from_reference_image(db: Session, column_profile: list[dict], imag
         content, _recommendation_schema(), "chart_recommendations", 2400
     )
     recs = out.get("recommendations", [])
+    source = active_provider_label(db, user_id)
     for r in recs:
-        r["source"] = f"{cfg.provider}:reference"
+        r["source"] = f"{source}:reference"
         if not r.get("suggested_mapping") and isinstance(r.get("required_vars"), dict):
             r["suggested_mapping"] = {k: v for k, v in r["required_vars"].items() if v not in (None, "", [])}
     return sorted(recs, key=lambda r: float(r.get("score") or 0), reverse=True)[:5]

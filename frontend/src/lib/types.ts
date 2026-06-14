@@ -5,12 +5,70 @@ export interface User {
   is_active: boolean;
   is_approved: boolean;
   is_admin: boolean;
+  active_organization_id?: string | null;
   created_at: string;
 }
 
 export interface LoginRequest { email: string; password: string; }
-export interface RegisterRequest { email: string; password: string; display_name: string; }
+export interface RegisterRequest { email: string; password: string; display_name: string; organization_id?: string; organization_name?: string; }
 export interface TokenResponse { access_token: string; refresh_token: string; token_type: string; }
+
+export interface OrganizationItem {
+  id: string;
+  name: string;
+  slug: string;
+  domain?: string | null;
+  description?: string | null;
+  is_active: boolean;
+  created_at: string;
+}
+
+export interface OrganizationSearchItem {
+  id: string;
+  name: string;
+  slug: string;
+  domain?: string | null;
+  member_count: number;
+}
+
+export interface MembershipItem {
+  id: string;
+  organization_id: string;
+  organization_name: string;
+  user_id: string;
+  email: string;
+  display_name: string;
+  role: 'admin' | 'member';
+  status: 'pending' | 'active' | 'rejected';
+  requested_at: string;
+  reviewed_at?: string | null;
+}
+
+export interface MyOrganizationItem {
+  organization: OrganizationItem;
+  membership: MembershipItem;
+  active: boolean;
+  is_org_admin: boolean;
+}
+
+export interface OrganizationAIConfig {
+  provider: string;
+  enabled: boolean;
+  claude_model: string;
+  gemini_model: string;
+  has_anthropic_key: boolean;
+  has_gemini_key: boolean;
+  secret_provider: string;
+  updated_at?: string | null;
+}
+
+export interface OrganizationUsageSummary {
+  ai_request_count: number;
+  ai_input_tokens: number;
+  ai_output_tokens: number;
+  ai_total_tokens: number;
+  ai_estimated_cost_usd: number;
+}
 
 export interface ColumnProfile {
   name: string;

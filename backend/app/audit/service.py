@@ -8,7 +8,20 @@ from sqlalchemy.orm import Session
 
 from app.audit.models import AuditLog
 
-_SENSITIVE_KEYS = {"password", "token", "access_token", "refresh_token", "api_key", "anthropic_api_key", "gemini_api_key"}
+_SENSITIVE_KEYS = {
+    "password",
+    "token",
+    "access_token",
+    "refresh_token",
+    "api_key",
+    "api_key_ciphertext",
+    "anthropic_api_key",
+    "gemini_api_key",
+    "anthropic_api_key_ciphertext",
+    "gemini_api_key_ciphertext",
+    "secret",
+    "ciphertext",
+}
 
 
 def _client_ip(request: Request | None) -> str | None:

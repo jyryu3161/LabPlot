@@ -60,7 +60,14 @@ def _issue_tokens(user: User) -> dict:
     }
 
 
-def register_user(db: Session, email: str, password: str, display_name: str) -> User:
+def register_user(
+    db: Session,
+    email: str,
+    password: str,
+    display_name: str,
+    organization_id: uuid.UUID | None = None,
+    organization_name: str | None = None,
+) -> User:
     email = _normalize_email(email)
     _validate_password(password)
     existing = db.query(User).filter(User.email == email).first()
@@ -74,6 +81,16 @@ def register_user(db: Session, email: str, password: str, display_name: str) -> 
         is_approved=False,
     )
     db.add(user)
+    db.flush()
+    if organization_name and organization_name.strip():
+        from app.organizations.schemas import OrganizationCreate
+        from app.organizations.service import create_organization
+
+        create_organization(db, user, OrganizationCreate(name=organization_name.strip()))
+    elif organization_id:
+        from app.organizations.service import request_join
+
+        request_join(db, organization_id, user)
     db.commit()
     db.refresh(user)
     return user

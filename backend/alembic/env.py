@@ -16,6 +16,7 @@ from app.canvases import models as _canvas_models  # noqa: F401
 from app.client_errors import models as _client_error_models  # noqa: F401
 from app.datasets import models as _dataset_models  # noqa: F401
 from app.figures import models as _figure_models  # noqa: F401
+from app.organizations import models as _org_models  # noqa: F401
 from app.projects import models as _project_models  # noqa: F401
 
 config = context.config

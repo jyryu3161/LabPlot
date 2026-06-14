@@ -5,13 +5,14 @@ import { usePathname } from 'next/navigation';
 import { useAuthContext } from '@/components/auth/AuthProvider';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
-import { BarChart3, FolderKanban, Images, Shield, LogOut, GalleryHorizontalEnd, UserCircle, Layers3 } from 'lucide-react';
+import { BarChart3, Building2, FolderKanban, Images, Shield, LogOut, GalleryHorizontalEnd, UserCircle, Layers3 } from 'lucide-react';
 
 const NAV = [
   { href: '/projects', label: 'Projects', icon: FolderKanban },
   { href: '/gallery', label: 'Gallery', icon: GalleryHorizontalEnd },
   { href: '/figures', label: 'Figures', icon: Images },
   { href: '/canvases', label: 'Canvases', icon: Layers3 },
+  { href: '/organizations', label: 'Organizations', icon: Building2 },
 ];
 
 export function AppHeader() {
