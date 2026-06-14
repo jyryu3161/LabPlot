@@ -19,6 +19,7 @@ GUIDANCE
 - time-to-event plus event-status columns: kaplan_meier.
 - Map variables only to actual column names from the profile.
 - Populate suggested_mapping with the exact LabPlot mapping keys needed to create the chart.
+- Return at most five recommendations, ordered by data-structure fit. Do not include chart types whose required variables are missing.
 
 OUTPUT
 Return only a valid JSON object:
@@ -48,6 +49,7 @@ SCOPE
 - Map variables only to actual column names from the dataset profile.
 - If the reference figure cannot be approximated with LabPlot templates, recommend the closest supported option and explain the limitation.
 - Manuscript-style figures usually keep in-plot titles blank; do not suggest a title unless it is structurally necessary.
+- Return at most five recommendations, ordered by how well the reference structure and dataset columns match.
 
 OUTPUT
 Return only a valid JSON object:

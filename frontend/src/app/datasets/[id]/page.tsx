@@ -1,6 +1,6 @@
 'use client';
 
-import { use, useMemo, useState } from 'react';
+import { use, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
@@ -19,7 +19,7 @@ import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Loader2, Sparkles, Wand2, ArrowRight } from 'lucide-react';
+import { Clipboard, ImageIcon, Loader2, Sparkles, Wand2, ArrowRight, X } from 'lucide-react';
 
 const ROLE_COLORS: Record<string, string> = {
   numeric: 'bg-blue-100 text-blue-700', group: 'bg-green-100 text-green-700',
@@ -70,6 +70,24 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
   const plotTypes = useMemo(() => plotTypesData?.plot_types ?? [], [plotTypesData?.plot_types]);
   const styles = useMemo(() => stylesData?.styles ?? [], [stylesData?.styles]);
   const columns = ds?.column_profile ?? [];
+  const suggestions = useMemo(() => aiSug ?? ruleSug?.suggestions ?? [], [aiSug, ruleSug?.suggestions]);
+  const displayedSuggestions = useMemo(() => (
+    suggestions
+      .map((suggestion, index) => ({ suggestion, index }))
+      .sort((a, b) => ((b.suggestion.score ?? 0) - (a.suggestion.score ?? 0)) || (a.index - b.index))
+      .slice(0, 5)
+  ), [suggestions]);
+  const suggestionLabel = aiSug ? 'Top AI matches' : 'Top dataset matches';
+  const referencePreviewUrl = useMemo(
+    () => (referenceFile ? URL.createObjectURL(referenceFile) : null),
+    [referenceFile],
+  );
+
+  useEffect(() => {
+    return () => {
+      if (referencePreviewUrl) URL.revokeObjectURL(referencePreviewUrl);
+    };
+  }, [referencePreviewUrl]);
 
   // ── builder state ──
   const [plotType, setPlotType] = useState('');
@@ -96,6 +114,25 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
     selectPlotType(s.plot_type, (s.suggested_mapping as Record<string, unknown>) || {});
   }
 
+  function chooseReferenceFile(file: File | null) {
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      toast.error('Reference must be an image file');
+      return;
+    }
+    setReferenceFile(file);
+  }
+
+  function handleReferencePaste(e: React.ClipboardEvent<HTMLDivElement>) {
+    const imageItem = Array.from(e.clipboardData.items).find((item) => item.type.startsWith('image/'));
+    const pasted = imageItem?.getAsFile();
+    if (!pasted) return;
+    const ext = pasted.type.split('/')[1]?.replace('jpeg', 'jpg') || 'png';
+    chooseReferenceFile(new File([pasted], `pasted-reference-${Date.now()}.${ext}`, { type: pasted.type }));
+    e.preventDefault();
+    toast.success('Reference image pasted');
+  }
+
   const create = useMutation({
     mutationFn: () => createFigure({ dataset_id: id, name: name || 'Untitled', plot_type: plotType, mapping, options, style_preset: style }),
     onSuccess: (fig) => { toast.success('Figure created'); router.push(`/figures/${fig.id}`); },
@@ -106,7 +143,6 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
     return (<div className="min-h-screen bg-muted/20"><AppHeader /><div className="flex justify-center py-20"><Loader2 className="h-6 w-6 animate-spin" /></div></div>);
   }
 
-  const suggestions = aiSug ?? ruleSug?.suggestions ?? [];
   const datasetFigures = (figures ?? []).filter((f) => f.dataset_id === id);
 
   return (
@@ -222,14 +258,49 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                 </Button>
               </CardHeader>
               <CardContent className="space-y-4">
-                <div className="flex flex-col gap-3 rounded-lg border bg-muted/30 p-3 md:flex-row md:items-end">
-                  <div className="min-w-0 flex-1 space-y-1">
-                    <Label>Reference figure image</Label>
-                    <Input
-                      type="file"
-                      accept="image/png,image/jpeg,image/webp"
-                      onChange={(e) => setReferenceFile(e.target.files?.[0] ?? null)}
-                    />
+                <div className="grid gap-3 rounded-lg border bg-muted/30 p-3 lg:grid-cols-[1fr_auto] lg:items-end">
+                  <div className="grid min-w-0 gap-3 md:grid-cols-[1fr_1.2fr]">
+                    <div className="space-y-1">
+                      <Label>Reference figure image</Label>
+                      <Input
+                        type="file"
+                        accept="image/png,image/jpeg,image/webp"
+                        onChange={(e) => chooseReferenceFile(e.target.files?.[0] ?? null)}
+                      />
+                    </div>
+                    <div
+                      tabIndex={0}
+                      aria-label="Paste reference figure image"
+                      onPaste={handleReferencePaste}
+                      className="flex min-h-24 items-center gap-3 rounded-lg border border-dashed bg-background px-4 py-3 text-left outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20"
+                    >
+                      {referencePreviewUrl ? (
+                        <>
+                          <img src={referencePreviewUrl} alt="Reference preview" className="h-16 w-20 rounded border bg-white object-contain" />
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-sm font-medium">{referenceFile?.name}</p>
+                            <p className="text-xs text-muted-foreground">Ready for reference matching</p>
+                          </div>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            onClick={(e) => { e.stopPropagation(); setReferenceFile(null); }}
+                            aria-label="Clear reference image"
+                          >
+                            <X className="h-4 w-4" />
+                          </Button>
+                        </>
+                      ) : (
+                        <>
+                          <Clipboard className="h-5 w-5 text-primary" />
+                          <div>
+                            <p className="text-sm font-medium">Paste screenshot here</p>
+                            <p className="text-xs text-muted-foreground">Click this box, then paste a copied PNG/JPEG/WebP image.</p>
+                          </div>
+                        </>
+                      )}
+                    </div>
                   </div>
                   <Button
                     type="button"
@@ -241,19 +312,39 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                     Match reference
                   </Button>
                 </div>
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-medium">{suggestionLabel}</p>
+                    <p className="text-xs text-muted-foreground">Ranked by data-shape fit; unsupported chart structures are filtered out.</p>
+                  </div>
+                  <Badge variant="secondary">{displayedSuggestions.length} shown</Badge>
+                </div>
                 <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                  {suggestions.map((s, i) => (
-                    <button key={i} onClick={() => applySuggestion(s)}
+                  {displayedSuggestions.map(({ suggestion: s }, i) => (
+                    <button key={`${s.plot_type}-${i}`} onClick={() => applySuggestion(s)}
                       className="rounded-lg border p-3 text-left transition hover:border-primary hover:shadow-sm">
-                      <div className="flex items-center justify-between">
+                      <div className="flex items-start justify-between gap-2">
                         <span className="font-medium">{s.title ?? s.plot_type}</span>
-                        <Badge variant={s.source === 'rule' ? 'secondary' : 'default'}>{s.source === 'rule' ? 'rule' : 'AI'}</Badge>
+                        <div className="flex shrink-0 items-center gap-1">
+                          <Badge variant="secondary">#{s.rank ?? i + 1}</Badge>
+                          <Badge variant={s.source === 'rule' ? 'outline' : 'default'}>{s.source === 'rule' ? 'rule' : 'AI'}</Badge>
+                        </div>
+                      </div>
+                      <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                        {typeof s.score === 'number' && <span>{Math.round(s.score * 100)}% fit</span>}
+                        {s.fit && <span className="capitalize">{s.fit}</span>}
                       </div>
                       {s.rationale && <p className="mt-1 line-clamp-3 text-xs text-muted-foreground">{s.rationale}</p>}
                       <span className="mt-2 inline-flex items-center text-xs text-primary">Use this <ArrowRight className="ml-1 h-3 w-3" /></span>
                     </button>
                   ))}
                 </div>
+                {displayedSuggestions.length === 0 && (
+                  <div className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
+                    <ImageIcon className="mx-auto mb-2 h-5 w-5" />
+                    No compatible chart recommendations for this dataset profile yet.
+                  </div>
+                )}
               </CardContent>
             </Card>
 

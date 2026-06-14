@@ -5,108 +5,219 @@ identically (source field distinguishes them).
 """
 from __future__ import annotations
 
+import re
+from typing import Any
 
-def _by_role(columns: list[dict]):
-    buckets: dict[str, list[str]] = {}
+MAX_RULE_SUGGESTIONS = 5
+
+
+def _by_role(columns: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    buckets: dict[str, list[dict[str, Any]]] = {}
     for c in columns:
-        buckets.setdefault(c["role"], []).append(c["name"])
+        buckets.setdefault(c.get("role", "text"), []).append(c)
     return buckets
 
 
-def suggest_charts(columns: list[dict]) -> list[dict]:
+def _names(cols: list[dict[str, Any]]) -> list[str]:
+    return [c["name"] for c in cols]
+
+
+def _first(cols: list[dict[str, Any]]) -> str | None:
+    return cols[0]["name"] if cols else None
+
+
+def _match(cols: list[dict[str, Any]], pattern: str) -> str | None:
+    rx = re.compile(pattern, re.I)
+    for col in cols:
+        if rx.search(str(col.get("name", ""))):
+            return col["name"]
+    return None
+
+
+def _is_chromosome_name(col: dict[str, Any]) -> bool:
+    return bool(re.search(r"\b(chr|chrom|chromosome)\b", str(col.get("name", "")), re.I))
+
+
+def _best_group(cols: list[dict[str, Any]]) -> str | None:
+    if not cols:
+        return None
+    ranked = sorted(
+        cols,
+        key=lambda c: (
+            0 if c.get("role") == "group" else 1 if c.get("role") == "status" else 2,
+            int(c.get("n_unique") or 999),
+            c["name"].lower(),
+        ),
+    )
+    return ranked[0]["name"]
+
+
+def _mapping(data: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in data.items() if v not in (None, "", [])}
+
+
+def suggest_charts(columns: list[dict[str, Any]], limit: int = MAX_RULE_SUGGESTIONS) -> list[dict[str, Any]]:
     b = _by_role(columns)
-    numeric = b.get("numeric", [])
-    group = b.get("group", []) + b.get("category", [])
-    time = b.get("time", [])
-    status = b.get("status", [])
-    log2fc = b.get("log2fc", [])
-    pvalue = b.get("pvalue", [])
-    gene = b.get("gene", [])
-    # numeric-ish columns usable as a heatmap/PCA matrix
+    numeric_cols = b.get("numeric", [])
+    log2fc_cols = b.get("log2fc", [])
+    pvalue_cols = b.get("pvalue", [])
+    group_cols = b.get("group", []) + b.get("category", []) + b.get("status", [])
+    time_cols = [c for c in b.get("time", []) if not _is_chromosome_name(c)]
+    status_cols = b.get("status", [])
+    gene_cols = b.get("gene", [])
+    text_cols = b.get("text", []) + b.get("category", []) + b.get("group", []) + gene_cols
+
+    numeric = _names(numeric_cols)
+    log2fc = _names(log2fc_cols)
+    pvalue = _names(pvalue_cols)
+    group = _names(group_cols)
+    time = _names(time_cols)
+    status = _names(status_cols)
+    gene = _names(gene_cols)
     matrix_cols = numeric + log2fc
+    primary_group = _best_group(group_cols)
 
-    out: list[dict] = []
+    suggestions: list[dict[str, Any]] = []
 
-    def add(plot_type, title, score, rationale, mapping, required):
-        out.append({
+    def add(plot_type: str, title: str, score: float, rationale: str,
+            mapping: dict[str, Any], required: dict[str, Any], fit: str) -> None:
+        suggestions.append({
             "plot_type": plot_type,
             "title": title,
             "score": score,
             "rationale": rationale,
-            "suggested_mapping": mapping,
+            "suggested_mapping": _mapping(mapping),
             "required_vars": required,
+            "fit": fit,
             "source": "rule",
         })
 
+    all_cols = columns
+    chrom = _match(all_cols, r"\b(chr|chrom|chromosome)\b")
+    pos = _match(numeric_cols, r"\b(pos|position|bp|base[_\s-]*pair)\b")
+    if chrom and pos and pvalue:
+        add("manhattan", "Manhattan plot", 0.98,
+            "Detected chromosome, genomic position, and p-value columns required for a GWAS-style Manhattan plot.",
+            {"chrom": chrom, "pos": pos, "pvalue": pvalue[0]},
+            {"chrom": [chrom], "pos": [pos], "pvalue": pvalue[:3]},
+            "exact")
+
     if log2fc and pvalue:
         add("volcano", "Volcano plot", 0.97,
-            "Detected log2 fold-change and p-value columns, which are suitable for differential expression visualization.",
-            {"log2fc": log2fc[0], "pvalue": pvalue[0], "gene_label": (gene[0] if gene else None)},
-            {"log2fc": log2fc[:3], "pvalue": pvalue[:3]})
+            "Detected effect-size and p-value columns, which are the required structure for differential analysis visualization.",
+            {"log2fc": log2fc[0], "pvalue": pvalue[0], "gene_label": _first(gene_cols)},
+            {"log2fc": log2fc[:3], "pvalue": pvalue[:3]},
+            "exact")
 
     if time and status:
         add("kaplan_meier", "Kaplan-Meier plot", 0.95,
-            "Detected time and status/event columns, which are suitable for survival curve analysis.",
-            {"time": time[0], "status": status[0], "group": (group[0] if group else None)},
-            {"time": time[:3], "status": status[:3]})
+            "Detected time-to-event and event/status columns, which are required for a survival curve.",
+            {"time": time[0], "status": status[0], "group": primary_group},
+            {"time": time[:3], "status": status[:3]},
+            "exact")
 
-    if group and numeric:
-        add("density", "Density plot", 0.86,
-            f"Compare the distribution shape of '{numeric[0]}' across groups in '{group[0]}'.",
-            {"value": numeric[0], "group": group[0]},
-            {"value": numeric[:5], "group": group[:3]})
-        add("box", "Box plot", 0.9,
-            f"Compare the distribution of numeric column '{numeric[0]}' across categorical groups in '{group[0]}'.",
-            {"x": group[0], "y": numeric[0], "color": group[0]},
-            {"x": group[:3], "y": numeric[:5]})
+    source = _match(text_cols, r"\b(source|from|protein[_\s-]*1|gene[_\s-]*a|interactor[_\s-]*a)\b")
+    target = _match(text_cols, r"\b(target|to|protein[_\s-]*2|gene[_\s-]*b|interactor[_\s-]*b)\b")
+    if source and target and source != target:
+        add("network", "Network", 0.93,
+            "Detected source and target node columns, which fit a network edge-list structure.",
+            {"source": source, "target": target, "weight": _first(numeric_cols)},
+            {"source": [source], "target": [target]},
+            "exact")
+
+    term = _match(text_cols, r"\b(term|pathway|go|description|process|category)\b")
+    if term and (numeric or pvalue):
+        value = numeric[0] if numeric else pvalue[0]
+        add("enrichment_dot", "Enrichment dot plot", 0.9,
+            "Detected a term/pathway column and numeric score/count columns suitable for enrichment-style ranking.",
+            {"term": term, "value": value, "color": (pvalue[0] if pvalue else None)},
+            {"term": [term], "value": (numeric[:5] or pvalue[:3])},
+            "strong")
+
+    if time and numeric:
+        add("line", "Line plot", 0.89,
+            f"Use a line plot to show how '{numeric[0]}' changes over ordered/time column '{time[0]}'.",
+            {"x": time[0], "y": numeric[0], "group": primary_group},
+            {"x": time[:3], "y": numeric[:5]},
+            "strong")
+
+    if primary_group and numeric:
+        add("box", "Box plot", 0.92,
+            f"Compare the distribution of '{numeric[0]}' across categorical groups in '{primary_group}'.",
+            {"x": primary_group, "y": numeric[0], "color": primary_group},
+            {"x": group[:3], "y": numeric[:5]},
+            "strong")
         add("violin", "Violin plot", 0.84,
-            "Use this when the distribution shape and density by group are important.",
-            {"x": group[0], "y": numeric[0], "color": group[0]},
-            {"x": group[:3], "y": numeric[:5]})
-        add("bar", "Bar plot", 0.7,
-            "Highlight grouped summary values such as mean or sum.",
-            {"x": group[0], "y": numeric[0], "stat": "mean"},
-            {"x": group[:3], "y": numeric[:5]})
-
-    if numeric:
-        add("histogram", "Histogram", 0.82,
-            f"Show the univariate distribution of numeric column '{numeric[0]}'.",
-            {"value": numeric[0], "group": (group[0] if group else None)},
-            {"value": numeric[:5]})
+            f"Compare distribution shape and density of '{numeric[0]}' across '{primary_group}'.",
+            {"x": primary_group, "y": numeric[0], "color": primary_group},
+            {"x": group[:3], "y": numeric[:5]},
+            "good")
+        add("bar", "Bar plot", 0.76,
+            f"Summarize '{numeric[0]}' by '{primary_group}' using a mean or sum.",
+            {"x": primary_group, "y": numeric[0], "stat": "mean"},
+            {"x": group[:3], "y": numeric[:5]},
+            "good")
+        add("density", "Density plot", 0.74,
+            f"Show the distribution shape of '{numeric[0]}' with optional grouping by '{primary_group}'.",
+            {"value": numeric[0], "group": primary_group},
+            {"value": numeric[:5], "group": group[:3]},
+            "good")
 
     if len(numeric) >= 2:
         add("scatter", "Scatter plot", 0.88,
             f"Inspect the relationship between numeric variables '{numeric[0]}' and '{numeric[1]}'.",
-            {"x": numeric[0], "y": numeric[1], "color": (group[0] if group else None)},
-            {"x": numeric[:5], "y": numeric[:5]})
-        add("correlation_heatmap", "Correlation heatmap", 0.78,
-            f"Summarize pairwise correlations across {len(numeric)} numeric variables.",
-            {"columns": numeric[:20]},
-            {"columns": numeric[:50]})
+            {"x": numeric[0], "y": numeric[1], "color": primary_group},
+            {"x": numeric[:5], "y": numeric[:5]},
+            "strong")
 
-    if time and numeric:
-        add("line", "Line plot", 0.8,
-            f"Show how '{numeric[0]}' changes over '{time[0]}' in a time-course view.",
-            {"x": time[0], "y": numeric[0], "group": (group[0] if group else None)},
-            {"x": time[:3], "y": numeric[:5]})
-
-    if len(matrix_cols) >= 2:
-        add("heatmap", "Heatmap", 0.72,
-            f"Display {len(matrix_cols)} numeric columns as a matrix and encode patterns with color.",
-            {"columns": matrix_cols[:50], "row_label": (gene[0] if gene else None)},
-            {"columns": matrix_cols[:50]})
+    if numeric:
+        add("histogram", "Histogram", 0.72,
+            f"Show the univariate distribution of numeric column '{numeric[0]}'.",
+            {"value": numeric[0], "group": primary_group},
+            {"value": numeric[:5]},
+            "good")
 
     if len(numeric) >= 3:
-        add("pca", "PCA plot", 0.68,
-            f"Run PCA across {len(numeric)} numeric variables to inspect sample clustering.",
-            {"columns": numeric[:50], "color": (group[0] if group else None)},
-            {"columns": numeric[:50]})
+        add("correlation_heatmap", "Correlation heatmap", 0.76,
+            f"Summarize pairwise correlations across {len(numeric)} numeric variables.",
+            {"columns": numeric[:20]},
+            {"columns": numeric[:50]},
+            "good")
 
-    if group and not numeric:
-        add("bar", "Bar plot (count)", 0.6,
-            "Show category frequencies as bars.",
-            {"x": group[0], "stat": "count"},
-            {"x": group[:3]})
+    if len(matrix_cols) >= 4:
+        heatmap_score = 0.9 if gene else 0.8 if primary_group else 0.76
+        pca_score = 0.94 if primary_group and not gene else 0.78 if not gene else 0.7
+        add("heatmap", "Heatmap", heatmap_score,
+            f"Display {len(matrix_cols)} numeric feature columns as a matrix and encode patterns with color.",
+            {"columns": matrix_cols[:50], "row_label": _first(gene_cols)},
+            {"columns": matrix_cols[:50]},
+            "good")
+        add("pca", "PCA plot", pca_score,
+            f"Run PCA across {len(matrix_cols)} numeric feature columns to inspect sample clustering.",
+            {"columns": matrix_cols[:50], "color": primary_group},
+            {"columns": matrix_cols[:50]},
+            "good")
+        if primary_group:
+            add("annotated_heatmap", "Annotated heatmap", 0.86 if not gene else 0.78,
+                "Numeric feature columns plus grouping annotations fit an annotated cohort heatmap.",
+                {"columns": matrix_cols[:50], "annotations": [primary_group], "row_label": _first(gene_cols)},
+                {"columns": matrix_cols[:50], "annotations": group[:5]},
+                "good")
 
-    out.sort(key=lambda s: s["score"], reverse=True)
+    if primary_group and not numeric:
+        add("bar", "Bar plot (count)", 0.82,
+            f"Show category frequencies for '{primary_group}' as bars.",
+            {"x": primary_group, "stat": "count"},
+            {"x": group[:3]},
+            "strong")
+
+    best_by_type: dict[str, dict[str, Any]] = {}
+    for suggestion in suggestions:
+        current = best_by_type.get(suggestion["plot_type"])
+        if current is None or suggestion["score"] > current["score"]:
+            best_by_type[suggestion["plot_type"]] = suggestion
+
+    out = sorted(best_by_type.values(), key=lambda s: s["score"], reverse=True)[:limit]
+    for rank, suggestion in enumerate(out, start=1):
+        suggestion["rank"] = rank
     return out

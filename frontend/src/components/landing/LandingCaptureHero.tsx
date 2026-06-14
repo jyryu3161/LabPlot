@@ -1,85 +1,74 @@
-'use client';
-
-import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { Button } from '@/components/ui/button';
 import { LandingPrimaryCta } from '@/components/landing/LandingPrimaryCta';
-import { BarChart3, Check, Sparkles } from 'lucide-react';
+import { ArrowRight, Check, FileCode2, ShieldCheck, Sparkles } from 'lucide-react';
 
-const CAPTURES = [
-  { label: 'Gallery', src: '/landing/capture-gallery.png', detail: 'Browse real output before starting a new figure.' },
-  { label: 'Generate figure', src: '/landing/capture-generate.png', detail: 'Upload data and tune recommended plot settings.' },
-  { label: 'Vector editing', src: '/landing/capture-editing.png', detail: 'Adjust SVG text, colors, and layout after rendering.' },
+const PROOF_POINTS = [
+  { label: '18 chart templates', detail: 'ggplot2/R rendering' },
+  { label: 'SVG, TIFF, PDF', detail: 'submission-ready export' },
+  { label: 'Self-hostable', detail: 'private lab deployment' },
 ];
 
 export function LandingCaptureHero() {
-  const [active, setActive] = useState(0);
-
-  useEffect(() => {
-    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-    const timer = window.setInterval(() => setActive((i) => (i + 1) % CAPTURES.length), 4500);
-    return () => window.clearInterval(timer);
-  }, []);
-
-  const activeCapture = CAPTURES[active];
-
   return (
-    <section className="relative min-h-[calc(100svh-7rem)] overflow-hidden border-b bg-zinc-950 text-white md:min-h-[78vh]">
-      <div className="absolute inset-0">
-        {CAPTURES.map((capture, index) => (
-          <img
-            key={capture.src}
-            src={capture.src}
-            alt={`${capture.label} screenshot`}
-            className={`absolute inset-0 h-full w-full object-cover object-top transition-opacity duration-700 ${index === active ? 'opacity-100' : 'opacity-0'}`}
-            decoding="async"
-          />
-        ))}
-        <div className="absolute inset-0 bg-zinc-950/65 md:bg-transparent" />
-        <div className="absolute inset-0 bg-gradient-to-r from-zinc-950 via-zinc-950/70 to-zinc-950/10" />
-        <div className="absolute inset-0 bg-gradient-to-b from-zinc-950/30 via-transparent to-zinc-950/85" />
-        <div className="absolute inset-x-0 bottom-0 h-40 bg-gradient-to-t from-zinc-950 to-transparent" />
-      </div>
-
-      <div className="relative mx-auto flex min-h-[calc(100svh-7rem)] max-w-6xl flex-col justify-center px-4 py-12 md:min-h-[78vh] md:py-24">
+    <section className="border-b bg-background">
+      <div className="mx-auto grid max-w-6xl gap-10 px-4 py-14 md:grid-cols-[1.15fr_0.85fr] md:items-center md:py-16 lg:py-20">
         <div className="max-w-3xl">
-          <div className="mb-5 inline-flex items-center gap-2 rounded-full border border-white/20 bg-white/10 px-3 py-1 text-xs font-medium text-white/80 backdrop-blur">
-            <Sparkles className="h-3.5 w-3.5" /> AI-powered publication figure copilot
+          <div className="mb-5 inline-flex items-center gap-2 rounded-full border bg-muted px-3 py-1 text-xs font-medium text-muted-foreground">
+            <Sparkles className="h-3.5 w-3.5 text-primary" />
+            AI-assisted, reproducible figure workflow
           </div>
-          <h1 className="max-w-3xl text-balance text-3xl font-bold leading-tight tracking-tight sm:text-6xl">
-            Publication-ready figures, powered by AI and reproducible in R.
+          <h1 className="text-balance text-4xl font-bold leading-tight tracking-tight sm:text-5xl lg:text-6xl">
+            Publication-ready figures from data, reference images, and editable R output.
           </h1>
-          <p className="mt-5 max-w-2xl text-base leading-relaxed text-white/78 sm:text-lg">
-            Upload your data, compare recommended plots, tune the figure visually, and export submission-ready SVG, TIFF, PDF, and R code from one workflow.
+          <p className="mt-5 max-w-2xl text-base leading-relaxed text-muted-foreground sm:text-lg">
+            Upload a dataset, get ranked chart recommendations, refine the SVG visually, and keep the exact R code behind every figure.
           </p>
-          <div className="mt-7 flex flex-wrap items-center gap-2 sm:gap-3">
+          <div className="mt-7 flex flex-wrap items-center gap-3">
             <LandingPrimaryCta />
-            <Link href="/gallery"><Button size="lg" variant="secondary" className="h-11 px-6">Explore the gallery</Button></Link>
+            <Link href="/gallery">
+              <Button size="lg" variant="outline" className="h-11 px-6">
+                View examples
+                <ArrowRight className="ml-2 h-4 w-4" />
+              </Button>
+            </Link>
           </div>
-          <div className="mt-7 grid max-w-2xl grid-cols-2 gap-x-4 gap-y-2 text-xs text-white/78 sm:text-sm md:flex md:flex-wrap md:gap-x-6">
-            {['Template-bound R rendering', 'Versioned SVG editing', 'Colorblind-safe palettes', 'Self-hostable stack'].map((t) => (
-              <span key={t} className="inline-flex items-center gap-1.5"><Check className="h-4 w-4" /> {t}</span>
+          <div className="mt-7 flex flex-wrap gap-x-5 gap-y-2 text-sm text-muted-foreground">
+            {['Ranked recommendations', 'Versioned SVG edits', 'Exportable R scripts'].map((item) => (
+              <span key={item} className="inline-flex items-center gap-1.5">
+                <Check className="h-4 w-4 text-primary" />
+                {item}
+              </span>
             ))}
           </div>
         </div>
 
-        <div className="mt-7 max-w-3xl border border-white/20 bg-black/35 p-3 backdrop-blur md:absolute md:bottom-6 md:right-4 md:mt-0 md:w-[520px]">
-          <div className="mb-2 flex items-center gap-2 text-xs font-medium text-white/80">
-            <BarChart3 className="h-4 w-4" />
-            <span>{activeCapture.detail}</span>
-          </div>
-          <div className="grid grid-cols-3 gap-1.5 text-xs text-white/80">
-            {CAPTURES.map((capture, index) => (
-              <button
-                key={capture.label}
-                type="button"
-                onClick={() => setActive(index)}
-                aria-pressed={index === active}
-                className={`min-h-9 px-2 py-1.5 text-left transition ${index === active ? 'bg-white text-zinc-950' : 'bg-white/5 hover:bg-white/10'}`}
-              >
-                {capture.label}
-              </button>
-            ))}
+        <div className="grid gap-3 sm:grid-cols-3 md:grid-cols-1">
+          {PROOF_POINTS.map((item) => (
+            <div key={item.label} className="rounded-lg border bg-card p-4 shadow-sm">
+              <p className="text-sm font-semibold">{item.label}</p>
+              <p className="mt-1 text-sm text-muted-foreground">{item.detail}</p>
+            </div>
+          ))}
+          <div className="rounded-lg border bg-muted/40 p-4">
+            <div className="flex items-start gap-3">
+              <FileCode2 className="mt-0.5 h-5 w-5 text-primary" />
+              <div>
+                <p className="text-sm font-semibold">No black box</p>
+                <p className="mt-1 text-sm leading-relaxed text-muted-foreground">
+                  AI proposes the chart and parameters; LabPlot stores the rendered output, figure history, and reproducible code.
+                </p>
+              </div>
+            </div>
+            <div className="mt-4 flex items-start gap-3">
+              <ShieldCheck className="mt-0.5 h-5 w-5 text-primary" />
+              <div>
+                <p className="text-sm font-semibold">Private by default</p>
+                <p className="mt-1 text-sm leading-relaxed text-muted-foreground">
+                  Data files are encrypted at rest and can stay on your own server.
+                </p>
+              </div>
+            </div>
           </div>
         </div>
       </div>

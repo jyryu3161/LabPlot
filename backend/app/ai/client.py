@@ -226,7 +226,7 @@ def recommend_charts(db: Session, column_profile: list[dict], project_context: s
         r["source"] = cfg.provider
         if not r.get("suggested_mapping") and isinstance(r.get("required_vars"), dict):
             r["suggested_mapping"] = {k: v for k, v in r["required_vars"].items() if v not in (None, "", [])}
-    return recs
+    return sorted(recs, key=lambda r: float(r.get("score") or 0), reverse=True)[:5]
 
 
 def recommend_from_reference_image(db: Session, column_profile: list[dict], image_bytes: bytes, mime: str,
@@ -252,7 +252,7 @@ def recommend_from_reference_image(db: Session, column_profile: list[dict], imag
         r["source"] = f"{cfg.provider}:reference"
         if not r.get("suggested_mapping") and isinstance(r.get("required_vars"), dict):
             r["suggested_mapping"] = {k: v for k, v in r["required_vars"].items() if v not in (None, "", [])}
-    return recs
+    return sorted(recs, key=lambda r: float(r.get("score") or 0), reverse=True)[:5]
 
 
 # ----------------------------------------------------------------- review

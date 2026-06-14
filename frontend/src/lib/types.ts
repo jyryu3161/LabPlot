@@ -58,6 +58,8 @@ export interface ChartSuggestion {
   plot_type: string;
   title?: string;
   score?: number;
+  rank?: number;
+  fit?: string;
   rationale?: string;
   suggested_mapping?: Record<string, unknown>;
   required_vars?: Record<string, unknown>;
