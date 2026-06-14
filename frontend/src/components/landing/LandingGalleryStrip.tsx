@@ -2,9 +2,9 @@
 
 import { useState } from 'react';
 import Link from 'next/link';
+import Image from 'next/image';
 import { useQuery } from '@tanstack/react-query';
 import { getPublicGallery } from '@/lib/api';
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { GalleryHorizontal, PencilRuler, Sparkles } from 'lucide-react';
 
@@ -12,19 +12,19 @@ const CAPTURES = [
   {
     label: 'Gallery',
     src: '/landing/capture-gallery.png',
-    detail: 'Inspect real LabPlot output across supported chart families before starting.',
+    detail: 'Browse real rendered examples before starting.',
     icon: GalleryHorizontal,
   },
   {
-    label: 'Generate figure',
+    label: 'Generate',
     src: '/landing/capture-generate.png',
-    detail: 'Upload data, review ranked recommendations, and render with mapped columns.',
+    detail: 'Map columns, compare ranked suggestions, and render.',
     icon: Sparkles,
   },
   {
-    label: 'Vector editing',
+    label: 'Edit',
     src: '/landing/capture-editing.png',
-    detail: 'Edit SVG labels, colors, and layout while preserving version history.',
+    detail: 'Polish SVG labels, colors, and layout with version history.',
     icon: PencilRuler,
   },
 ];
@@ -36,23 +36,20 @@ export function LandingGalleryStrip() {
   const activeCapture = CAPTURES[active];
 
   return (
-    <section className="border-b bg-muted/30 py-10 sm:py-14">
+    <section className="border-b bg-background py-14 sm:py-16">
       <div className="mx-auto max-w-6xl px-4">
-        <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-          <div>
-            <Badge variant="secondary" className="mb-2">Product workflow</Badge>
-            <h2 className="text-2xl font-bold tracking-tight">Gallery, generation, and vector editing in one loop</h2>
-            <p className="mt-2 max-w-2xl text-sm leading-relaxed text-muted-foreground">
-              Start from examples, create a figure from your data, then polish the exported SVG without losing the R code lineage.
-            </p>
-          </div>
-          <Link href="/gallery">
-            <Button variant="outline">Open gallery</Button>
-          </Link>
+        <div className="mx-auto mb-7 max-w-3xl text-center">
+          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-primary">Workflow</p>
+          <h2 className="mt-3 text-2xl font-bold tracking-tight text-slate-950 sm:text-3xl">
+            Move from examples to final figure without leaving the workspace.
+          </h2>
+          <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
+            The main flow stays focused: choose a visual direction, generate from data, then edit the vector output.
+          </p>
         </div>
 
-        <div className="grid gap-5 lg:grid-cols-[280px_1fr] lg:items-start">
-          <div className="grid gap-2 sm:grid-cols-3 lg:grid-cols-1">
+        <div className="mb-5 flex justify-center">
+          <div className="inline-flex rounded-lg border bg-muted p-1">
             {CAPTURES.map((capture, index) => {
               const Icon = capture.icon;
               const selected = index === active;
@@ -62,48 +59,45 @@ export function LandingGalleryStrip() {
                   type="button"
                   onClick={() => setActive(index)}
                   aria-pressed={selected}
-                  className={`rounded-lg border p-4 text-left transition ${
-                    selected ? 'border-primary bg-background shadow-sm' : 'bg-background/60 hover:border-primary/60'
+                  className={`inline-flex h-10 items-center gap-2 rounded-md px-3 text-sm font-medium transition sm:px-4 ${
+                    selected ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
                   }`}
                 >
-                  <span className="flex items-center gap-2 text-sm font-semibold">
-                    <Icon className="h-4 w-4 text-primary" />
-                    {capture.label}
-                  </span>
-                  <span className="mt-2 block text-sm leading-relaxed text-muted-foreground">{capture.detail}</span>
+                  <Icon className="h-4 w-4" />
+                  {capture.label}
                 </button>
               );
             })}
           </div>
+        </div>
 
-          <div className="overflow-hidden rounded-lg border bg-background shadow-sm">
-            <div className="border-b px-4 py-3">
-              <p className="text-sm font-semibold">{activeCapture.label}</p>
-            </div>
-            <img
-              src={activeCapture.src}
-              alt={`${activeCapture.label} screenshot`}
-              loading="lazy"
-              decoding="async"
-              className="aspect-[1440/842] w-full bg-white object-contain"
-            />
+        <div className="overflow-hidden rounded-lg border bg-background shadow-xl shadow-slate-900/5">
+          <div className="flex min-h-12 flex-col gap-1 border-b px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-sm font-semibold">{activeCapture.label}</p>
+            <p className="text-sm text-muted-foreground">{activeCapture.detail}</p>
           </div>
+          <Image
+            src={activeCapture.src}
+            alt={`${activeCapture.label} screenshot`}
+            width={1440}
+            height={842}
+            loading="lazy"
+            sizes="(min-width: 1024px) 1024px, 100vw"
+            className="aspect-[1440/842] w-full bg-white object-contain"
+          />
         </div>
 
         {figures.length > 0 && (
-          <div className="mt-9">
+          <div className="mt-10">
             <div className="mb-4 flex items-center justify-between gap-3">
-              <div>
-                <h3 className="text-base font-semibold">Recent gallery figures</h3>
-                <p className="text-sm text-muted-foreground">Real rendered examples from the public gallery.</p>
-              </div>
-              <Link href="/gallery" className="text-sm font-medium text-primary hover:underline">
-                View all
+              <h3 className="text-sm font-semibold text-slate-900">Recent gallery figures</h3>
+              <Link href="/gallery">
+                <Button variant="ghost" size="sm">View all</Button>
               </Link>
             </div>
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
               {figures.slice(0, 4).map((f, i) => (
-                <div key={`${f.thumb_url}-${i}`} className="overflow-hidden rounded-lg border bg-background shadow-sm">
+                <div key={`${f.thumb_url}-${i}`} className="overflow-hidden rounded-lg border bg-background">
                   <img
                     src={f.thumb_url}
                     alt={f.name}
