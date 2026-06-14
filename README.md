@@ -124,6 +124,7 @@ Cost estimates are operational guidance, not a billing ledger. Provider invoices
 - Uploaded files and rendered outputs are stored under backend-managed local static directories.
 - Docker json-file logs are capped by size and file count in Compose.
 - Database schema changes are tracked through Alembic and applied on backend startup.
+- Scheduled GitHub Actions uptime checks validate the public home page and API health endpoint.
 - See `docs/02-operations/commercial-readiness.md` for the deployment, backup, smoke-test, quota, audit, and security runbook.
 
 ## Security Notes

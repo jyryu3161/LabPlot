@@ -131,6 +131,16 @@ docker exec labplot-backend sh -lc "cd /app/backend && /app/.pixi/envs/default/b
 
 The cleanup removes audit logs older than `AUDIT_LOG_RETENTION_DAYS`, expired or used password reset tokens older than `PASSWORD_RESET_TOKEN_RETENTION_DAYS`, client errors older than `CLIENT_ERROR_RETENTION_DAYS`, and optionally orphaned upload/render files.
 
+## Uptime Checks
+
+GitHub Actions runs `.github/workflows/uptime.yml` every 15 minutes against the public home page and health endpoint. Override `UPTIME_HEALTH_URL` and `UPTIME_HOME_URL` with repository variables if the production domain changes.
+
+Manual check:
+
+```bash
+python scripts/uptime_check.py
+```
+
 ## Security Controls
 
 - Authentication: access and refresh JWTs include `token_version`; password reset and admin reset invalidate old tokens.
@@ -148,6 +158,7 @@ The cleanup removes audit logs older than `AUDIT_LOG_RETENTION_DAYS`, expired or
 - Error monitoring: configure `SENTRY_DSN` to capture backend exceptions.
 - Client monitoring: browser errors are posted to `/api/client-errors` and visible to admins.
 - Database migrations: startup runs Alembic `upgrade head`; `alembic_version` tracks applied schema revisions.
+- Uptime monitoring: scheduled GitHub Actions checks validate the public home page and health endpoint.
 - Log retention: Docker services use capped json-file logs to prevent unbounded disk growth.
 
 ## Admin Operations
@@ -165,6 +176,5 @@ Review these areas from the Admin page:
 These are not blockers for the current single-server deployment, but they are the next hardening steps for a larger service:
 
 - Move private uploads and rendered assets to object storage with server-side encryption and lifecycle policies.
-- Add external uptime checks.
-- Extend Sentry or equivalent monitoring to the frontend.
+- Add external alert routing for backend exceptions, frontend client errors, and uptime failures.
 - Add disaster recovery drills with timed restore validation.

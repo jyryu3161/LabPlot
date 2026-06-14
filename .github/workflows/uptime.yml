@@ -1,0 +1,22 @@
+name: Uptime
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Public uptime check
+        env:
+          UPTIME_HEALTH_URL: ${{ vars.UPTIME_HEALTH_URL || 'https://labplotai.com/api/health' }}
+          UPTIME_HOME_URL: ${{ vars.UPTIME_HOME_URL || 'https://labplotai.com/' }}
+          UPTIME_TIMEOUT_SEC: "20"
+        run: python scripts/uptime_check.py
