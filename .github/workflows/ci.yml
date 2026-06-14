@@ -15,7 +15,7 @@ jobs:
           python-version: "3.12"
       - name: Compile backend and scripts
         run: |
-          PYTHONPYCACHEPREFIX=/tmp/labplot-pycache python -m py_compile $(find backend/app scripts -name '*.py' -not -path '*/__pycache__/*' -print)
+          PYTHONPYCACHEPREFIX=/tmp/labplot-pycache python -m py_compile $(find backend/app backend/alembic scripts -name '*.py' -not -path '*/__pycache__/*' -print)
       - name: Validate Compose config
         env:
           POSTGRES_PASSWORD: ci-postgres-password

@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,7 +9,7 @@ from app.config import settings
 from app.common.exceptions import AppError, app_error_handler
 from app.common.security import allowed_origins
 
-# import models so metadata is registered before create_all
+# import models so metadata is registered before migrations
 from sqlalchemy import text
 
 from app.auth import models as _auth_models  # noqa: F401
@@ -19,7 +20,7 @@ from app.figures import models as _fig_models  # noqa: F401
 from app.ai import models as _ai_models  # noqa: F401
 from app.audit import models as _audit_models  # noqa: F401
 from app.client_errors import models as _client_error_models  # noqa: F401
-from app.database import Base, engine
+from app.database import engine
 
 from app.auth.router import router as auth_router
 from app.admin.router import router as admin_router
@@ -121,111 +122,12 @@ def _seed_ai_config():
         get_config(db)  # creates the single config row from env defaults if absent
 
 
-_MIGRATIONS = [
-    "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_approved BOOLEAN NOT NULL DEFAULT TRUE",
-    "ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAULT 0",
-    "ALTER TABLE users ADD COLUMN IF NOT EXISTS ai_monthly_limit INTEGER NOT NULL DEFAULT 200",
-    "ALTER TABLE users ADD COLUMN IF NOT EXISTS render_monthly_limit INTEGER NOT NULL DEFAULT 300",
-    "ALTER TABLE users ADD COLUMN IF NOT EXISTS storage_limit_mb INTEGER NOT NULL DEFAULT 1024",
-    "ALTER TABLE datasets ADD COLUMN IF NOT EXISTS project_id UUID",
-    "ALTER TABLE datasets ADD COLUMN IF NOT EXISTS statistics JSONB",
-    "ALTER TABLE datasets ADD COLUMN IF NOT EXISTS description TEXT",
-    "ALTER TABLE figures ADD COLUMN IF NOT EXISTS project_id UUID",
-    "ALTER TABLE figures ADD COLUMN IF NOT EXISTS description TEXT",
-    "ALTER TABLE figures ADD COLUMN IF NOT EXISTS legend TEXT",
-    "CREATE INDEX IF NOT EXISTS ix_projects_owner_created ON projects (owner_id, created_at)",
-    "CREATE INDEX IF NOT EXISTS ix_datasets_owner_project_created ON datasets (owner_id, project_id, created_at DESC)",
-    "CREATE INDEX IF NOT EXISTS ix_figures_owner_updated ON figures (owner_id, updated_at DESC)",
-    "CREATE INDEX IF NOT EXISTS ix_figures_owner_project_updated ON figures (owner_id, project_id, updated_at DESC)",
-    "CREATE INDEX IF NOT EXISTS ix_figures_owner_status_updated ON figures (owner_id, status, updated_at DESC)",
-    """
-    CREATE TABLE IF NOT EXISTS ai_usage (
-        id UUID PRIMARY KEY,
-        user_id UUID REFERENCES users(id) ON DELETE SET NULL,
-        provider VARCHAR(20) NOT NULL,
-        model VARCHAR(128) NOT NULL,
-        feature VARCHAR(64) NOT NULL,
-        input_tokens INTEGER NOT NULL DEFAULT 0,
-        output_tokens INTEGER NOT NULL DEFAULT 0,
-        total_tokens INTEGER NOT NULL DEFAULT 0,
-        estimated_cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-    """,
-    "CREATE INDEX IF NOT EXISTS ix_ai_usage_user_created ON ai_usage (user_id, created_at DESC)",
-    "CREATE INDEX IF NOT EXISTS ix_ai_usage_provider_model ON ai_usage (provider, model)",
-    """
-    CREATE TABLE IF NOT EXISTS figure_code_artifacts (
-        id UUID PRIMARY KEY,
-        owner_id UUID REFERENCES users(id) ON DELETE SET NULL,
-        dataset_id UUID REFERENCES datasets(id) ON DELETE SET NULL,
-        figure_id UUID REFERENCES figures(id) ON DELETE SET NULL,
-        figure_version_id UUID UNIQUE REFERENCES figure_versions(id) ON DELETE SET NULL,
-        plot_type VARCHAR(40) NOT NULL,
-        style_preset VARCHAR(40) NOT NULL DEFAULT 'nature',
-        mapping JSONB NOT NULL DEFAULT '{}'::jsonb,
-        options JSONB NOT NULL DEFAULT '{}'::jsonb,
-        dataset_profile JSONB NOT NULL DEFAULT '{}'::jsonb,
-        r_code TEXT NOT NULL,
-        render_log TEXT,
-        code_hash VARCHAR(64) NOT NULL,
-        reusable BOOLEAN NOT NULL DEFAULT TRUE,
-        created_at TIMESTAMPTZ DEFAULT NOW()
-    )
-    """,
-    "CREATE INDEX IF NOT EXISTS ix_figure_code_artifacts_owner ON figure_code_artifacts (owner_id)",
-    "CREATE INDEX IF NOT EXISTS ix_figure_code_artifacts_plot_type ON figure_code_artifacts (plot_type)",
-    "CREATE INDEX IF NOT EXISTS ix_figure_code_artifacts_code_hash ON figure_code_artifacts (code_hash)",
-    "CREATE INDEX IF NOT EXISTS ix_figure_code_artifacts_created ON figure_code_artifacts (created_at DESC)",
-    """
-    CREATE TABLE IF NOT EXISTS password_reset_tokens (
-        id UUID PRIMARY KEY,
-        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        token_hash VARCHAR(64) NOT NULL UNIQUE,
-        created_at TIMESTAMPTZ DEFAULT NOW(),
-        expires_at TIMESTAMPTZ NOT NULL,
-        used_at TIMESTAMPTZ
-    )
-    """,
-    "CREATE INDEX IF NOT EXISTS ix_password_reset_tokens_user_id ON password_reset_tokens (user_id)",
-    "CREATE INDEX IF NOT EXISTS ix_password_reset_tokens_token_hash ON password_reset_tokens (token_hash)",
-    """
-    CREATE TABLE IF NOT EXISTS audit_logs (
-        id UUID PRIMARY KEY,
-        actor_id UUID REFERENCES users(id) ON DELETE SET NULL,
-        action VARCHAR(80) NOT NULL,
-        target_type VARCHAR(80),
-        target_id VARCHAR(128),
-        ip_address VARCHAR(64),
-        user_agent VARCHAR(512),
-        metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-    """,
-    "CREATE INDEX IF NOT EXISTS ix_audit_logs_actor_id ON audit_logs (actor_id)",
-    "CREATE INDEX IF NOT EXISTS ix_audit_logs_action ON audit_logs (action)",
-    "CREATE INDEX IF NOT EXISTS ix_audit_logs_created_at ON audit_logs (created_at DESC)",
-    """
-    CREATE TABLE IF NOT EXISTS client_error_events (
-        id UUID PRIMARY KEY,
-        user_id UUID REFERENCES users(id) ON DELETE SET NULL,
-        source VARCHAR(80) NOT NULL DEFAULT 'browser',
-        message VARCHAR(1000) NOT NULL,
-        path VARCHAR(512),
-        stack TEXT,
-        user_agent VARCHAR(512),
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-    """,
-    "CREATE INDEX IF NOT EXISTS ix_client_error_events_user_id ON client_error_events (user_id)",
-    "CREATE INDEX IF NOT EXISTS ix_client_error_events_created_at ON client_error_events (created_at DESC)",
-]
+def _run_migrations():
+    from alembic import command
+    from alembic.config import Config
 
-
-def _light_migrations():
-    with engine.begin() as conn:
-        for stmt in _MIGRATIONS:
-            conn.execute(text(stmt))
+    cfg = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
+    command.upgrade(cfg, "head")
 
 
 def _backfill_projects():
@@ -254,8 +156,7 @@ def _backfill_projects():
 
 @app.on_event("startup")
 def on_startup():
-    Base.metadata.create_all(bind=engine)
-    _light_migrations()
+    _run_migrations()
     _seed_root()
     _seed_ai_config()
     _backfill_projects()

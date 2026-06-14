@@ -76,6 +76,7 @@ docker cp scripts/smoke_api.py labplot-backend:/tmp/smoke_api.py
 docker cp scripts/smoke_services.py labplot-backend:/tmp/smoke_services.py
 docker exec labplot-backend sh -lc "cd /app/backend && /app/.pixi/envs/default/bin/python /tmp/smoke_api.py"
 docker exec labplot-backend sh -lc "cd /app/backend && /app/.pixi/envs/default/bin/python /tmp/smoke_services.py"
+docker exec labplot-backend sh -lc "cd /app/backend && /app/.pixi/envs/default/bin/alembic current"
 curl -k --resolve labplotai.com:443:127.0.0.1 -I https://labplotai.com/
 ```
 
@@ -146,6 +147,7 @@ The cleanup removes audit logs older than `AUDIT_LOG_RETENTION_DAYS`, expired or
 - Cost control: admin users can set per-user monthly AI request limits, render limits, and storage limits.
 - Error monitoring: configure `SENTRY_DSN` to capture backend exceptions.
 - Client monitoring: browser errors are posted to `/api/client-errors` and visible to admins.
+- Database migrations: startup runs Alembic `upgrade head`; `alembic_version` tracks applied schema revisions.
 - Log retention: Docker services use capped json-file logs to prevent unbounded disk growth.
 
 ## Admin Operations
@@ -164,6 +166,5 @@ These are not blockers for the current single-server deployment, but they are th
 
 - Move private uploads and rendered assets to object storage with server-side encryption and lifecycle policies.
 - Add external uptime checks.
-- Replace startup SQL snippets with Alembic migrations for more formal release tracking.
 - Extend Sentry or equivalent monitoring to the frontend.
 - Add disaster recovery drills with timed restore validation.
