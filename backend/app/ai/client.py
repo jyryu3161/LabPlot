@@ -19,7 +19,7 @@ from app.database import SessionLocal
 
 _PLOT_TYPES = [
     "box", "violin", "scatter", "bar", "line", "histogram", "density", "correlation_heatmap",
-    "heatmap", "volcano", "pca", "kaplan_meier", "annotated_heatmap", "network", "enrichment_dot",
+    "heatmap", "error_bar", "ribbon", "contour", "radar", "volcano", "pca", "kaplan_meier", "annotated_heatmap", "network", "enrichment_dot",
     "enrichment_bar", "manhattan", "chemical_space",
 ]
 _MAPPING_PATCH_SCHEMA = {
@@ -28,6 +28,8 @@ _MAPPING_PATCH_SCHEMA = {
         "x": {"type": "string"}, "y": {"type": "string"}, "value": {"type": "string"},
         "color": {"type": "string"}, "size": {"type": "string"},
         "group": {"type": "string"}, "time": {"type": "string"}, "status": {"type": "string"},
+        "axis": {"type": "string"}, "z": {"type": "string"},
+        "ymin": {"type": "string"}, "ymax": {"type": "string"}, "error": {"type": "string"},
         "log2fc": {"type": "string"}, "pvalue": {"type": "string"}, "gene_label": {"type": "string"},
         "row_label": {"type": "string"}, "columns": {"type": "array", "items": {"type": "string"}},
         "annotations": {"type": "array", "items": {"type": "string"}},
@@ -42,6 +44,7 @@ _OPTIONS_PATCH_SCHEMA = {
         "add_smooth": {"type": "boolean"}, "error_bars": {"type": "boolean"},
         "scale_rows": {"type": "boolean"}, "show_density": {"type": "boolean"},
         "show_rug": {"type": "boolean"}, "show_values": {"type": "boolean"},
+        "connect_points": {"type": "boolean"}, "show_contour_lines": {"type": "boolean"},
         "stat": {"type": "string", "enum": ["mean", "sum", "count"]},
         "corr_method": {"type": "string", "enum": ["pearson", "spearman"]},
         "palette": {"type": "string", "enum": ["viridis", "magma", "inferno", "plasma", "cividis"]},
@@ -66,6 +69,8 @@ def _mapping_schema() -> dict:
             "x": {"type": "string"}, "y": {"type": "string"}, "value": {"type": "string"},
             "color": {"type": "string"}, "size": {"type": "string"}, "group": {"type": "string"},
             "time": {"type": "string"}, "status": {"type": "string"},
+            "axis": {"type": "string"}, "z": {"type": "string"},
+            "ymin": {"type": "string"}, "ymax": {"type": "string"}, "error": {"type": "string"},
             "log2fc": {"type": "string"}, "pvalue": {"type": "string"}, "gene_label": {"type": "string"},
             "row_label": {"type": "string"}, "columns": {"type": "array", "items": {"type": "string"}},
             "annotations": {"type": "array", "items": {"type": "string"}},

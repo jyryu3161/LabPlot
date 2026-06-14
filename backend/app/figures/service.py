@@ -41,7 +41,7 @@ _OPTION_CHOICES = {
 }
 _BOOL_OPTIONS = {
     "show_points", "show_box", "error_bars", "scale_rows", "add_smooth", "show_density", "show_rug",
-    "show_values", "hide_legend", "log_x", "log_y", "flip_coords",
+    "show_values", "hide_legend", "log_x", "log_y", "flip_coords", "connect_points", "show_contour_lines",
 }
 _NUMBER_OPTIONS = {"fc_threshold", "p_threshold", "label_top", "font_scale", "dpi", "width_in", "height_in", "bins"}
 _MAX_SVG_BYTES = 5 * 1024 * 1024
@@ -494,6 +494,40 @@ def delete_figure(db: Session, figure_id: uuid.UUID, owner_id: uuid.UUID) -> Non
         storage.delete_prefix(f"figures/{figure_id}")
     db.delete(fig)
     db.commit()
+
+
+def delete_figure_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, owner_id: uuid.UUID) -> dict:
+    fig = get_figure(db, figure_id, owner_id)
+    version = get_version(fig, version_id)
+    remaining = [v for v in fig.versions if v.id != version_id]
+    if not remaining:
+        raise BadRequestError("A figure must keep at least one version", error_code="LAST_VERSION")
+
+    file_refs = [version.png_path, version.svg_path, version.tiff_path, version.pdf_path, version.r_path]
+    version_dir = os.path.join(settings.figures_dir, str(figure_id), str(version_id))
+
+    if fig.current_version_id == version_id:
+        replacement = max(remaining, key=lambda v: v.version_number)
+        fig.current_version_id = replacement.id
+        fig.style_preset = replacement.style_preset
+        artifact = (
+            db.query(FigureCodeArtifact)
+            .filter(FigureCodeArtifact.figure_version_id == replacement.id)
+            .first()
+        )
+        if artifact:
+            fig.plot_type = artifact.plot_type
+
+    db.delete(version)
+    db.commit()
+
+    for ref in file_refs:
+        storage.delete_file(ref)
+    shutil.rmtree(version_dir, ignore_errors=True)
+    if storage.object_storage_enabled():
+        storage.delete_prefix(f"figures/{figure_id}/{version_id}")
+
+    return figure_detail(db, figure_id, owner_id)
 
 
 # ---------------------------------------------------------------- AI: review / improve / apply

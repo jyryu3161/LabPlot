@@ -7,6 +7,7 @@ import { toast } from 'sonner';
 import {
   getFigure, getDataset, getPlotTypes, getStyles, getPalettes, rerenderFigure, reviewVersion,
   improveVersion, applyImprovement, updateFigure, generateLegend, downloadExport, enhancePrompt, saveSvgEditVersion,
+  deleteFigureVersion,
 } from '@/lib/api';
 import type { FigureVersion, Review, Improvement, PlotTypeDef, ColumnProfile } from '@/lib/types';
 import { formatStylePreset } from '@/lib/style-presets';
@@ -18,7 +19,7 @@ import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
-import { Loader2, Star, Wand2, Download, CheckCircle2, History, Pencil, FileText, Sparkles } from 'lucide-react';
+import { Loader2, Star, Wand2, Download, CheckCircle2, History, Pencil, FileText, Sparkles, Trash2 } from 'lucide-react';
 
 const SCORE_COLOR = (s: number) => (s >= 80 ? 'text-green-600' : s >= 60 ? 'text-amber-600' : 'text-red-600');
 
@@ -109,6 +110,21 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
     mutationFn: () => generateLegend(id, effectiveSelectedVid!),
     onSuccess: (r) => { setLegend(r.legend); toast.success('AI legend generated'); },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Legend failed'),
+  });
+  const deleteVersion = useMutation({
+    mutationFn: (versionId: string) => deleteFigureVersion(id, versionId),
+    onSuccess: (updated, deletedVersionId) => {
+      toast.success('Version deleted');
+      qc.setQueryData(['figure', id], updated);
+      qc.invalidateQueries({ queryKey: ['figure', id] });
+      qc.invalidateQueries({ queryKey: ['figures'] });
+      if (selectedVid === deletedVersionId || fig?.current_version_id === deletedVersionId) {
+        setSelectedVid(updated.current_version_id ?? updated.versions[updated.versions.length - 1]?.id ?? null);
+        setReview(null);
+        setImprovements(null);
+      }
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Version delete failed'),
   });
 
   async function doExport(fmt: string) {
@@ -333,11 +349,28 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
               <CardHeader className="pb-2"><CardTitle className="flex items-center gap-2 text-base"><History className="h-4 w-4" /> Versions ({fig.versions.length})</CardTitle></CardHeader>
               <CardContent className="space-y-1">
                 {fig.versions.slice().reverse().map((v) => (
-                  <button key={v.id} onClick={() => { setSelectedVid(v.id); setReview(null); setImprovements(null); }}
-                    className={`flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs ${v.id === effectiveSelectedVid ? 'bg-muted font-medium' : 'hover:bg-muted/50'}`}>
-                    <span>v{v.version_number} · {formatStylePreset(v.style_preset)} · {v.change_note || ''}</span>
+                  <div key={v.id}
+                    className={`flex w-full items-center gap-1 rounded px-2 py-1.5 text-xs ${v.id === effectiveSelectedVid ? 'bg-muted font-medium' : 'hover:bg-muted/50'}`}>
+                    <button type="button" onClick={() => { setSelectedVid(v.id); setReview(null); setImprovements(null); }}
+                      className="min-w-0 flex-1 truncate text-left">
+                      v{v.version_number} · {formatStylePreset(v.style_preset)} · {v.change_note || ''}
+                    </button>
                     {v.id === fig.current_version_id && <Badge variant="secondary" className="text-[10px]">latest</Badge>}
-                  </button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-xs"
+                      title={fig.versions.length <= 1 ? 'Cannot delete the only version' : `Delete v${v.version_number}`}
+                      disabled={fig.versions.length <= 1 || deleteVersion.isPending}
+                      onClick={() => {
+                        if (confirm(`Delete version ${v.version_number}? The archived R code will be kept for reuse.`)) {
+                          deleteVersion.mutate(v.id);
+                        }
+                      }}
+                    >
+                      <Trash2 className="h-3.5 w-3.5 text-muted-foreground" />
+                    </Button>
+                  </div>
                 ))}
               </CardContent>
             </Card>

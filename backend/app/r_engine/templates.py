@@ -372,12 +372,153 @@ p <- ggplot(.curves, aes(x = time, y = surv, colour = factor(grp))) +
 """
 
 
+def _error_bar(m, o):
+    x, y = m["x"], m["y"]
+    group = m.get("group")
+    ymin, ymax, err = m.get("ymin"), m.get("ymax"), m.get("error")
+    grp_expr = f"factor({_col(group)})" if group else 'factor("All")'
+    guide = f" + guides(colour = guide_legend(title = {rq(group)}))" if group else ' + guides(colour = "none")'
+    connect = "TRUE" if o.get("connect_points", True) else "FALSE"
+    if ymin and ymax:
+        interval_block = f"""
+.plot <- df %>%
+  dplyr::mutate(.x_raw = {_col(x)}, .y = suppressWarnings(as.numeric({_col(y)})),
+                .ymin = suppressWarnings(as.numeric({_col(ymin)})),
+                .ymax = suppressWarnings(as.numeric({_col(ymax)})), .grp = {grp_expr})
+"""
+    elif err:
+        interval_block = f"""
+.plot <- df %>%
+  dplyr::mutate(.x_raw = {_col(x)}, .y = suppressWarnings(as.numeric({_col(y)})),
+                .error = suppressWarnings(as.numeric({_col(err)})),
+                .ymin = .y - .error, .ymax = .y + .error, .grp = {grp_expr})
+"""
+    else:
+        interval_block = f"""
+.plot <- df %>%
+  dplyr::mutate(.x_raw = {_col(x)}, .y_raw = suppressWarnings(as.numeric({_col(y)})), .grp = {grp_expr}) %>%
+  dplyr::group_by(.x_raw, .grp) %>%
+  dplyr::summarise(.y = mean(.y_raw, na.rm = TRUE),
+                   .sd = stats::sd(.y_raw, na.rm = TRUE), .n = dplyr::n(), .groups = "drop") %>%
+  dplyr::mutate(.sd = ifelse(is.na(.sd), 0, .sd), .ymin = .y - .sd, .ymax = .y + .sd)
+"""
+    return f"""
+{interval_block}
+.plot <- .plot[stats::complete.cases(.plot[, c(".y", ".ymin", ".ymax")]), ]
+.plot$.x <- if (is.numeric(.plot$.x_raw) || inherits(.plot$.x_raw, "Date")) .plot$.x_raw else factor(as.character(.plot$.x_raw), levels = unique(as.character(.plot$.x_raw)))
+.err_width <- if (is.numeric(.plot$.x)) diff(range(.plot$.x, na.rm = TRUE)) * 0.015 else 0.15
+if (!is.finite(.err_width) || .err_width <= 0) .err_width <- 0.15
+p <- ggplot(.plot, aes(x = .x, y = .y, colour = .grp, group = .grp)) +
+  geom_errorbar(aes(ymin = .ymin, ymax = .ymax), width = .err_width,
+                linewidth = 0.35, position = position_dodge(width = 0.35)) +
+  geom_point(size = 1.8, position = position_dodge(width = 0.35)) +
+  scale_colour_manual(values = labplot_palette()) +
+  {_labs(o, x, y)}{guide}
+if ({connect}) {{
+  p <- p + geom_line(linewidth = 0.35, position = position_dodge(width = 0.35))
+}}
+"""
+
+
+def _ribbon(m, o):
+    x, y = m["x"], m["y"]
+    group = m.get("group")
+    ymin, ymax = m.get("ymin"), m.get("ymax")
+    grp_expr = f"factor({_col(group)})" if group else 'factor("All")'
+    guide = f" + guides(colour = guide_legend(title = {rq(group)}), fill = guide_legend(title = {rq(group)}))" if group else ' + guides(colour = "none", fill = "none")'
+    if ymin and ymax:
+        interval_block = f"""
+.plot <- df %>%
+  dplyr::mutate(.x = {_col(x)}, .y = suppressWarnings(as.numeric({_col(y)})),
+                .ymin = suppressWarnings(as.numeric({_col(ymin)})),
+                .ymax = suppressWarnings(as.numeric({_col(ymax)})), .grp = {grp_expr})
+"""
+    else:
+        interval_block = f"""
+.plot <- df %>%
+  dplyr::mutate(.x = {_col(x)}, .y_raw = suppressWarnings(as.numeric({_col(y)})), .grp = {grp_expr}) %>%
+  dplyr::group_by(.x, .grp) %>%
+  dplyr::summarise(.y = mean(.y_raw, na.rm = TRUE),
+                   .sd = stats::sd(.y_raw, na.rm = TRUE), .n = dplyr::n(), .groups = "drop") %>%
+  dplyr::mutate(.sd = ifelse(is.na(.sd), 0, .sd), .se = .sd / sqrt(pmax(.n, 1)),
+                .ymin = .y - .se, .ymax = .y + .se)
+"""
+    return f"""
+{interval_block}
+.plot <- .plot[stats::complete.cases(.plot[, c(".x", ".y", ".ymin", ".ymax")]), ]
+.plot <- .plot[order(.plot$.grp, .plot$.x), ]
+p <- ggplot(.plot, aes(x = .x, y = .y, colour = .grp, fill = .grp, group = .grp)) +
+  geom_ribbon(aes(ymin = .ymin, ymax = .ymax), alpha = 0.18, colour = NA) +
+  geom_line(linewidth = 0.35) +
+  scale_colour_manual(values = labplot_palette()) +
+  scale_fill_manual(values = labplot_palette()) +
+  {_labs(o, x, y)}{guide}
+"""
+
+
+def _contour(m, o):
+    x, y, z = m["x"], m["y"], m["z"]
+    bins = int(_num(o.get("bins", 10), 10))
+    bins = max(3, min(40, bins))
+    palette = o.get("palette", "viridis")
+    if palette not in ("viridis", "magma", "inferno", "plasma", "cividis"):
+        palette = "viridis"
+    show_lines = "TRUE" if o.get("show_contour_lines", True) else "FALSE"
+    return f"""
+.plot <- data.frame(
+  .x = suppressWarnings(as.numeric({_col(x)})),
+  .y = suppressWarnings(as.numeric({_col(y)})),
+  .z = suppressWarnings(as.numeric({_col(z)}))
+)
+.plot <- .plot[stats::complete.cases(.plot), ]
+if (length(unique(.plot$.x)) < 2 || length(unique(.plot$.y)) < 2) stop("Contour plot needs at least two unique x and y values")
+p <- ggplot(.plot, aes(x = .x, y = .y, z = .z)) +
+  geom_contour_filled(bins = {bins}, alpha = 0.92) +
+  scale_fill_viridis_d(option = "{palette}", name = {rq(z)}) +
+  coord_equal(expand = FALSE) +
+  {_labs(o, x, y)}
+if ({show_lines}) {{
+  p <- p + geom_contour(bins = {bins}, colour = "black", linewidth = 0.18, alpha = 0.55)
+}}
+"""
+
+
+def _radar(m, o):
+    axis, value = m["axis"], m["value"]
+    group = m.get("group")
+    grp_expr = f"factor({_col(group)})" if group else 'factor("All")'
+    guide = f" + guides(colour = guide_legend(title = {rq(group)}), fill = guide_legend(title = {rq(group)}))" if group else ' + guides(colour = "none", fill = "none")'
+    return f"""
+.axis_levels <- unique(as.character({_col(axis)}))
+.plot <- data.frame(
+  .axis = factor(as.character({_col(axis)}), levels = .axis_levels),
+  .value = suppressWarnings(as.numeric({_col(value)})),
+  .grp = {grp_expr}
+)
+.plot <- .plot[stats::complete.cases(.plot), ]
+.plot <- .plot[order(.plot$.grp, .plot$.axis), ]
+.closed <- do.call(rbind, lapply(split(.plot, .plot$.grp), function(d) rbind(d, d[1, , drop = FALSE])))
+p <- ggplot(.closed, aes(x = .axis, y = .value, group = .grp, colour = .grp, fill = .grp)) +
+  geom_polygon(alpha = 0.12, linewidth = 0.35) +
+  geom_point(size = 1.6) +
+  scale_colour_manual(values = labplot_palette()) +
+  scale_fill_manual(values = labplot_palette()) +
+  scale_y_continuous(limits = c(0, NA)) +
+  coord_polar() +
+  {_labs(o, axis, value)}{guide}
+"""
+
+
 _BUILDERS = {
     "box": _box,
     "violin": _violin,
     "scatter": _scatter,
     "bar": _bar,
     "line": _line,
+    "error_bar": _error_bar,
+    "ribbon": _ribbon,
+    "contour": _contour,
+    "radar": _radar,
     "histogram": _histogram,
     "density": _density,
     "correlation_heatmap": _correlation_heatmap,
@@ -415,6 +556,34 @@ PLOT_TYPES = [
      "required": [{"key": "x", "label": "X (time/order)", "roles": ["time", "numeric", "category"]},
                   {"key": "y", "label": "Y (numeric)", "roles": ["numeric"]}],
      "optional": [{"key": "group", "label": "Group/Color", "roles": ["group", "category", "status"]}],
+     "options": []},
+    {"type": "error_bar", "label": "Error bar plot",
+     "required": [{"key": "x", "label": "X (group/time)", "roles": ["group", "category", "time", "numeric"]},
+                  {"key": "y", "label": "Mean / value", "roles": ["numeric"]}],
+     "optional": [{"key": "group", "label": "Series / group", "roles": ["group", "category", "status"]},
+                  {"key": "ymin", "label": "Lower bound", "roles": ["numeric"]},
+                  {"key": "ymax", "label": "Upper bound", "roles": ["numeric"]},
+                  {"key": "error", "label": "Symmetric error", "roles": ["numeric"]}],
+     "options": [{"key": "connect_points", "label": "Connect points", "type": "bool", "default": True}]},
+    {"type": "ribbon", "label": "Ribbon / interval plot",
+     "required": [{"key": "x", "label": "X (time/order)", "roles": ["time", "numeric"]},
+                  {"key": "y", "label": "Mean / value", "roles": ["numeric"]}],
+     "optional": [{"key": "group", "label": "Series / group", "roles": ["group", "category", "status"]},
+                  {"key": "ymin", "label": "Lower bound", "roles": ["numeric"]},
+                  {"key": "ymax", "label": "Upper bound", "roles": ["numeric"]}],
+     "options": []},
+    {"type": "contour", "label": "Contour / response surface",
+     "required": [{"key": "x", "label": "X coordinate", "roles": ["numeric"]},
+                  {"key": "y", "label": "Y coordinate", "roles": ["numeric"]},
+                  {"key": "z", "label": "Response / Z", "roles": ["numeric"]}],
+     "optional": [],
+     "options": [{"key": "bins", "label": "Contour levels", "type": "number", "default": 10},
+                 {"key": "show_contour_lines", "label": "Contour lines", "type": "bool", "default": True},
+                 {"key": "palette", "label": "Palette", "type": "select", "choices": ["viridis", "magma", "inferno", "plasma", "cividis"], "default": "viridis"}]},
+    {"type": "radar", "label": "Radar / polar plot",
+     "required": [{"key": "axis", "label": "Axis / metric", "roles": ["group", "category", "text"]},
+                  {"key": "value", "label": "Value", "roles": ["numeric"]}],
+     "optional": [{"key": "group", "label": "Series / group", "roles": ["group", "category", "status"]}],
      "options": []},
     {"type": "histogram", "label": "Histogram",
      "required": [{"key": "value", "label": "Value", "roles": ["numeric", "log2fc", "pvalue"]}],
@@ -666,6 +835,7 @@ PLOT_TYPES += [
 PLOT_DOMAINS = {
     "box": "basic", "violin": "basic", "scatter": "basic", "bar": "basic", "line": "basic",
     "histogram": "basic", "density": "basic", "correlation_heatmap": "basic", "heatmap": "basic",
+    "error_bar": "engineering", "ribbon": "engineering", "contour": "engineering", "radar": "engineering",
     "volcano": "omics", "pca": "omics",
     "kaplan_meier": "clinical", "annotated_heatmap": "clinical",
     "network": "systems_biology",
@@ -677,6 +847,7 @@ DOMAIN_LABELS = {
     "basic": "Basic statistics", "omics": "Omics", "clinical": "Clinical / cohort",
     "systems_biology": "Systems biology", "enrichment": "Functional enrichment",
     "genomics": "Genomics", "cheminformatics": "Cheminformatics",
+    "engineering": "Engineering / physical science",
 }
 for _p in PLOT_TYPES:
     _p["domain"] = PLOT_DOMAINS.get(_p["type"], "basic")

@@ -76,6 +76,7 @@ def suggest_charts(columns: list[dict[str, Any]], limit: int = MAX_RULE_SUGGESTI
     gene = _names(gene_cols)
     matrix_cols = numeric + log2fc
     primary_group = _best_group(group_cols)
+    all_cols = columns
 
     suggestions: list[dict[str, Any]] = []
 
@@ -92,7 +93,44 @@ def suggest_charts(columns: list[dict[str, Any]], limit: int = MAX_RULE_SUGGESTI
             "source": "rule",
         })
 
-    all_cols = columns
+    x_coord = _match(numeric_cols, r"^(x|x[_\s-]*coord|temperature|temp|dose|pressure|speed|load)$")
+    y_coord = _match(numeric_cols, r"^(y|y[_\s-]*coord|pressure|humidity|ph|time|speed|load)$")
+    z_coord = _match(numeric_cols, r"\b(z|response|yield|intensity|height|surface|signal|strength|stress|efficiency)\b")
+    if x_coord and y_coord and z_coord and len({x_coord, y_coord, z_coord}) == 3:
+        add("contour", "Contour / response surface", 0.94,
+            "Detected x/y coordinate-style columns plus a response column, which fits a contour or response-surface visualization.",
+            {"x": x_coord, "y": y_coord, "z": z_coord},
+            {"x": [x_coord], "y": [y_coord], "z": [z_coord]},
+            "exact")
+
+    lower = _match(numeric_cols, r"\b(ymin|lower|low|lcl|ci[_\s-]*low|min)\b")
+    upper = _match(numeric_cols, r"\b(ymax|upper|high|ucl|ci[_\s-]*high|max)\b")
+    error = _match(numeric_cols, r"\b(sd|se|sem|stderr|std[_\s-]*err|error|err)\b")
+    mean_value = _match(numeric_cols, r"\b(mean|avg|average|value|response|signal|strength|stress)\b") or _first(numeric_cols)
+    x_interval = time[0] if time else primary_group
+    if x_interval and mean_value and (error or (lower and upper)):
+        add("error_bar", "Error bar plot", 0.96,
+            "Detected a measured value with uncertainty columns, which fits an error-bar plot.",
+            {"x": x_interval, "y": mean_value, "group": primary_group if x_interval != primary_group else None,
+             "error": error, "ymin": lower, "ymax": upper},
+            {"x": [x_interval], "y": [mean_value], "error": [error] if error else [], "ymin": [lower] if lower else [], "ymax": [upper] if upper else []},
+            "strong")
+        if time and lower and upper:
+            add("ribbon", "Ribbon / interval plot", 0.97,
+                "Detected ordered/time data with lower and upper bounds, which fits an interval ribbon plot.",
+                {"x": time[0], "y": mean_value, "group": primary_group, "ymin": lower, "ymax": upper},
+                {"x": time[:3], "y": [mean_value], "ymin": [lower], "ymax": [upper]},
+                "strong")
+
+    metric = _match(text_cols, r"\b(metric|axis|parameter|property|dimension|variable)\b")
+    if metric and mean_value:
+        series = next((c["name"] for c in group_cols if c["name"] != metric), None)
+        add("radar", "Radar / polar plot", 0.94,
+            "Detected metric/property labels with numeric values, suitable for comparing profiles across axes.",
+            {"axis": metric, "value": mean_value, "group": series},
+            {"axis": [metric], "value": [mean_value]},
+            "good")
+
     chrom = _match(all_cols, r"\b(chr|chrom|chromosome)\b")
     pos = _match(numeric_cols, r"\b(pos|position|bp|base[_\s-]*pair)\b")
     if chrom and pos and pvalue:

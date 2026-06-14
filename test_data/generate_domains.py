@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Domain example datasets: cancer cohort, PPI/metabolic networks, enrichment,
-GWAS, compound descriptors. Run: python3 test_data/generate_domains.py"""
+GWAS, compound descriptors, and engineering response data.
+
+Run: python3 test_data/generate_domains.py
+"""
 import csv, math, os, random
 random.seed(11)
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -95,5 +98,41 @@ for i in range(140):
     hbd = random.randint(0, 5)
     rows.append([f"CHEMBL{1000+i}", mw, logp, tpsa, hbd, "active" if active else "inactive"])
 w("compounds.csv", ["Compound", "MW", "LogP", "TPSA", "HBD", "Activity"], rows)
+
+# 7) response_surface — gridded x/y/z data for contour / response-surface plots
+rows = []
+for temperature in range(40, 101, 5):
+    for pressure in range(10, 61, 5):
+        peak = 82 - 0.035 * (temperature - 70) ** 2 - 0.055 * (pressure - 35) ** 2
+        ripple = 2.5 * math.sin(temperature / 12) * math.cos(pressure / 9)
+        rows.append([temperature, pressure, round(peak + ripple + random.gauss(0, 0.8), 3)])
+w("response_surface.csv", ["Temperature", "Pressure", "Yield"], rows)
+
+# 8) tensile_test — mean ± sd by material and strain rate
+rows = []
+for material, base in [("Alloy_A", 410), ("Alloy_B", 455), ("Composite_C", 520)]:
+    for rate, shift in [(0.1, -18), (1.0, 0), (10.0, 25)]:
+        mean = base + shift + random.gauss(0, 5)
+        sd = random.uniform(8, 18)
+        rows.append([material, rate, round(mean, 2), round(sd, 2), round(mean - sd, 2), round(mean + sd, 2)])
+w("tensile_test.csv", ["Material", "StrainRate", "StrengthMean", "StrengthSD", "Lower", "Upper"], rows)
+
+# 9) sensor_timeseries — mean signal with confidence ribbon
+rows = []
+for sensor, phase in [("Sensor_A", 0.0), ("Sensor_B", 0.8)]:
+    for t in range(0, 121, 4):
+        mean = 50 + 12 * math.sin(t / 18 + phase) + 0.08 * t
+        band = 3.2 + 1.1 * abs(math.cos(t / 22 + phase))
+        rows.append([sensor, t, round(mean, 3), round(mean - band, 3), round(mean + band, 3)])
+w("sensor_timeseries.csv", ["Sensor", "Time", "SignalMean", "Lower", "Upper"], rows)
+
+# 10) material_profile — multivariate radar profile
+metrics = ["Strength", "Ductility", "Conductivity", "Thermal stability", "Corrosion resistance", "Cost efficiency"]
+rows = []
+for material, center in [("Alloy_A", 72), ("Alloy_B", 68), ("Composite_C", 80)]:
+    for idx, metric in enumerate(metrics):
+        value = max(10, min(100, center + 14 * math.sin(idx + len(material)) + random.gauss(0, 4)))
+        rows.append([material, metric, round(value, 2)])
+w("material_profile.csv", ["Material", "Metric", "Score"], rows)
 
 print("Done.")

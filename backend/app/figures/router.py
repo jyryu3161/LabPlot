@@ -136,6 +136,23 @@ def delete_figure(figure_id: uuid.UUID, request: Request, db: Session = Depends(
     db.commit()
 
 
+@router.delete("/{figure_id}/versions/{version_id}", response_model=FigureDetail)
+def delete_figure_version(figure_id: uuid.UUID, version_id: uuid.UUID, request: Request,
+                          db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    detail = service.delete_figure_version(db, figure_id, version_id, current_user.id)
+    audit_service.log_event(
+        db,
+        actor_id=current_user.id,
+        action="figure.version.delete",
+        target_type="figure",
+        target_id=figure_id,
+        metadata={"version_id": str(version_id), "current_version_id": str(detail["current_version_id"])},
+        request=request,
+    )
+    db.commit()
+    return detail
+
+
 @router.post("/{figure_id}/rerender", response_model=VersionResponse,
              dependencies=[Depends(rate_limit("figure_rerender", 60, 3600))])
 def rerender(figure_id: uuid.UUID, req: RerenderRequest, request: Request, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):

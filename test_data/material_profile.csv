@@ -1,0 +1,19 @@
+Material,Metric,Score
+Alloy_A,Strength,79.35
+Alloy_A,Ductility,88.75
+Alloy_A,Conductivity,71.63
+Alloy_A,Thermal stability,67.95
+Alloy_A,Corrosion resistance,52.13
+Alloy_A,Cost efficiency,61.19
+Alloy_B,Strength,71.57
+Alloy_B,Ductility,81.57
+Alloy_B,Conductivity,76.43
+Alloy_B,Thermal stability,59.32
+Alloy_B,Corrosion resistance,50.34
+Alloy_B,Cost efficiency,60.49
+Composite_C,Strength,67.58
+Composite_C,Ductility,70.1
+Composite_C,Conductivity,86.99
+Composite_C,Thermal stability,88.29
+Composite_C,Corrosion resistance,89.28
+Composite_C,Cost efficiency,81.08

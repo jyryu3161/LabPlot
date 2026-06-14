@@ -90,10 +90,11 @@ labplot_theme <- function() {{
   theme(
     plot.title = element_text(face = "bold", hjust = 0.5, size = {size + 2}),
     plot.subtitle = element_text(size = {size}, colour = "grey30", hjust = 0.5),
-    axis.title = element_text(face = "bold"),
-    axis.text = element_text(colour = "grey20"),
-    axis.line = element_line(colour = "grey20", linewidth = 0.25),
-    axis.ticks = element_line(colour = "grey20", linewidth = 0.25),
+    axis.title = element_text(face = "bold", colour = "black"),
+    axis.text = element_text(colour = "black"),
+    axis.line = element_line(colour = "black", linewidth = 0.3),
+    axis.ticks = element_line(colour = "black", linewidth = 0.3),
+    axis.ticks.length = grid::unit(2.2, "pt"),
     legend.position = "right",
     legend.key = element_blank(),
     {grid_line}

@@ -186,6 +186,9 @@ export async function listGalleryFigures(limit = 200): Promise<GalleryFigureItem
 }
 export async function getFigure(id: string): Promise<FigureDetail> { return fetcher(`/api/figures/${id}`); }
 export async function deleteFigure(id: string): Promise<void> { return fetcher(`/api/figures/${id}`, { method: 'DELETE' }); }
+export async function deleteFigureVersion(figureId: string, versionId: string): Promise<FigureDetail> {
+  return fetcher(`/api/figures/${figureId}/versions/${versionId}`, { method: 'DELETE' });
+}
 export async function updateFigure(id: string, data: { name?: string; description?: string; legend?: string }): Promise<FigureDetail> {
   return fetcher(`/api/figures/${id}`, { method: 'PATCH', body: JSON.stringify(data) });
 }

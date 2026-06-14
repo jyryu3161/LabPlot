@@ -12,6 +12,7 @@ Run:
 from __future__ import annotations
 
 import argparse
+import subprocess
 import io
 import json
 import os
@@ -26,7 +27,11 @@ from typing import Any
 from PIL import Image, ImageStat
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-PLOT_TYPES = {"box", "violin", "scatter", "bar", "line", "heatmap", "volcano", "pca", "kaplan_meier"}
+PLOT_TYPES = {
+    "box", "violin", "scatter", "bar", "line", "error_bar", "ribbon", "contour", "radar",
+    "histogram", "density", "correlation_heatmap", "heatmap", "volcano", "pca", "kaplan_meier",
+    "annotated_heatmap", "network", "enrichment_dot", "enrichment_bar", "manhattan", "chemical_space",
+}
 VERIFY_PREFIX = "LabPlot Verification:"
 SAMPLES = "Ctrl_1 Ctrl_2 Ctrl_3 Trt_1 Trt_2 Trt_3".split()
 FEATS = [f"Feature{i}" for i in range(1, 13)]
@@ -39,6 +44,15 @@ DATASETS = {
     "expression_matrix": "expression_matrix.csv",
     "pca_samples": "pca_samples.csv",
     "survival": "survival.csv",
+    "cancer_cohort": "cancer_cohort.csv",
+    "ppi_network": "ppi_network.csv",
+    "enrichment": "enrichment.csv",
+    "gwas": "gwas.csv",
+    "compounds": "compounds.csv",
+    "response_surface": "response_surface.csv",
+    "tensile_test": "tensile_test.csv",
+    "sensor_timeseries": "sensor_timeseries.csv",
+    "material_profile": "material_profile.csv",
 }
 
 PROJECTS = {
@@ -50,44 +64,93 @@ PROJECTS = {
     "clinical": {
         "name": f"{VERIFY_PREFIX} Clinical",
         "description": "Clinical verification project with time-to-event data, treatment arms, and longitudinal response measurements.",
-        "datasets": ["survival", "time_course", "gene_expression", "dose_response"],
+        "datasets": ["survival", "time_course", "gene_expression", "dose_response", "cancer_cohort"],
+    },
+    "domain": {
+        "name": f"{VERIFY_PREFIX} Domain gallery",
+        "description": "Domain-specific gallery examples covering networks, enrichment, GWAS, and cheminformatics.",
+        "datasets": ["ppi_network", "enrichment", "gwas", "compounds"],
+    },
+    "engineering": {
+        "name": f"{VERIFY_PREFIX} Engineering",
+        "description": "Engineering and physical-science verification project with response surfaces, uncertainty intervals, and material profiles.",
+        "datasets": ["response_surface", "tensile_test", "sensor_timeseries", "material_profile"],
     },
 }
 
 SCENARIOS = [
     ("omics", "gene_expression", "Expression by group (Box)", "box",
      {"x": "Group", "y": "Expression", "color": "Group"},
-     {"show_points": True, "title": "Expression by treatment group"}, "nature"),
+     {"show_points": True}, "nature"),
     ("omics", "gene_expression", "Mean expression (Bar mean)", "bar",
      {"x": "Group", "y": "Expression"},
-     {"stat": "mean", "error_bars": True, "title": "Mean expression by group"}, "cell"),
+     {"stat": "mean", "error_bars": True}, "cell"),
     ("omics", "gene_expression", "Group counts (Bar count)", "bar",
      {"x": "Group", "y": "Expression"},
-     {"stat": "count", "error_bars": True, "title": "Sample counts by group"}, "minimal"),
+     {"stat": "count", "error_bars": True}, "minimal"),
     ("omics", "gene_expression", "Expression vs viability (Scatter)", "scatter",
      {"x": "Expression", "y": "Viability", "color": "Group"},
-     {"add_smooth": True, "title": "Expression vs viability"}, "minimal"),
+     {"add_smooth": True}, "minimal"),
+    ("omics", "gene_expression", "Expression histogram", "histogram",
+     {"value": "Expression", "group": "Group"},
+     {"bins": 18}, "minimal"),
+    ("omics", "gene_expression", "Expression density", "density",
+     {"value": "Expression", "group": "Group"},
+     {"show_rug": True}, "science"),
     ("omics", "expression_matrix", "Expression heatmap (z-scored)", "heatmap",
      {"columns": SAMPLES, "row_label": "Gene"},
-     {"scale_rows": True, "palette": "viridis", "title": "Expression heatmap"}, "nature"),
+     {"scale_rows": True, "palette": "viridis"}, "nature"),
     ("omics", "deg_results", "Differential expression (Volcano)", "volcano",
      {"log2fc": "log2FC", "pvalue": "padj", "gene_label": "Gene"},
-     {"fc_threshold": 1, "p_threshold": 0.05, "label_top": 15, "title": "Differential expression"}, "science"),
+     {"fc_threshold": 1, "p_threshold": 0.05, "label_top": 15}, "science"),
     ("omics", "pca_samples", "PCA of samples", "pca",
      {"columns": FEATS, "color": "Group"},
-     {"title": "PCA of samples"}, "colorblind"),
+     {}, "colorblind"),
+    ("omics", "pca_samples", "Feature correlation heatmap", "correlation_heatmap",
+     {"columns": FEATS[:8]},
+     {"corr_method": "pearson", "show_values": True}, "minimal"),
     ("clinical", "gene_expression", "Viability distribution (Violin)", "violin",
      {"x": "Group", "y": "Viability", "color": "Group"},
-     {"show_box": True, "show_points": True, "title": "Cell viability distribution"}, "science"),
+     {"show_box": True, "show_points": True}, "science"),
     ("clinical", "time_course", "Time-course expression (Line)", "line",
      {"x": "Time", "y": "Expression", "group": "Treatment"},
-     {"title": "Time-course expression"}, "nature"),
+     {}, "nature"),
     ("clinical", "survival", "Overall survival (Kaplan-Meier)", "kaplan_meier",
      {"time": "time", "status": "status", "group": "arm"},
-     {"title": "Overall survival by arm"}, "colorblind"),
+     {}, "colorblind"),
     ("clinical", "dose_response", "Dose-response (Scatter)", "scatter",
      {"x": "Dose", "y": "Response", "color": "Compound"},
-     {"add_smooth": True, "title": "Dose-response"}, "cell"),
+     {"add_smooth": True}, "cell"),
+    ("clinical", "cancer_cohort", "Cohort annotated heatmap", "annotated_heatmap",
+     {"columns": [f"GENE_{i}" for i in range(1, 16)], "annotations": ["Group", "Stage"], "row_label": "PatientID"},
+     {"cluster_rows": True, "cluster_cols": True, "show_row_names": False}, "nature"),
+    ("domain", "ppi_network", "Protein interaction network", "network",
+     {"source": "source", "target": "target", "weight": "weight"},
+     {"layout": "fr", "show_labels": True}, "nature"),
+    ("domain", "enrichment", "Enrichment dot plot", "enrichment_dot",
+     {"term": "Description", "value": "GeneRatio", "size": "Count", "color": "p.adjust"},
+     {}, "cell"),
+    ("domain", "enrichment", "Enrichment bar plot", "enrichment_bar",
+     {"term": "Description", "value": "neg_log10_padj"},
+     {}, "science"),
+    ("domain", "gwas", "GWAS Manhattan plot", "manhattan",
+     {"chrom": "CHR", "pos": "BP", "pvalue": "P"},
+     {"sig_threshold": 5e-8}, "nature"),
+    ("domain", "compounds", "Chemical descriptor space", "chemical_space",
+     {"x": "MW", "y": "LogP", "color": "Activity", "size": "TPSA"},
+     {}, "colorblind"),
+    ("engineering", "response_surface", "Process response contour", "contour",
+     {"x": "Temperature", "y": "Pressure", "z": "Yield"},
+     {"bins": 12, "show_contour_lines": True, "palette": "viridis"}, "minimal"),
+    ("engineering", "tensile_test", "Tensile strength uncertainty", "error_bar",
+     {"x": "StrainRate", "y": "StrengthMean", "group": "Material", "error": "StrengthSD"},
+     {"connect_points": True, "x_label": "Strain rate", "y_label": "Strength"}, "science"),
+    ("engineering", "sensor_timeseries", "Sensor signal interval", "ribbon",
+     {"x": "Time", "y": "SignalMean", "group": "Sensor", "ymin": "Lower", "ymax": "Upper"},
+     {"x_label": "Time", "y_label": "Signal"}, "nature"),
+    ("engineering", "material_profile", "Material profile radar", "radar",
+     {"axis": "Metric", "value": "Score", "group": "Material"},
+     {"y_label": "Score"}, "colorblind"),
 ]
 
 
@@ -97,6 +160,15 @@ class CheckFailed(RuntimeError):
 
 def log(message: str) -> None:
     print(message, flush=True)
+
+
+def ensure_example_data() -> None:
+    missing = [name for name in DATASETS.values() if not os.path.exists(os.path.join(HERE, name))]
+    if not missing:
+        return
+    log("example CSVs missing; regenerating deterministic test data")
+    subprocess.run([sys.executable, os.path.join(HERE, "generate.py")], check=True)
+    subprocess.run([sys.executable, os.path.join(HERE, "generate_domains.py")], check=True)
 
 
 def _headers(token: str | None = None, extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -161,7 +233,9 @@ def retry_ai(label: str, call, attempts: int = 2) -> Any:
 
 
 def login(base: str) -> str:
-    status, payload = _json_request(base, "POST", "/api/auth/login", {"email": "root", "password": "root"})
+    email = os.environ.get("ROOT_EMAIL", "root")
+    password = os.environ.get("ROOT_PASSWORD", "root")
+    status, payload = _json_request(base, "POST", "/api/auth/login", {"email": email, "password": password})
     return expect(status, payload, 200, "root login")["access_token"]
 
 
@@ -258,6 +332,42 @@ def validate_project_pack(base: str, token: str, project: dict[str, Any]) -> Non
     log(f"  [OK] project pack {project['name']} ({len(names)} files)")
 
 
+def validate_version_delete(base: str, token: str, figure: dict[str, Any]) -> dict[str, Any]:
+    original_version_id = figure["current_version_id"]
+    status, version = _json_request(
+        base,
+        "POST",
+        f"/api/figures/{figure['id']}/rerender",
+        {
+            "plot_type": figure["plot_type"],
+            "mapping": figure["versions"][0]["mapping"],
+            "options": {**figure["versions"][0]["options"], "font_scale": 1.05},
+            "style_preset": figure["style_preset"],
+            "change_note": "Version delete verification",
+        },
+        token=token,
+        timeout=240,
+    )
+    version = expect(status, version, 200, "create second version for delete test")
+
+    status, updated = _json_request(base, "GET", f"/api/figures/{figure['id']}", token=token)
+    updated = expect(status, updated, 200, "reload versioned figure")
+    if len(updated["versions"]) != 2:
+        raise CheckFailed(f"expected 2 versions before delete, found {len(updated['versions'])}")
+
+    status, after = _json_request(base, "DELETE", f"/api/figures/{figure['id']}/versions/{original_version_id}", token=token)
+    after = expect(status, after, 200, "delete old figure version")
+    if len(after["versions"]) != 1 or after["current_version_id"] != version["id"]:
+        raise CheckFailed(f"version delete did not promote remaining version correctly: {after}")
+    validate_exports(base, token, after)
+
+    status, blocked = _json_request(base, "DELETE", f"/api/figures/{figure['id']}/versions/{version['id']}", token=token)
+    if status != 400:
+        raise CheckFailed(f"last-version delete was not blocked: HTTP {status} {blocked}")
+    log(f"  [OK] version delete kept v{version['version_number']} and blocked deleting the last version")
+    return after
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("base_url", nargs="?", default="http://localhost:8071")
@@ -266,8 +376,9 @@ def main() -> int:
     base = args.base_url.rstrip("/")
 
     log(f"== LabPlot verification against {base} ==")
+    ensure_example_data()
     token = login(base)
-    log("logged in as root/root")
+    log(f"logged in as {os.environ.get('ROOT_EMAIL', 'root')}")
 
     status, cfg = _json_request(base, "GET", "/api/admin/ai-config", token=token)
     expect(status, cfg, 200, "AI config")
@@ -309,6 +420,10 @@ def main() -> int:
     covered = {fig["plot_type"] for fig in figures}
     if covered != PLOT_TYPES:
         raise CheckFailed(f"plot type coverage mismatch: missing {sorted(PLOT_TYPES - covered)}")
+
+    log("\n-- figure version deletion --")
+    delete_target_index = next(i for i, f in enumerate(figures) if f["plot_type"] == "box")
+    figures[delete_target_index] = validate_version_delete(base, token, figures[delete_target_index])
 
     for project_key, project in projects.items():
         status, project_figs = _json_request(base, "GET", f"/api/figures?project_id={project['id']}", token=token)

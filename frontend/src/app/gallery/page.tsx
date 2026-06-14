@@ -13,7 +13,7 @@ import { Loader2, Images } from 'lucide-react';
 // preferred display order of domains
 const DOMAIN_ORDER = [
   'Basic statistics', 'Omics', 'Clinical / cohort', 'Systems biology',
-  'Functional enrichment', 'Genomics', 'Cheminformatics',
+  'Functional enrichment', 'Genomics', 'Cheminformatics', 'Engineering / physical science',
 ];
 
 function FigureCard({ f }: { f: PublicFigure }) {

@@ -13,7 +13,7 @@ RUN pixi run python -m ensurepip --upgrade \
 # professional-domain R packages (annotated heatmaps, networks, enrichment, etc.)
 # NOTE: slow solve; the running image is also persisted via `docker commit`.
 RUN pixi project channel add bioconda \
- && pixi add --feature r-viz r-igraph r-ggraph r-tidygraph r-ggrepel r-circlize bioconductor-complexheatmap
+ && pixi add --feature r-viz r-igraph r-ggraph r-tidygraph r-ggrepel r-ggforce r-circlize bioconductor-complexheatmap
 
 # replace AL application code with LabPlot's
 RUN rm -rf backend

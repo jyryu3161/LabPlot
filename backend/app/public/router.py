@@ -54,4 +54,4 @@ def public_gallery(limit: int = 12, db: Session = Depends(get_db)):
 
 @router.get("/stats")
 def public_stats(db: Session = Depends(get_db)):
-    return {"plot_types": 18, "style_presets": 5, "palettes": 5}
+    return {"plot_types": 22, "style_presets": 5, "palettes": 5}
