@@ -19,6 +19,10 @@ _PASSWORD_MIN_LENGTH = 10
 _DUMMY_PASSWORD_HASH = "$2b$12$pO9hpU9jrKBlz9wR62LnVOERfyY7yWSOIAAxaEnec82l3JgH3J2be"
 
 
+class EmailDeliveryError(RuntimeError):
+    """Raised when outbound email cannot be delivered."""
+
+
 def _hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
@@ -115,26 +119,56 @@ def refresh_tokens(db: Session, refresh_token: str) -> dict:
     return _issue_tokens(user)
 
 
+def smtp_status() -> dict:
+    return {
+        "configured": bool(settings.SMTP_HOST and settings.SMTP_FROM),
+        "host": settings.SMTP_HOST or "",
+        "port": settings.SMTP_PORT,
+        "from_address": settings.SMTP_FROM or "",
+        "username_set": bool(settings.SMTP_USERNAME),
+        "use_tls": bool(settings.SMTP_USE_TLS),
+        "use_ssl": bool(settings.SMTP_USE_SSL),
+        "app_base_url": settings.APP_BASE_URL,
+    }
+
+
+def send_email(to_email: str, subject: str, text_body: str) -> None:
+    if not settings.SMTP_HOST:
+        raise EmailDeliveryError("SMTP_HOST is not configured")
+    if not settings.SMTP_FROM:
+        raise EmailDeliveryError("SMTP_FROM is not configured")
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = settings.SMTP_FROM
+    msg["To"] = to_email
+    msg.set_content(text_body)
+
+    try:
+        smtp_cls = smtplib.SMTP_SSL if settings.SMTP_USE_SSL else smtplib.SMTP
+        with smtp_cls(settings.SMTP_HOST, settings.SMTP_PORT, timeout=10) as smtp:
+            if settings.SMTP_USE_TLS and not settings.SMTP_USE_SSL:
+                smtp.starttls()
+            if settings.SMTP_USERNAME:
+                smtp.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
+            smtp.send_message(msg)
+    except Exception as exc:
+        raise EmailDeliveryError("SMTP delivery failed") from exc
+
+
 def _send_password_reset_email(email: str, token: str) -> None:
     link = f"{settings.APP_BASE_URL.rstrip('/')}/reset-password?token={token}"
-    if not settings.SMTP_HOST:
+    if not smtp_status()["configured"]:
         if settings.PASSWORD_RESET_LOG_TOKEN:
             logger.warning("Password reset link for %s: %s", email, link)
-        return
-    msg = EmailMessage()
-    msg["Subject"] = "Reset your LabPlot AI password"
-    msg["From"] = settings.SMTP_FROM
-    msg["To"] = email
-    msg.set_content(
+        raise EmailDeliveryError("SMTP is not configured")
+    send_email(
+        email,
+        "Reset your LabPlot AI password",
         "A password reset was requested for your LabPlot AI account.\n\n"
         f"Open this link within {settings.PASSWORD_RESET_EXPIRE_MINUTES} minutes:\n{link}\n\n"
-        "If you did not request this reset, you can ignore this email."
+        "If you did not request this reset, you can ignore this email.",
     )
-    with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=10) as smtp:
-        smtp.starttls()
-        if settings.SMTP_USERNAME:
-            smtp.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
-        smtp.send_message(msg)
 
 
 def request_password_reset(db: Session, email: str) -> dict:
@@ -156,6 +190,8 @@ def request_password_reset(db: Session, email: str) -> dict:
     db.commit()
     try:
         _send_password_reset_email(user.email, token)
+    except EmailDeliveryError as exc:
+        logger.warning("Password reset email delivery failed for %s: %s", user.email, exc)
     except Exception:
         logger.exception("Failed to send password reset email")
     return generic

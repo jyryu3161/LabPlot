@@ -6,6 +6,7 @@ import { toast } from 'sonner';
 import {
   adminListUsers, adminCreateUser, adminUpdateUser, adminResetPassword, adminDeleteUser,
   adminListAuditLogs, adminListClientErrors, getAiConfig, updateAiConfig,
+  getEmailDeliveryStatus, sendEmailTest,
 } from '@/lib/api';
 import { useAuthContext } from '@/components/auth/AuthProvider';
 import { AppHeader } from '@/components/layout/AppHeader';
@@ -14,7 +15,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
-import { Activity, Loader2, Shield, UserPlus, KeyRound, Trash2, Cpu } from 'lucide-react';
+import { Activity, Loader2, Shield, UserPlus, KeyRound, Trash2, Cpu, Mail } from 'lucide-react';
 
 const numberFmt = new Intl.NumberFormat('en-US');
 const usdFmt = new Intl.NumberFormat('en-US', {
@@ -60,6 +61,17 @@ export default function AdminPage() {
     }),
     onSuccess: () => { toast.success('AI settings saved'); setAnthropicKey(''); setGeminiKey(''); qc.invalidateQueries({ queryKey: ['ai-config'] }); },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Save failed'),
+  });
+
+  const { data: emailCfg } = useQuery({ queryKey: ['email-config'], queryFn: getEmailDeliveryStatus });
+  const [testEmail, setTestEmail] = useState('');
+  const sendTestEmail = useMutation({
+    mutationFn: () => sendEmailTest(testEmail || user?.email || ''),
+    onSuccess: (res) => {
+      toast.success(res.message);
+      qc.invalidateQueries({ queryKey: ['admin-audit-logs'] });
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Email test failed'),
   });
 
   const create = useMutation({
@@ -130,6 +142,33 @@ export default function AdminPage() {
               </Button>
             </div>
             <p className="mt-2 text-xs text-muted-foreground">Active: <span className="font-medium">{aiCfg?.provider}</span> · {aiCfg?.provider === 'gemini' ? aiCfg?.gemini_model : aiCfg?.claude_model}. Used for chart recommendation, Figure Review (vision) and Improve.</p>
+          </CardContent>
+        </Card>
+
+        <Card className="mb-6">
+          <CardHeader className="pb-2">
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Mail className="h-4 w-4" /> Email Delivery
+              <Badge variant={emailCfg?.configured ? 'outline' : 'destructive'}>{emailCfg?.configured ? 'configured' : 'not configured'}</Badge>
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="grid gap-3 text-sm md:grid-cols-4">
+              <div><span className="text-muted-foreground">SMTP host</span><div className="font-medium">{emailCfg?.host || '-'}</div></div>
+              <div><span className="text-muted-foreground">Port</span><div className="font-medium">{emailCfg?.port ?? '-'}</div></div>
+              <div><span className="text-muted-foreground">From</span><div className="font-medium">{emailCfg?.from_address || '-'}</div></div>
+              <div><span className="text-muted-foreground">Security</span><div className="font-medium">{emailCfg?.use_ssl ? 'SSL' : emailCfg?.use_tls ? 'STARTTLS' : 'None'} · {emailCfg?.username_set ? 'auth' : 'no auth'}</div></div>
+            </div>
+            <div className="mt-4 grid items-end gap-3 md:grid-cols-[minmax(0,1fr)_auto]">
+              <div className="space-y-1">
+                <Label>Test recipient</Label>
+                <Input type="email" value={testEmail} onChange={(e) => setTestEmail(e.target.value)} placeholder={user?.email || 'admin@example.com'} />
+              </div>
+              <Button onClick={() => sendTestEmail.mutate()} disabled={sendTestEmail.isPending || !(testEmail || user?.email)}>
+                {sendTestEmail.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Send test email'}
+              </Button>
+            </div>
+            <p className="mt-2 text-xs text-muted-foreground">Password reset email uses this SMTP configuration and reset links point to {emailCfg?.app_base_url || 'APP_BASE_URL'}.</p>
           </CardContent>
         </Card>
 

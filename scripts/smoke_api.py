@@ -96,6 +96,8 @@ def db_helpers():
         from app.ai.models import AIUsage
         from app.audit import models as _audit_models  # noqa: F401
         from app.auth import models as _auth_models  # noqa: F401
+        from app.canvases import models as _canvas_models  # noqa: F401
+        from app.canvases.models import FigureCanvas
         from app.client_errors.models import ClientErrorEvent
         from app.projects import models as _project_models  # noqa: F401
         from app.common.encryption import is_encrypted_private_file
@@ -104,7 +106,7 @@ def db_helpers():
         from app.figures.models import Figure, FigureCodeArtifact
     except Exception:
         return None
-    return SessionLocal, Dataset, Figure, FigureCodeArtifact, AIUsage, ClientErrorEvent, is_encrypted_private_file
+    return SessionLocal, Dataset, Figure, FigureCodeArtifact, FigureCanvas, AIUsage, ClientErrorEvent, is_encrypted_private_file
 
 
 def main() -> None:
@@ -114,6 +116,15 @@ def main() -> None:
     status, payload, _ = request("POST", "/api/auth/login", {"email": admin_email, "password": admin_password}, base_headers)
     assert_ok(status == 200, f"admin login failed: {status} {payload}")
     admin_headers = {**base_headers, "Authorization": f"Bearer {payload['access_token']}"}
+
+    status, email_cfg, _ = request("GET", "/api/admin/email-config", headers=admin_headers)
+    assert_ok(status == 200 and isinstance(email_cfg.get("configured"), bool), f"email config failed: {status} {email_cfg}")
+    if not email_cfg["configured"]:
+        status, blocked, _ = request("POST", "/api/admin/email-test", {"email": admin_email}, admin_headers)
+        assert_ok(
+            status == 400 and error_code(blocked) == "SMTP_NOT_CONFIGURED",
+            f"unconfigured SMTP test did not fail clearly: {status} {blocked}",
+        )
 
     status, users, _ = request("GET", "/api/admin/users", headers=admin_headers)
     assert_ok(status == 200, f"admin users failed: {status}")
@@ -154,7 +165,7 @@ def main() -> None:
     dataset_path = None
     figure_dir = None
     if helpers:
-        SessionLocal, Dataset, _, _, AIUsage, _, is_encrypted_private_file = helpers
+        SessionLocal, Dataset, _, _, _, AIUsage, _, is_encrypted_private_file = helpers
         with SessionLocal() as db:
             ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
             assert_ok(ds is not None, "dataset row missing")
@@ -200,7 +211,7 @@ def main() -> None:
     if helpers:
         import os as _os
 
-        SessionLocal, _, Figure, FigureCodeArtifact, _, _, _ = helpers
+        SessionLocal, _, Figure, FigureCodeArtifact, _, _, _, _ = helpers
         with SessionLocal() as db:
             fig = db.query(Figure).filter(Figure.id == figure_id).first()
             assert_ok(fig is not None, "figure row missing")
@@ -208,6 +219,44 @@ def main() -> None:
             assert_ok(_os.path.isdir(figure_dir), f"figure directory missing: {figure_dir}")
             artifact_count = db.query(FigureCodeArtifact).filter(FigureCodeArtifact.owner_id == uuid.UUID(user_id)).count()
             assert_ok(artifact_count > 0, "figure code artifact was not archived")
+
+    current_version = next((v for v in figure["versions"] if v["id"] == figure["current_version_id"]), figure["versions"][-1])
+    status, canvas, _ = request(
+        "POST",
+        "/api/canvases",
+        {"name": "Smoke Figure 1", "preset": "double_column", "width_px": 720, "height_px": 500},
+        user_headers,
+    )
+    assert_ok(status == 201, f"canvas create failed: {status} {canvas}")
+    canvas_id = canvas["id"]
+    canvas_state = {
+        "version": 1,
+        "preset": "double_column",
+        "widthPx": 720,
+        "heightPx": 500,
+        "widthIn": 7.2,
+        "heightIn": 5.0,
+        "exportDpi": 300,
+        "panelLabelMode": "letters",
+        "unifiedFontSize": 9,
+        "items": [{
+            "id": "panel-a",
+            "figureId": figure_id,
+            "versionId": current_version["id"],
+            "name": "Smoke box plot",
+            "label": "A",
+            "x": 40,
+            "y": 50,
+            "width": 300,
+            "height": 220,
+            "svgUrl": current_version.get("svg_url"),
+            "pngUrl": current_version.get("png_url"),
+        }],
+    }
+    status, canvas, _ = request("PATCH", f"/api/canvases/{canvas_id}", {"state": canvas_state}, user_headers)
+    assert_ok(status == 200 and len(canvas["state"]["items"]) == 1, f"canvas update failed: {status} {canvas}")
+    status, canvases, _ = request("GET", "/api/canvases", headers=user_headers)
+    assert_ok(status == 200 and any(c["id"] == canvas_id and c["item_count"] == 1 for c in canvases), f"canvas list failed: {status} {canvases}")
 
     status, blocked, _ = request(
         "POST",
@@ -268,14 +317,16 @@ def main() -> None:
     if figure_dir:
         assert_ok(not os.path.exists(figure_dir), f"figure directory was not removed: {figure_dir}")
     if helpers:
-        SessionLocal, _, _, FigureCodeArtifact, _, ClientErrorEvent, _ = helpers
+        SessionLocal, _, _, FigureCodeArtifact, FigureCanvas, _, ClientErrorEvent, _ = helpers
         with SessionLocal() as db:
             artifact_count = db.query(FigureCodeArtifact).filter(FigureCodeArtifact.owner_id == uuid.UUID(user_id)).count()
             assert_ok(artifact_count == 0, f"figure code artifacts were not removed: {artifact_count}")
+            canvas_count = db.query(FigureCanvas).filter(FigureCanvas.owner_id == uuid.UUID(user_id)).count()
+            assert_ok(canvas_count == 0, f"canvases were not removed: {canvas_count}")
             db.query(ClientErrorEvent).filter(ClientErrorEvent.message == client_error_message).delete(synchronize_session=False)
             db.commit()
 
-    print("PASS api scenario: encrypted upload, account export/delete, quotas, audit logs, delete cleanup")
+    print("PASS api scenario: encrypted upload, canvas workflow, email config, account export/delete, quotas, audit logs, delete cleanup")
 
 
 if __name__ == "__main__":

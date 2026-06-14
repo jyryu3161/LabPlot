@@ -52,6 +52,8 @@ class Settings(BaseSettings):
     SMTP_USERNAME: str = ""
     SMTP_PASSWORD: str = ""
     SMTP_FROM: str = "no-reply@labplotai.com"
+    SMTP_USE_TLS: bool = True
+    SMTP_USE_SSL: bool = False
 
     # AI provider (admin-switchable at runtime; these are the seed defaults)
     AI_ENABLED: bool = True

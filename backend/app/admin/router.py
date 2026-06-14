@@ -7,6 +7,7 @@ from app.admin import service
 from app.admin.schemas import (
     AdminPasswordReset, AdminUserCreate, AdminUserItem, AdminUserUpdate,
     AIConfigUpdate, AIConfigView, AuditLogItem, ClientErrorItem,
+    EmailDeliveryStatus, EmailTestRequest, EmailTestResponse,
 )
 from app.ai import config_service
 from app.audit import service as audit_service
@@ -37,6 +38,16 @@ def update_ai_config(data: AIConfigUpdate, request: Request, db: Session = Depen
     )
     db.commit()
     return config_service.public_view(cfg)
+
+
+@router.get("/email-config", response_model=EmailDeliveryStatus)
+def get_email_config(_: User = Depends(get_current_admin)):
+    return service.email_delivery_status()
+
+
+@router.post("/email-test", response_model=EmailTestResponse)
+def send_email_test(data: EmailTestRequest, request: Request, db: Session = Depends(get_db), admin: User = Depends(get_current_admin)):
+    return service.send_email_test(db, data.email, acting_user=admin, request=request)
 
 
 @router.get("/users", response_model=list[AdminUserItem])

@@ -71,6 +71,25 @@ class AIConfigUpdate(BaseModel):
     gemini_api_key: str | None = None
 
 
+class EmailDeliveryStatus(BaseModel):
+    configured: bool
+    host: str
+    port: int
+    from_address: str
+    username_set: bool
+    use_tls: bool
+    use_ssl: bool
+    app_base_url: str
+
+
+class EmailTestRequest(BaseModel):
+    email: str = Field(..., min_length=3, max_length=255, pattern=EMAIL_PATTERN)
+
+
+class EmailTestResponse(BaseModel):
+    message: str
+
+
 class AuditLogItem(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

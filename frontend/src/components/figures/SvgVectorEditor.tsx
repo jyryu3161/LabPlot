@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, type MouseEvent } from 'react';
 import { toast } from 'sonner';
-import { AlertTriangle, Download, Loader2, MousePointer2, RefreshCw, Save, Type } from 'lucide-react';
+import { AlertTriangle, Download, Loader2, Maximize2, MousePointer2, RefreshCw, Save, Type } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -74,6 +74,23 @@ function styleValue(el: SVGElement, prop: string): string {
   return el.style.getPropertyValue(prop) || el.getAttribute(prop) || '';
 }
 
+function numericSvgLength(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const parsed = parseFloat(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function svgDimensions(svg: SVGSVGElement): { width: number; height: number } {
+  const attrWidth = numericSvgLength(svg.getAttribute('width'));
+  const attrHeight = numericSvgLength(svg.getAttribute('height'));
+  if (attrWidth && attrHeight) return { width: attrWidth, height: attrHeight };
+  const viewBox = svg.getAttribute('viewBox')?.trim().split(/\s+/).map(Number);
+  if (viewBox && viewBox.length === 4 && viewBox.every(Number.isFinite) && viewBox[2] > 0 && viewBox[3] > 0) {
+    return { width: viewBox[2], height: viewBox[3] };
+  }
+  return { width: 720, height: 500 };
+}
+
 function selectedEditable(host: HTMLDivElement | null): SVGElement | null {
   return host?.querySelector('[data-labplot-selected="true"]') as SVGElement | null;
 }
@@ -105,6 +122,9 @@ export function SvgVectorEditor({ svgUrl, filenameBase, versionNumber, isSaving 
   const [strokeColor, setStrokeColor] = useState('#000000');
   const [strokeWidth, setStrokeWidth] = useState('0.75');
   const [textValue, setTextValue] = useState('');
+  const [svgWidth, setSvgWidth] = useState(720);
+  const [svgHeight, setSvgHeight] = useState(500);
+  const [lockAspect, setLockAspect] = useState(true);
 
   const refreshTextItems = useCallback(() => {
     const host = stageRef.current;
@@ -149,6 +169,14 @@ export function SvgVectorEditor({ svgUrl, filenameBase, versionNumber, isSaving 
     syncControls(el);
   }, [syncControls]);
 
+  const syncSvgSize = useCallback(() => {
+    const svg = stageRef.current?.querySelector('svg') as SVGSVGElement | null;
+    if (!svg) return;
+    const dims = svgDimensions(svg);
+    setSvgWidth(Math.round(dims.width));
+    setSvgHeight(Math.round(dims.height));
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -189,8 +217,9 @@ export function SvgVectorEditor({ svgUrl, filenameBase, versionNumber, isSaving 
     if (!host || !svgMarkup) return;
     host.innerHTML = svgMarkup;
     setElementCount(host.querySelectorAll(EDITABLE_SELECTOR).length);
+    syncSvgSize();
     refreshTextItems();
-  }, [svgMarkup, refreshTextItems]);
+  }, [svgMarkup, refreshTextItems, syncSvgSize]);
 
   function handleStageClick(event: MouseEvent<HTMLDivElement>) {
     const target = event.target as Element | null;
@@ -219,6 +248,38 @@ export function SvgVectorEditor({ svgUrl, filenameBase, versionNumber, isSaving 
     setTextValue(value);
     syncControls(el);
     refreshTextItems();
+  }
+
+  function applySvgSize(width: number, height: number) {
+    const svg = stageRef.current?.querySelector('svg') as SVGSVGElement | null;
+    if (!svg) return;
+    const nextWidth = Math.max(72, Math.min(2400, Math.round(width)));
+    const nextHeight = Math.max(72, Math.min(2400, Math.round(height)));
+    svg.setAttribute('width', String(nextWidth));
+    svg.setAttribute('height', String(nextHeight));
+    svg.style.width = `${nextWidth}px`;
+    svg.style.height = `${nextHeight}px`;
+    svg.style.maxWidth = 'none';
+    setSvgWidth(nextWidth);
+    setSvgHeight(nextHeight);
+  }
+
+  function updateSvgWidth(value: number) {
+    if (lockAspect) {
+      const ratio = svgHeight / Math.max(1, svgWidth);
+      applySvgSize(value, value * ratio);
+    } else {
+      applySvgSize(value, svgHeight);
+    }
+  }
+
+  function updateSvgHeight(value: number) {
+    if (lockAspect) {
+      const ratio = svgWidth / Math.max(1, svgHeight);
+      applySvgSize(value * ratio, value);
+    } else {
+      applySvgSize(svgWidth, value);
+    }
   }
 
   function selectTextIndex(index: string) {
@@ -261,6 +322,7 @@ export function SvgVectorEditor({ svgUrl, filenameBase, versionNumber, isSaving 
     if (host) {
       host.innerHTML = originalMarkup;
       setElementCount(host.querySelectorAll(EDITABLE_SELECTOR).length);
+      syncSvgSize();
     }
     window.requestAnimationFrame(() => {
       syncControls(null);
@@ -303,6 +365,25 @@ export function SvgVectorEditor({ svgUrl, filenameBase, versionNumber, isSaving 
               data-testid="svg-editor-stage"
               className="svg-vector-editor-stage max-h-[70vh] overflow-auto rounded-md border bg-white p-3"
             />
+
+            <div className="grid gap-3 rounded-md border bg-muted/20 p-3 md:grid-cols-[1fr_1fr_auto_auto]">
+              <div className="space-y-1">
+                <Label className="flex items-center gap-1 text-xs"><Maximize2 className="h-3 w-3" /> Figure width (px)</Label>
+                <Input data-testid="svg-figure-width" type="number" min="72" max="2400" value={svgWidth} onChange={(e) => updateSvgWidth(Number(e.target.value || svgWidth))} />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-xs">Figure height (px)</Label>
+                <Input data-testid="svg-figure-height" type="number" min="72" max="2400" value={svgHeight} onChange={(e) => updateSvgHeight(Number(e.target.value || svgHeight))} />
+              </div>
+              <label className="flex items-end gap-2 pb-2 text-xs">
+                <input type="checkbox" checked={lockAspect} onChange={(e) => setLockAspect(e.target.checked)} />
+                Lock ratio
+              </label>
+              <div className="flex items-end gap-1">
+                <Button type="button" variant="outline" size="sm" onClick={() => applySvgSize(720, 500)}>Double</Button>
+                <Button type="button" variant="outline" size="sm" onClick={() => applySvgSize(360, 500)}>Single</Button>
+              </div>
+            </div>
 
             <div className="grid gap-3 rounded-md border bg-muted/20 p-3 md:grid-cols-4">
               <div className="space-y-1 md:col-span-2">

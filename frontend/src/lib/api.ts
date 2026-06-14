@@ -2,7 +2,7 @@ import type {
   User, TokenResponse, LoginRequest, RegisterRequest,
   DatasetListItem, DatasetDetail, ChartSuggestion, PlotTypeDef, StyleDef,
   FigureListItem, FigureDetail, FigureVersion, Review, Improvement, AdminUser, AIConfig, GalleryFigureItem, AuditLogItem,
-  ClientErrorItem, Project, ProjectListItem,
+  ClientErrorItem, Project, ProjectListItem, FigureCanvas, FigureCanvasListItem, CanvasState, CanvasStyleSuggestion, EmailDeliveryStatus,
 } from './types';
 
 // Same-origin by default; Caddy proxies /api and /static to the backend.
@@ -241,6 +241,42 @@ export async function downloadGalleryExport(figureId: string, versionId: string,
   a.remove(); URL.revokeObjectURL(url);
 }
 
+// ── canvases ──
+export async function listCanvases(projectId?: string): Promise<FigureCanvasListItem[]> {
+  return fetcher(`/api/canvases${projectId ? `?project_id=${projectId}` : ''}`);
+}
+export async function createCanvas(data: {
+  name: string;
+  description?: string;
+  project_id?: string;
+  preset?: string;
+  width_px?: number;
+  height_px?: number;
+  state?: Partial<CanvasState>;
+}): Promise<FigureCanvas> {
+  return fetcher('/api/canvases', { method: 'POST', body: JSON.stringify(data) });
+}
+export async function getCanvas(id: string): Promise<FigureCanvas> {
+  return fetcher(`/api/canvases/${id}`);
+}
+export async function updateCanvas(id: string, data: {
+  name?: string;
+  description?: string | null;
+  project_id?: string | null;
+  preset?: string;
+  width_px?: number;
+  height_px?: number;
+  state?: CanvasState;
+}): Promise<FigureCanvas> {
+  return fetcher(`/api/canvases/${id}`, { method: 'PATCH', body: JSON.stringify(data) });
+}
+export async function deleteCanvas(id: string): Promise<void> {
+  return fetcher(`/api/canvases/${id}`, { method: 'DELETE' });
+}
+export async function suggestCanvasStyle(id: string, data?: { selected_item_id?: string; instruction?: string }): Promise<CanvasStyleSuggestion> {
+  return fetcher(`/api/canvases/${id}/suggest-style`, { method: 'POST', body: JSON.stringify(data ?? {}) });
+}
+
 // ── account ──
 export async function downloadAccountExport(): Promise<void> {
   const headers: Record<string, string> = {};
@@ -285,4 +321,8 @@ export async function adminListClientErrors(limit = 100): Promise<ClientErrorIte
 export async function getAiConfig(): Promise<AIConfig> { return fetcher('/api/admin/ai-config'); }
 export async function updateAiConfig(data: Partial<AIConfig> & { anthropic_api_key?: string; gemini_api_key?: string }): Promise<AIConfig> {
   return fetcher('/api/admin/ai-config', { method: 'PUT', body: JSON.stringify(data) });
+}
+export async function getEmailDeliveryStatus(): Promise<EmailDeliveryStatus> { return fetcher('/api/admin/email-config'); }
+export async function sendEmailTest(email: string): Promise<{ message: string }> {
+  return fetcher('/api/admin/email-test', { method: 'POST', body: JSON.stringify({ email }) });
 }

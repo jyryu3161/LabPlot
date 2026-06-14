@@ -9,7 +9,14 @@ from app.ai.models import AIUsage
 from app.account.service import scrub_user_audit_subject
 from app.audit import service as audit_service
 from app.auth.models import User
-from app.auth.service import _hash_password, _normalize_email, _validate_password
+from app.auth.service import (
+    EmailDeliveryError,
+    _hash_password,
+    _normalize_email,
+    _validate_password,
+    send_email,
+    smtp_status,
+)
 from app.common import storage
 from app.common.exceptions import BadRequestError, NotFoundError
 from app.common.quotas import quota_summary
@@ -158,6 +165,37 @@ def reset_password(db: Session, user_id: uuid.UUID, password: str, acting_user: 
     db.commit()
     db.refresh(user)
     return user
+
+
+def email_delivery_status() -> dict:
+    return smtp_status()
+
+
+def send_email_test(db: Session, email: str, acting_user: User, request=None) -> dict:
+    email = _normalize_email(email)
+    status = smtp_status()
+    if not status["configured"]:
+        raise BadRequestError("SMTP is not configured", error_code="SMTP_NOT_CONFIGURED")
+    try:
+        send_email(
+            email,
+            "LabPlot AI email delivery test",
+            "This is a LabPlot AI SMTP test email.\n\n"
+            "If you received this message, password reset emails can be delivered.",
+        )
+    except EmailDeliveryError as exc:
+        raise BadRequestError(str(exc), error_code="SMTP_DELIVERY_FAILED") from exc
+    audit_service.log_event(
+        db,
+        actor_id=acting_user.id,
+        action="admin.email.test",
+        target_type="email",
+        target_id=None,
+        metadata={"email": email},
+        request=request,
+    )
+    db.commit()
+    return {"message": f"Test email sent to {email}"}
 
 
 def delete_user(db: Session, user_id: uuid.UUID, acting_user: User, request=None) -> None:

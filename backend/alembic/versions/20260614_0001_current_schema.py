@@ -16,6 +16,7 @@ from app.database import Base
 from app.ai import models as _ai_models  # noqa: F401
 from app.audit import models as _audit_models  # noqa: F401
 from app.auth import models as _auth_models  # noqa: F401
+from app.canvases import models as _canvas_models  # noqa: F401
 from app.client_errors import models as _client_error_models  # noqa: F401
 from app.datasets import models as _dataset_models  # noqa: F401
 from app.figures import models as _figure_models  # noqa: F401

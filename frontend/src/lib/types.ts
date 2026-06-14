@@ -134,6 +134,69 @@ export interface FigureDetail {
   versions: FigureVersion[];
 }
 
+export interface CanvasItem {
+  id: string;
+  figureId: string;
+  versionId: string;
+  name: string;
+  label: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  rotation?: number;
+  svgUrl?: string;
+  pngUrl?: string;
+  editedSvg?: string;
+  hasUnsavedSvgEdit?: boolean;
+}
+
+export interface CanvasState {
+  version: number;
+  preset: string;
+  widthPx: number;
+  heightPx: number;
+  widthIn: number;
+  heightIn: number;
+  exportDpi: number;
+  panelLabelMode: 'letters' | 'numbers' | 'hidden';
+  unifiedFontSize: number;
+  items: CanvasItem[];
+}
+
+export interface FigureCanvasListItem {
+  id: string;
+  name: string;
+  description?: string;
+  project_id?: string;
+  preset: string;
+  width_px: number;
+  height_px: number;
+  item_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FigureCanvas {
+  id: string;
+  name: string;
+  description?: string;
+  project_id?: string;
+  preset: string;
+  width_px: number;
+  height_px: number;
+  state: CanvasState;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CanvasStyleSuggestion {
+  palette_key: string;
+  font_size: number;
+  layout: 'keep' | 'grid' | 'two_column' | 'single_row';
+  rationale: string;
+}
+
 export interface Review {
   id: string;
   figure_version_id: string;
@@ -170,6 +233,17 @@ export interface AIConfig {
   has_anthropic_key: boolean;
   has_gemini_key: boolean;
   updated_at: string;
+}
+
+export interface EmailDeliveryStatus {
+  configured: boolean;
+  host: string;
+  port: number;
+  from_address: string;
+  username_set: boolean;
+  use_tls: boolean;
+  use_ssl: boolean;
+  app_base_url: string;
 }
 
 export interface AdminUser {
