@@ -5,7 +5,7 @@ import { usePathname } from 'next/navigation';
 import { useAuthContext } from '@/components/auth/AuthProvider';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
-import { BarChart3, FolderKanban, Images, Shield, LogOut, GalleryHorizontalEnd } from 'lucide-react';
+import { BarChart3, FolderKanban, Images, Shield, LogOut, GalleryHorizontalEnd, UserCircle } from 'lucide-react';
 
 const NAV = [
   { href: '/projects', label: 'Projects', icon: FolderKanban },
@@ -40,6 +40,10 @@ export function AppHeader() {
               <Shield className="h-4 w-4" /> Admin
             </Link>
           )}
+          <Link href="/account"
+            className={cn('flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm', pathname.startsWith('/account') ? 'bg-muted font-medium' : 'text-muted-foreground hover:text-foreground')}>
+            <UserCircle className="h-4 w-4" /> Account
+          </Link>
         </nav>
         <div className="ml-auto flex items-center gap-3">
           <span className="text-sm text-muted-foreground">{user?.display_name}{user?.is_admin ? ' (admin)' : ''}</span>

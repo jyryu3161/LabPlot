@@ -13,6 +13,8 @@ import secrets
 import string
 import sys
 import uuid
+import zipfile
+from io import BytesIO
 import urllib.error
 import urllib.request
 
@@ -42,6 +44,15 @@ def request(method: str, path: str, body=None, headers=None, content_type: str =
         except json.JSONDecodeError:
             parsed = raw
         return exc.code, parsed, dict(exc.headers)
+
+
+def request_bytes(method: str, path: str, headers=None):
+    req = urllib.request.Request(API_BASE + path, headers=dict(headers or {}), method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=90) as resp:
+            return resp.status, resp.read(), dict(resp.headers)
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read(), dict(exc.headers)
 
 
 def multipart(fields: dict[str, str], files: list[tuple[str, str, str, bytes]]) -> tuple[bytes, str]:
@@ -89,18 +100,19 @@ def db_helpers():
         from app.common.encryption import is_encrypted_private_file
         from app.database import SessionLocal
         from app.datasets.models import Dataset
-        from app.figures.models import Figure
+        from app.figures.models import Figure, FigureCodeArtifact
     except Exception:
         return None
-        return SessionLocal, Dataset, Figure, AIUsage, is_encrypted_private_file
+    return SessionLocal, Dataset, Figure, FigureCodeArtifact, AIUsage, is_encrypted_private_file
 
 
 def main() -> None:
+    base_headers = {"X-Forwarded-For": f"198.51.100.{secrets.randbelow(200) + 20}"}
     admin_email = os.environ["ROOT_EMAIL"]
     admin_password = os.environ["ROOT_PASSWORD"]
-    status, payload, _ = request("POST", "/api/auth/login", {"email": admin_email, "password": admin_password})
+    status, payload, _ = request("POST", "/api/auth/login", {"email": admin_email, "password": admin_password}, base_headers)
     assert_ok(status == 200, f"admin login failed: {status} {payload}")
-    admin_headers = {"Authorization": f"Bearer {payload['access_token']}"}
+    admin_headers = {**base_headers, "Authorization": f"Bearer {payload['access_token']}"}
 
     status, users, _ = request("GET", "/api/admin/users", headers=admin_headers)
     assert_ok(status == 200, f"admin users failed: {status}")
@@ -127,9 +139,9 @@ def main() -> None:
     )
     assert_ok(status == 200, f"quota update failed: {status}")
 
-    status, payload, _ = request("POST", "/api/auth/login", {"email": email, "password": password})
+    status, payload, _ = request("POST", "/api/auth/login", {"email": email, "password": password}, base_headers)
     assert_ok(status == 200, f"user login failed: {status} {payload}")
-    user_headers = {"Authorization": f"Bearer {payload['access_token']}"}
+    user_headers = {**base_headers, "Authorization": f"Bearer {payload['access_token']}"}
 
     csv = b"group,value\nA,1.0\nA,2.0\nB,3.0\nB,4.0\n"
     body, ctype = multipart({"name": "Smoke dataset"}, [("file", "smoke.csv", "text/csv", csv)])
@@ -141,7 +153,7 @@ def main() -> None:
     dataset_path = None
     figure_dir = None
     if helpers:
-        SessionLocal, Dataset, _, AIUsage, is_encrypted_private_file = helpers
+        SessionLocal, Dataset, _, _, AIUsage, is_encrypted_private_file = helpers
         with SessionLocal() as db:
             ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
             assert_ok(ds is not None, "dataset row missing")
@@ -175,12 +187,14 @@ def main() -> None:
     if helpers:
         import os as _os
 
-        SessionLocal, _, Figure, _, _ = helpers
+        SessionLocal, _, Figure, FigureCodeArtifact, _, _ = helpers
         with SessionLocal() as db:
             fig = db.query(Figure).filter(Figure.id == figure_id).first()
             assert_ok(fig is not None, "figure row missing")
             figure_dir = _os.path.join("/app/backend/static/figures", str(fig.id))
             assert_ok(_os.path.isdir(figure_dir), f"figure directory missing: {figure_dir}")
+            artifact_count = db.query(FigureCodeArtifact).filter(FigureCodeArtifact.owner_id == uuid.UUID(user_id)).count()
+            assert_ok(artifact_count > 0, "figure code artifact was not archived")
 
     status, blocked, _ = request(
         "POST",
@@ -208,20 +222,45 @@ def main() -> None:
         f"storage quota did not block: {status} {blocked}",
     )
 
+    status, export_body, export_headers = request_bytes("GET", "/api/account/export", headers=user_headers)
+    assert_ok(status == 200, f"account export failed: {status}")
+    lowered_headers = {k.lower(): v for k, v in export_headers.items()}
+    assert_ok("application/zip" in lowered_headers.get("content-type", ""), f"unexpected export type: {export_headers}")
+    with zipfile.ZipFile(BytesIO(export_body)) as z:
+        names = set(z.namelist())
+        assert_ok("manifest.json" in names, "account export missing manifest")
+        assert_ok("account/profile.json" in names, "account export missing profile")
+        dataset_files = [name for name in names if name.startswith("datasets/files/")]
+        assert_ok(bool(dataset_files), "account export missing dataset source file")
+        assert_ok(b"group,value" in z.read(dataset_files[0]), "account export dataset source is not readable")
+
     status, logs, _ = request("GET", "/api/admin/audit-logs?limit=200", headers=admin_headers)
     assert_ok(status == 200, f"audit log endpoint failed: {status}")
     actions = {row["action"] for row in logs}
     required = {"admin.user.create", "admin.user.update", "auth.login", "dataset.upload", "figure.create"}
     assert_ok(required.issubset(actions), f"missing audit events: {sorted(required - actions)}")
 
-    status, _, _ = request("DELETE", f"/api/admin/users/{user_id}", headers=admin_headers)
+    status, blocked, _ = request("DELETE", "/api/account", {"password": "wrong", "confirm": "DELETE"}, user_headers)
+    assert_ok(
+        status == 400 and error_code(blocked) == "PASSWORD_CONFIRMATION_FAILED",
+        f"wrong password did not block account delete: {status} {blocked}",
+    )
+
+    status, _, _ = request("DELETE", "/api/account", {"password": password, "confirm": "DELETE"}, user_headers)
     assert_ok(status == 204, f"user delete failed: {status}")
+    status, relogin, _ = request("POST", "/api/auth/login", {"email": email, "password": password}, base_headers)
+    assert_ok(status == 400, f"deleted account can still log in: {status} {relogin}")
     if dataset_path:
         assert_ok(not os.path.exists(dataset_path), f"dataset file was not removed: {dataset_path}")
     if figure_dir:
         assert_ok(not os.path.exists(figure_dir), f"figure directory was not removed: {figure_dir}")
+    if helpers:
+        SessionLocal, _, _, FigureCodeArtifact, _, _ = helpers
+        with SessionLocal() as db:
+            artifact_count = db.query(FigureCodeArtifact).filter(FigureCodeArtifact.owner_id == uuid.UUID(user_id)).count()
+            assert_ok(artifact_count == 0, f"figure code artifacts were not removed: {artifact_count}")
 
-    print("PASS api scenario: encrypted upload, render, render/storage quotas, audit logs, delete cleanup")
+    print("PASS api scenario: encrypted upload, account export/delete, quotas, audit logs, delete cleanup")
 
 
 if __name__ == "__main__":

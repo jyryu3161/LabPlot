@@ -30,6 +30,8 @@ GEMINI_API_KEY=<only if Gemini is enabled>
 SENTRY_DSN=<optional backend error monitoring DSN>
 SENTRY_ENVIRONMENT=production
 SENTRY_RELEASE=<git sha or release version>
+AUDIT_LOG_RETENTION_DAYS=365
+PASSWORD_RESET_TOKEN_RETENTION_DAYS=30
 ```
 
 `DATA_ENCRYPTION_KEY` protects newly uploaded private datasets at rest. Existing plaintext uploads remain readable for backward compatibility. During key rotation, put the old key in `DATA_ENCRYPTION_PREVIOUS_KEYS`, deploy, run the rotation script below, then remove the old key after a verified backup.
@@ -115,12 +117,25 @@ docker exec labplot-backend sh -lc "cd /app/backend && /app/.pixi/envs/default/b
 
 Keep the old key in `DATA_ENCRYPTION_PREVIOUS_KEYS` until the non-dry-run script reports success and newly uploaded plus old datasets have been opened successfully.
 
+## Retention Cleanup
+
+Run this on a scheduled maintenance interval:
+
+```bash
+docker cp scripts/retention_cleanup.py labplot-backend:/tmp/retention_cleanup.py
+docker exec labplot-backend sh -lc "cd /app/backend && /app/.pixi/envs/default/bin/python /tmp/retention_cleanup.py --dry-run --orphan-files"
+docker exec labplot-backend sh -lc "cd /app/backend && /app/.pixi/envs/default/bin/python /tmp/retention_cleanup.py --orphan-files"
+```
+
+The cleanup removes audit logs older than `AUDIT_LOG_RETENTION_DAYS`, expired or used password reset tokens older than `PASSWORD_RESET_TOKEN_RETENTION_DAYS`, and optionally orphaned upload/render files.
+
 ## Security Controls
 
 - Authentication: access and refresh JWTs include `token_version`; password reset and admin reset invalidate old tokens.
 - Password reset: configure SMTP before production. Without SMTP, reset links are not emailed.
 - Authorization: users are scoped to their own projects, datasets, and figures. Admin endpoints require admin privileges.
 - Upload storage: datasets are stored under `backend/private`, not public static routes. New private dataset files are encrypted at rest.
+- Account data rights: authenticated users can export their account data as a ZIP and delete their own account after password confirmation.
 - Render safety: R code is generated from fixed templates and validated JSON parameters. Users cannot submit arbitrary R code for execution.
 - AI prompt safety: user-provided project and dataset context is wrapped as untrusted context. AI outputs are parsed as structured suggestions and sanitized before use.
 - SVG edit safety: saved SVG edits reject script-like tags, event handlers, embedded file/data links, and oversized payloads.
@@ -147,7 +162,6 @@ These are not blockers for the current single-server deployment, but they are th
 
 - Move private uploads and rendered assets to object storage with server-side encryption and lifecycle policies.
 - Add external uptime checks.
-- Add per-tenant data retention and deletion policies.
 - Replace startup SQL snippets with Alembic migrations for more formal release tracking.
 - Extend Sentry or equivalent monitoring to the frontend.
 - Add disaster recovery drills with timed restore validation.

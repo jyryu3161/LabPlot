@@ -13,6 +13,7 @@ LabPlot AI is a web platform for producing publication-ready scientific figures 
 - Admin controls for user approval, role management, AI provider settings, and per-user AI token/cost estimates
 - Audit logs plus per-user AI, render, and storage quotas for operational control
 - Private dataset uploads are stored outside public static routes and encrypted at rest for new uploads
+- Account-level export and deletion workflows for user data lifecycle control
 - Successful render code is archived as reusable figure-code artifacts for later retrieval, training-data preparation, and cross-user template reuse
 - Caddy reverse proxy with HTTPS, compression, and cache headers for rendered static assets
 
@@ -57,6 +58,7 @@ Create a `.env` file or provide equivalent environment variables to Docker Compo
 | `DATA_ENCRYPTION_KEY` | Key material for encrypting private uploaded datasets at rest |
 | `DATA_ENCRYPTION_PREVIOUS_KEYS` | Optional comma-separated old encryption keys during dataset key rotation |
 | `SENTRY_DSN` | Optional backend error monitoring DSN |
+| `AUDIT_LOG_RETENTION_DAYS` | Retention window for audit cleanup script |
 | `NEXT_PUBLIC_API_URL` | Frontend API base URL, usually empty for same-origin deployment |
 
 Admins can also update the active AI provider, model names, and API keys from the Admin page.

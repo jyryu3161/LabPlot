@@ -12,6 +12,7 @@ from app.common.security import allowed_origins
 from sqlalchemy import text
 
 from app.auth import models as _auth_models  # noqa: F401
+from app.account.router import router as account_router
 from app.projects import models as _proj_models  # noqa: F401
 from app.datasets import models as _ds_models  # noqa: F401
 from app.figures import models as _fig_models  # noqa: F401
@@ -62,6 +63,7 @@ app.add_middleware(
 app.add_exception_handler(AppError, app_error_handler)
 
 app.include_router(auth_router)
+app.include_router(account_router)
 app.include_router(admin_router)
 app.include_router(projects_router)
 app.include_router(datasets_router)

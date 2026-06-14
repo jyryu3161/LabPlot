@@ -6,6 +6,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.ai.models import AIUsage
+from app.account.service import scrub_user_audit_subject
 from app.audit import service as audit_service
 from app.auth.models import User
 from app.auth.service import _hash_password, _normalize_email, _validate_password
@@ -13,7 +14,7 @@ from app.common.exceptions import BadRequestError, NotFoundError
 from app.common.quotas import quota_summary
 from app.config import settings
 from app.datasets.models import Dataset
-from app.figures.models import Figure
+from app.figures.models import Figure, FigureCodeArtifact
 
 
 def list_users(db: Session) -> list[dict]:
@@ -173,6 +174,8 @@ def delete_user(db: Session, user_id: uuid.UUID, acting_user: User, request=None
         metadata={"email": user.email},
         request=request,
     )
+    scrub_user_audit_subject(db, user.id)
+    db.query(FigureCodeArtifact).filter(FigureCodeArtifact.owner_id == user.id).delete(synchronize_session=False)
     db.delete(user)
     db.commit()
     for path in dataset_paths:

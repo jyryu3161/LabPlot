@@ -238,6 +238,23 @@ export async function downloadGalleryExport(figureId: string, versionId: string,
   a.remove(); URL.revokeObjectURL(url);
 }
 
+// ── account ──
+export async function downloadAccountExport(): Promise<void> {
+  const headers: Record<string, string> = {};
+  const token = getAccessToken();
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const res = await fetch(`${BASE_URL}/api/account/export`, { headers });
+  if (!res.ok) throw new ApiError('Account export failed', res.status);
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'labplot-account-export.zip'; document.body.appendChild(a); a.click();
+  a.remove(); URL.revokeObjectURL(url);
+}
+export async function deleteAccount(password: string, confirm: string): Promise<void> {
+  return fetcher('/api/account', { method: 'DELETE', body: JSON.stringify({ password, confirm }) });
+}
+
 // ── admin ──
 export async function adminListUsers(): Promise<AdminUser[]> { return fetcher('/api/admin/users'); }
 export async function adminCreateUser(data: { email: string; password: string; display_name: string; is_admin: boolean }): Promise<User> {
