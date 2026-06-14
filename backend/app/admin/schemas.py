@@ -3,6 +3,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+EMAIL_PATTERN = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
+
 
 class AdminUserItem(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -31,12 +33,12 @@ class AdminUserUpdate(BaseModel):
 
 
 class AdminPasswordReset(BaseModel):
-    password: str = Field(..., min_length=4)
+    password: str = Field(..., min_length=10, max_length=256)
 
 
 class AdminUserCreate(BaseModel):
-    email: str = Field(..., min_length=1, max_length=255)
-    password: str = Field(..., min_length=4)
+    email: str = Field(..., min_length=3, max_length=255, pattern=EMAIL_PATTERN)
+    password: str = Field(..., min_length=10, max_length=256)
     display_name: str = Field(..., min_length=1, max_length=100)
     is_admin: bool = False
 

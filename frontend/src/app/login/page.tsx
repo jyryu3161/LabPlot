@@ -45,6 +45,9 @@ export default function LoginPage() {
             <Button type="submit" className="w-full" disabled={loading}>
               {loading ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Signing in...</> : 'Sign In'}
             </Button>
+            <p className="text-center text-sm">
+              <Link href="/forgot-password" className="text-primary underline">Forgot your password?</Link>
+            </p>
             <p className="text-center text-sm text-muted-foreground">
               Don&apos;t have an account? <Link href="/register" className="text-primary underline">Sign up</Link>
             </p>

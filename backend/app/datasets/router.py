@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.auth.models import User
 from app.common.deps import get_current_user, get_db
+from app.common.security import rate_limit
 from app.datasets import service
 from app.datasets.schemas import DatasetListItem, DatasetResponse, DatasetUpdate
 from app.projects import service as project_service
@@ -22,6 +23,7 @@ async def upload_dataset(
     project_id: uuid.UUID | None = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    _: None = Depends(rate_limit("dataset_upload", 30, 3600)),
 ):
     if project_id is None:
         project_id = project_service.ensure_default_project(db, current_user.id).id

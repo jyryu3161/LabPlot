@@ -23,7 +23,10 @@ export default function RegisterPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault(); setError(''); setSuccess('');
     if (password !== confirm) { setError('Passwords do not match'); return; }
-    if (password.length < 4) { setError('Password must be at least 4 characters'); return; }
+    if (password.length < 10 || !/[A-Za-z]/.test(password) || !/\d/.test(password)) {
+      setError('Password must be at least 10 characters and include a letter and a number');
+      return;
+    }
     setLoading(true);
     try {
       await register({ email, password, display_name: displayName });
@@ -56,6 +59,7 @@ export default function RegisterPage() {
             <div className="space-y-2">
               <Label htmlFor="pw">Password</Label>
               <Input id="pw" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" required />
+              <p className="text-xs text-muted-foreground">Use at least 10 characters with a letter and a number.</p>
             </div>
             <div className="space-y-2">
               <Label htmlFor="cpw">Confirm Password</Label>

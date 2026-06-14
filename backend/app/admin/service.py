@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.ai.models import AIUsage
 from app.auth.models import User
-from app.auth.service import _hash_password
+from app.auth.service import _hash_password, _normalize_email, _validate_password
 from app.common.exceptions import BadRequestError, NotFoundError
 from app.datasets.models import Dataset
 from app.figures.models import Figure
@@ -75,6 +75,8 @@ def _get(db: Session, user_id: uuid.UUID) -> User:
 
 
 def create_user(db: Session, email: str, password: str, display_name: str, is_admin: bool) -> User:
+    email = _normalize_email(email)
+    _validate_password(password)
     if db.query(User).filter(User.email == email).first():
         raise BadRequestError("Email already registered", error_code="EMAIL_ALREADY_EXISTS")
     user = User(
@@ -109,8 +111,10 @@ def update_user(db: Session, user_id: uuid.UUID, data, acting_user: User) -> Use
 
 
 def reset_password(db: Session, user_id: uuid.UUID, password: str) -> User:
+    _validate_password(password)
     user = _get(db, user_id)
     user.hashed_password = _hash_password(password)
+    user.token_version = int(user.token_version or 0) + 1
     db.commit()
     db.refresh(user)
     return user

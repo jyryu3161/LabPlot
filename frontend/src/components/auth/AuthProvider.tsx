@@ -17,9 +17,9 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 // pages viewable without logging in
-const PUBLIC_PATHS = ['/', '/gallery', '/login', '/register'];
+const PUBLIC_PATHS = ['/', '/gallery', '/login', '/register', '/forgot-password', '/reset-password'];
 // pages an authenticated user shouldn't sit on
-const AUTH_ONLY_PATHS = ['/login', '/register'];
+const AUTH_ONLY_PATHS = ['/login', '/register', '/forgot-password', '/reset-password'];
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const auth = useAuth();

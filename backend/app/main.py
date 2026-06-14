@@ -6,6 +6,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
 from app.common.exceptions import AppError, app_error_handler
+from app.common.security import SECURITY_HEADERS, allowed_origins
 
 # import models so metadata is registered before create_all
 from sqlalchemy import text
@@ -28,11 +29,20 @@ app = FastAPI(title="LabPlot AI", description="AI-powered publication figure cop
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def add_security_headers(request, call_next):
+    response = await call_next(request)
+    for key, value in SECURITY_HEADERS.items():
+        response.headers.setdefault(key, value)
+    return response
+
 
 app.add_exception_handler(AppError, app_error_handler)
 
@@ -93,6 +103,7 @@ def _seed_ai_config():
 
 _MIGRATIONS = [
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_approved BOOLEAN NOT NULL DEFAULT TRUE",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE datasets ADD COLUMN IF NOT EXISTS project_id UUID",
     "ALTER TABLE datasets ADD COLUMN IF NOT EXISTS statistics JSONB",
     "ALTER TABLE datasets ADD COLUMN IF NOT EXISTS description TEXT",
@@ -143,6 +154,18 @@ _MIGRATIONS = [
     "CREATE INDEX IF NOT EXISTS ix_figure_code_artifacts_plot_type ON figure_code_artifacts (plot_type)",
     "CREATE INDEX IF NOT EXISTS ix_figure_code_artifacts_code_hash ON figure_code_artifacts (code_hash)",
     "CREATE INDEX IF NOT EXISTS ix_figure_code_artifacts_created ON figure_code_artifacts (created_at DESC)",
+    """
+    CREATE TABLE IF NOT EXISTS password_reset_tokens (
+        id UUID PRIMARY KEY,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        token_hash VARCHAR(64) NOT NULL UNIQUE,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        expires_at TIMESTAMPTZ NOT NULL,
+        used_at TIMESTAMPTZ
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS ix_password_reset_tokens_user_id ON password_reset_tokens (user_id)",
+    "CREATE INDEX IF NOT EXISTS ix_password_reset_tokens_token_hash ON password_reset_tokens (token_hash)",
 ]
 
 

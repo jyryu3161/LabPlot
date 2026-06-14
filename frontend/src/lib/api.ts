@@ -81,6 +81,12 @@ export async function login(data: LoginRequest): Promise<TokenResponse> {
   setTokens(r.access_token, r.refresh_token);
   return r;
 }
+export async function requestPasswordReset(email: string): Promise<{ message: string }> {
+  return fetcher('/api/auth/forgot-password', { method: 'POST', body: JSON.stringify({ email }) });
+}
+export async function resetPassword(token: string, password: string): Promise<{ message: string }> {
+  return fetcher('/api/auth/reset-password', { method: 'POST', body: JSON.stringify({ token, password }) });
+}
 export async function refreshToken(): Promise<TokenResponse> {
   const refresh = getRefreshToken();
   if (!refresh) throw new ApiError('No refresh token', 401);

@@ -1,13 +1,14 @@
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+EMAIL_PATTERN = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
 
 
 class UserRegister(BaseModel):
-    # email is stored as a plain string so the seeded "root" login works too
-    email: str = Field(..., min_length=1, max_length=255)
-    password: str = Field(..., min_length=4)
+    email: str = Field(..., min_length=3, max_length=255, pattern=EMAIL_PATTERN)
+    password: str = Field(..., min_length=10, max_length=256)
     display_name: str = Field(..., min_length=1, max_length=100)
 
 
@@ -36,3 +37,16 @@ class TokenResponse(BaseModel):
 
 class TokenRefreshRequest(BaseModel):
     refresh_token: str
+
+
+class PasswordResetRequest(BaseModel):
+    email: str = Field(..., min_length=3, max_length=255, pattern=EMAIL_PATTERN)
+
+
+class PasswordResetConfirm(BaseModel):
+    token: str = Field(..., min_length=20, max_length=512)
+    password: str = Field(..., min_length=10, max_length=256)
+
+
+class MessageResponse(BaseModel):
+    message: str

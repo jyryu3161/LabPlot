@@ -7,6 +7,8 @@ _ENV_FILE = Path(__file__).parent.parent.parent / ".env"
 
 class Settings(BaseSettings):
     database_url: str = "postgresql://labplot:labplot@localhost:5432/labplot"
+    APP_BASE_URL: str = "https://labplotai.com"
+    ALLOWED_ORIGINS: str = "https://labplotai.com,https://www.labplotai.com,http://localhost:3000,http://127.0.0.1:3000"
 
     # Auth / JWT
     JWT_SECRET: str = "change-me-in-production-use-a-long-random-string"
@@ -20,8 +22,17 @@ class Settings(BaseSettings):
 
     # Uploads / storage
     max_upload_size_mb: int = 50
-    upload_dir: str = "/app/backend/static/uploads"
+    upload_dir: str = "/app/backend/private/uploads"
     figures_dir: str = "/app/backend/static/figures"
+
+    # Password reset email. If SMTP_HOST is unset, reset links are not emailed.
+    PASSWORD_RESET_EXPIRE_MINUTES: int = 30
+    PASSWORD_RESET_LOG_TOKEN: bool = False
+    SMTP_HOST: str = ""
+    SMTP_PORT: int = 587
+    SMTP_USERNAME: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_FROM: str = "no-reply@labplotai.com"
 
     # AI provider (admin-switchable at runtime; these are the seed defaults)
     AI_ENABLED: bool = True

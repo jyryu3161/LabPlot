@@ -43,6 +43,8 @@ def get_current_user(
         raise UnauthorizedError("User not found or inactive", error_code="USER_NOT_FOUND")
     if not user.is_approved:
         raise UnauthorizedError("Account is awaiting root approval", error_code="ACCOUNT_PENDING_APPROVAL")
+    if int(payload.get("tv", 0)) != int(user.token_version or 0):
+        raise UnauthorizedError("Invalid or expired token", error_code="INVALID_TOKEN")
 
     return user
 

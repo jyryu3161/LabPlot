@@ -23,6 +23,7 @@ const usdFmt = new Intl.NumberFormat('en-US', {
   minimumFractionDigits: 2,
   maximumFractionDigits: 4,
 });
+const passwordOk = (pw: string) => pw.length >= 10 && /[A-Za-z]/.test(pw) && /\d/.test(pw);
 
 export default function AdminPage() {
   const qc = useQueryClient();
@@ -57,7 +58,10 @@ export default function AdminPage() {
   });
 
   const create = useMutation({
-    mutationFn: () => adminCreateUser({ email, password, display_name: name, is_admin: isAdmin }),
+    mutationFn: () => {
+      if (!passwordOk(password)) throw new Error('Password must be at least 10 characters and include a letter and a number');
+      return adminCreateUser({ email, password, display_name: name, is_admin: isAdmin });
+    },
     onSuccess: () => { toast.success('User created'); setEmail(''); setName(''); setPassword(''); setIsAdmin(false); refresh(); },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Create failed'),
   });
@@ -119,7 +123,7 @@ export default function AdminPage() {
             <div className="grid items-end gap-3 md:grid-cols-5">
               <div className="space-y-1"><Label>Email</Label><Input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="user@lab.edu" /></div>
               <div className="space-y-1"><Label>Name</Label><Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Name" /></div>
-              <div className="space-y-1"><Label>Password</Label><Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••" /></div>
+              <div className="space-y-1"><Label>Password</Label><Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="10+ chars, letter + number" /></div>
               <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={isAdmin} onChange={(e) => setIsAdmin(e.target.checked)} /> Admin</label>
               <Button onClick={() => create.mutate()} disabled={create.isPending || !email || !name || !password}>
                 {create.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Create'}
@@ -173,7 +177,12 @@ export default function AdminPage() {
                         <td className="px-2 py-2">
                           <div className="flex gap-1">
                             <Button variant="ghost" size="sm" title="Reset password"
-                              onClick={() => { const pw = prompt(`New password for ${u.email}:`); if (pw) resetPw.mutate({ id: u.id, pw }); }}>
+                              onClick={() => {
+                                const pw = prompt(`New password for ${u.email}:`);
+                                if (!pw) return;
+                                if (!passwordOk(pw)) { toast.error('Password must be at least 10 characters and include a letter and a number'); return; }
+                                resetPw.mutate({ id: u.id, pw });
+                              }}>
                               <KeyRound className="h-4 w-4" />
                             </Button>
                             {u.id !== user?.id && (

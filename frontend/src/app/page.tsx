@@ -1,11 +1,12 @@
 import Link from 'next/link';
 import { PublicHeader } from '@/components/layout/PublicHeader';
 import { Button } from '@/components/ui/button';
+import { LandingCaptureHero } from '@/components/landing/LandingCaptureHero';
 import { LandingGalleryStrip } from '@/components/landing/LandingGalleryStrip';
 import { LandingPrimaryCta } from '@/components/landing/LandingPrimaryCta';
 import {
   Sparkles, BarChart3, Star, FileCode2, FolderKanban, FileText,
-  Upload, Wand2, Palette, Download, ShieldCheck, Eye, RefreshCw, Award, Check,
+  Upload, Wand2, Palette, Download, ShieldCheck, Eye, RefreshCw, Award,
 } from 'lucide-react';
 
 const FEATURES = [
@@ -36,33 +37,7 @@ export default function LandingPage() {
   return (
     <div className="min-h-screen bg-background">
       <PublicHeader />
-
-      {/* hero */}
-      <section className="relative overflow-hidden border-b">
-        <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(60%_60%_at_50%_0%,theme(colors.primary/8%),transparent)]" />
-        <div className="relative mx-auto max-w-5xl px-4 py-24 text-center">
-          <div className="mb-5 inline-flex items-center gap-2 rounded-full border bg-background px-3 py-1 text-xs font-medium text-muted-foreground">
-            <Sparkles className="h-3.5 w-3.5 text-primary" /> AI-powered publication figure copilot
-          </div>
-          <h1 className="mx-auto max-w-3xl text-balance text-4xl font-bold tracking-tight sm:text-5xl">
-            Publication-ready figures, powered by AI —{' '}
-            <span className="text-primary">fully reproducible in R.</span>
-          </h1>
-          <p className="mx-auto mt-6 max-w-2xl text-lg leading-relaxed text-muted-foreground">
-            Upload your data and LabPlot AI recommends the right chart, renders it in ggplot2 at journal
-            quality, reviews it like a peer reviewer, and hands you the reproducible R code.
-          </p>
-          <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
-            <LandingPrimaryCta />
-            <Link href="/gallery"><Button size="lg" variant="outline" className="h-11 px-6">Explore the gallery</Button></Link>
-          </div>
-          <div className="mt-8 flex flex-wrap items-center justify-center gap-x-6 gap-y-2 text-sm text-muted-foreground">
-            {['Reproducible R code', 'ggplot2 rendering', 'Colorblind-safe palettes', 'Runs on your own server'].map((t) => (
-              <span key={t} className="inline-flex items-center gap-1.5"><Check className="h-4 w-4 text-primary" /> {t}</span>
-            ))}
-          </div>
-        </div>
-      </section>
+      <LandingCaptureHero />
 
       <LandingGalleryStrip />
 

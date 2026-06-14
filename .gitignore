@@ -17,6 +17,7 @@ npm-debug.log*
 # data / generated figures
 backend/static/uploads/
 backend/static/figures/
+backend/private/
 
 # bkit tooling internals
 .bkit/

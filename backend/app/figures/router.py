@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.auth.models import User
 from app.common.deps import get_current_user, get_db
+from app.common.security import rate_limit
 from app.figures import service
 from app.figures.schemas import (
     EnhancePromptRequest,
@@ -46,19 +47,22 @@ def palettes(_: User = Depends(get_current_user)):
     return {"palettes": list_palettes()}
 
 
-@meta_router.post("/ai/enhance-prompt", response_model=EnhancePromptResponse)
+@meta_router.post("/ai/enhance-prompt", response_model=EnhancePromptResponse,
+                  dependencies=[Depends(rate_limit("ai_enhance_prompt", 60, 3600))])
 def enhance_prompt(data: EnhancePromptRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     from app.ai import client as ai_client
     return {"enhanced": ai_client.enhance_prompt(db, data.draft, data.kind, data.context, user_id=current_user.id)}
 
 
-@meta_router.post("/datasets/{dataset_id}/recommend", response_model=list[RecommendationItem])
+@meta_router.post("/datasets/{dataset_id}/recommend", response_model=list[RecommendationItem],
+                  dependencies=[Depends(rate_limit("ai_recommend", 60, 3600))])
 def ai_recommend(dataset_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     return service.ai_recommend(db, dataset_id, current_user.id)
 
 
 @meta_router.post("/datasets/{dataset_id}/recommend-from-image", response_model=list[RecommendationItem])
 async def ai_recommend_from_image(dataset_id: uuid.UUID, file: UploadFile = File(...),
+                                  _: None = Depends(rate_limit("ai_recommend_image", 30, 3600)),
                                   db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     image_bytes = await file.read()
     return service.ai_recommend_from_reference_image(
@@ -67,7 +71,8 @@ async def ai_recommend_from_image(dataset_id: uuid.UUID, file: UploadFile = File
 
 
 # -------- figures --------
-@router.post("", response_model=FigureDetail, status_code=201)
+@router.post("", response_model=FigureDetail, status_code=201,
+             dependencies=[Depends(rate_limit("figure_create", 60, 3600))])
 def create_figure(data: FigureCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     return service.create_figure(db, current_user.id, data)
 
@@ -99,7 +104,8 @@ def update_figure(figure_id: uuid.UUID, data: FigureUpdate, db: Session = Depend
     return service.update_figure(db, figure_id, current_user.id, data.model_dump(exclude_unset=True))
 
 
-@router.post("/{figure_id}/versions/{version_id}/legend", response_model=LegendResponse)
+@router.post("/{figure_id}/versions/{version_id}/legend", response_model=LegendResponse,
+             dependencies=[Depends(rate_limit("ai_legend", 60, 3600))])
 def generate_legend(figure_id: uuid.UUID, version_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     return service.generate_legend(db, figure_id, version_id, current_user.id)
 
@@ -109,23 +115,27 @@ def delete_figure(figure_id: uuid.UUID, db: Session = Depends(get_db), current_u
     service.delete_figure(db, figure_id, current_user.id)
 
 
-@router.post("/{figure_id}/rerender", response_model=VersionResponse)
+@router.post("/{figure_id}/rerender", response_model=VersionResponse,
+             dependencies=[Depends(rate_limit("figure_rerender", 60, 3600))])
 def rerender(figure_id: uuid.UUID, req: RerenderRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     return service.rerender(db, figure_id, current_user.id, req)
 
 
-@router.post("/{figure_id}/versions/{version_id}/svg-edit", response_model=VersionResponse)
+@router.post("/{figure_id}/versions/{version_id}/svg-edit", response_model=VersionResponse,
+             dependencies=[Depends(rate_limit("figure_svg_edit", 120, 3600))])
 def save_svg_edit(figure_id: uuid.UUID, version_id: uuid.UUID, data: SvgEditRequest,
                   db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     return service.save_svg_edit(db, figure_id, version_id, current_user.id, data.svg, data.change_note)
 
 
-@router.post("/{figure_id}/versions/{version_id}/review", response_model=ReviewResponse)
+@router.post("/{figure_id}/versions/{version_id}/review", response_model=ReviewResponse,
+             dependencies=[Depends(rate_limit("ai_review", 60, 3600))])
 def review(figure_id: uuid.UUID, version_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     return service.review_version(db, figure_id, version_id, current_user.id)
 
 
-@router.post("/{figure_id}/versions/{version_id}/improve", response_model=list[ImprovementResponse])
+@router.post("/{figure_id}/versions/{version_id}/improve", response_model=list[ImprovementResponse],
+             dependencies=[Depends(rate_limit("ai_improve", 60, 3600))])
 def improve(figure_id: uuid.UUID, version_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     return service.improve_version(db, figure_id, version_id, current_user.id)
 
