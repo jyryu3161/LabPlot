@@ -17,6 +17,7 @@ from app.audit.models import AuditLog
 from app.audit import service as audit_service
 from app.auth.models import PasswordResetToken, User
 from app.auth.service import _verify_password
+from app.common import storage
 from app.common.encryption import decrypt_private_bytes
 from app.common.exceptions import BadRequestError
 from app.config import settings
@@ -152,9 +153,8 @@ def build_account_export(db: Session, user: User) -> tuple[str, str]:
             ),
         )
         for ds in datasets:
-            if ds.file_path and os.path.exists(ds.file_path):
-                with open(ds.file_path, "rb") as f:
-                    raw = decrypt_private_bytes(f.read())
+            if ds.file_path and storage.exists(ds.file_path):
+                raw = decrypt_private_bytes(storage.read_bytes(ds.file_path))
                 fname = _safe_name(ds.original_filename, f"{ds.id}.{ds.format}")
                 z.writestr(f"datasets/files/{ds.id}_{fname}", raw)
 
@@ -206,8 +206,8 @@ def build_account_export(db: Session, user: User) -> tuple[str, str]:
             )
             for attr, ext in (("png_path", "png"), ("svg_path", "svg"), ("tiff_path", "tiff"), ("pdf_path", "pdf"), ("r_path", "R")):
                 path = getattr(version, attr, None)
-                if path and os.path.exists(path):
-                    z.write(path, f"{prefix}/figure.{ext}")
+                if path and storage.exists(path):
+                    z.writestr(f"{prefix}/figure.{ext}", storage.read_bytes(path))
 
         z.writestr(
             "figures/reviews.json",
@@ -265,10 +265,8 @@ def delete_own_account(db: Session, user: User, password: str, request=None) -> 
     db.delete(user)
     db.commit()
     for path in dataset_paths:
-        try:
-            if os.path.exists(path):
-                os.remove(path)
-        except OSError:
-            pass
+        storage.delete_file(path)
     for figure_id in figure_ids:
         shutil.rmtree(os.path.join(settings.figures_dir, str(figure_id)), ignore_errors=True)
+        if storage.object_storage_enabled():
+            storage.delete_prefix(f"figures/{figure_id}")

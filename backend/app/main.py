@@ -24,6 +24,7 @@ from app.database import engine
 
 from app.auth.router import router as auth_router
 from app.admin.router import router as admin_router
+from app.assets.router import router as assets_router
 from app.client_errors.router import router as client_errors_router
 from app.projects.router import router as projects_router
 from app.datasets.router import router as datasets_router
@@ -68,6 +69,7 @@ app.add_exception_handler(AppError, app_error_handler)
 app.include_router(auth_router)
 app.include_router(account_router)
 app.include_router(admin_router)
+app.include_router(assets_router)
 app.include_router(client_errors_router)
 app.include_router(projects_router)
 app.include_router(datasets_router)

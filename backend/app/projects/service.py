@@ -8,6 +8,7 @@ import zipfile
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.common import storage
 from app.common.exceptions import NotFoundError
 from app.config import settings
 from app.datasets.models import Dataset
@@ -81,8 +82,8 @@ def build_project_pack(db: Session, project_id: uuid.UUID, owner_id: uuid.UUID) 
             safe = re.sub(r"[^A-Za-z0-9_-]+", "_", f.name)
             for attr, ext in (("png_path", "png"), ("svg_path", "svg"), ("pdf_path", "pdf"), ("r_path", "R")):
                 path = getattr(v, attr, None) if v else None
-                if path and os.path.exists(path):
-                    z.write(path, f"Figure{i:02d}_{safe}.{ext}")
+                if path and storage.exists(path):
+                    z.writestr(f"Figure{i:02d}_{safe}.{ext}", storage.read_bytes(path))
             legends.append(f"Figure {i}. {f.name} ({f.plot_type})\n"
                            f"Legend: {f.legend or '(none yet)'}\n"
                            f"Interpretation: {f.description or '-'}\n")
@@ -97,12 +98,10 @@ def delete_project(db: Session, project_id: uuid.UUID, owner_id: uuid.UUID) -> N
     dataset_paths = [path for (path,) in db.query(Dataset.file_path).filter(Dataset.project_id == project_id, Dataset.owner_id == owner_id).all()]
     for fig_id in fig_ids:
         shutil.rmtree(os.path.join(settings.figures_dir, str(fig_id)), ignore_errors=True)
+        if storage.object_storage_enabled():
+            storage.delete_prefix(f"figures/{fig_id}")
     for path in dataset_paths:
-        try:
-            if path and os.path.exists(path):
-                os.remove(path)
-        except OSError:
-            pass
+        storage.delete_file(path)
     db.query(Figure).filter(Figure.project_id == project_id, Figure.owner_id == owner_id).delete(synchronize_session=False)
     db.query(Dataset).filter(Dataset.project_id == project_id, Dataset.owner_id == owner_id).delete(synchronize_session=False)
     db.delete(p)

@@ -10,6 +10,7 @@ from app.account.service import scrub_user_audit_subject
 from app.audit import service as audit_service
 from app.auth.models import User
 from app.auth.service import _hash_password, _normalize_email, _validate_password
+from app.common import storage
 from app.common.exceptions import BadRequestError, NotFoundError
 from app.common.quotas import quota_summary
 from app.config import settings
@@ -179,13 +180,11 @@ def delete_user(db: Session, user_id: uuid.UUID, acting_user: User, request=None
     db.delete(user)
     db.commit()
     for path in dataset_paths:
-        try:
-            if os.path.exists(path):
-                os.remove(path)
-        except OSError:
-            pass
+        storage.delete_file(path)
     for figure_id in figure_ids:
         shutil.rmtree(os.path.join(settings.figures_dir, str(figure_id)), ignore_errors=True)
+        if storage.object_storage_enabled():
+            storage.delete_prefix(f"figures/{figure_id}")
 
 
 def list_audit_logs(db: Session, limit: int = 200) -> list:

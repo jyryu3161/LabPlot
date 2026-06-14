@@ -57,6 +57,10 @@ Create a `.env` file or provide equivalent environment variables to Docker Compo
 | `MAX_UPLOAD_SIZE_MB` | Upload size limit |
 | `DATA_ENCRYPTION_KEY` | Key material for encrypting private uploaded datasets at rest |
 | `DATA_ENCRYPTION_PREVIOUS_KEYS` | Optional comma-separated old encryption keys during dataset key rotation |
+| `STORAGE_BACKEND` | `local` by default; set `s3` for S3-compatible object storage |
+| `OBJECT_STORAGE_BUCKET` / `OBJECT_STORAGE_PREFIX` | Bucket and key prefix for private uploads and rendered assets |
+| `OBJECT_STORAGE_ENDPOINT_URL` | Optional S3-compatible endpoint for R2, MinIO, or other providers |
+| `OBJECT_STORAGE_SSE` / `OBJECT_STORAGE_KMS_KEY_ID` | Server-side encryption mode and optional KMS key for object storage |
 | `SENTRY_DSN` | Optional backend error monitoring DSN |
 | `AUDIT_LOG_RETENTION_DAYS` | Retention window for audit cleanup script |
 | `CLIENT_ERROR_RETENTION_DAYS` | Retention window for browser error events |
@@ -125,6 +129,8 @@ Cost estimates are operational guidance, not a billing ledger. Provider invoices
 - Docker json-file logs are capped by size and file count in Compose.
 - Database schema changes are tracked through Alembic and applied on backend startup.
 - Scheduled GitHub Actions uptime checks validate the public home page and API health endpoint, with optional webhook alerts.
+- Browser client-error volume can be checked with `scripts/check_client_error_alerts.py` and routed to a webhook.
+- `STORAGE_BACKEND=s3` stores new private uploads and rendered figure assets in S3-compatible object storage.
 - `scripts/dr_restore_drill.sh` validates backup restore into an isolated temporary Postgres container.
 - See `docs/02-operations/commercial-readiness.md` for the deployment, backup, smoke-test, quota, audit, and security runbook.
 

@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.ai import client as ai_client
 from app.auth.models import User
+from app.common import storage
 from app.common.exceptions import BadRequestError, NotFoundError
 from app.common.quotas import enforce_render_quota
 from app.config import settings
@@ -61,6 +62,8 @@ def _project_context(db: Session, project_id) -> str | None:
 def _url(abs_path: str | None) -> str | None:
     if not abs_path:
         return None
+    if storage.is_object_ref(abs_path):
+        return storage.asset_url(abs_path)
     try:
         rel = os.path.relpath(abs_path, _STATIC_ROOT)
     except ValueError:
@@ -254,6 +257,20 @@ def _render_into_version(df, plot_type, mapping, options, preset, figure_id, ver
     if not res.success:
         shutil.rmtree(out_dir, ignore_errors=True)
         raise BadRequestError(_friendly_error(res.log), error_code="RENDER_FAILED")
+    if storage.object_storage_enabled():
+        stored_outputs = {}
+        content_types = {
+            "png": "image/png",
+            "svg": "image/svg+xml",
+            "tiff": "image/tiff",
+            "pdf": "application/pdf",
+            "r": "text/plain",
+        }
+        for kind, path in (res.outputs or {}).items():
+            key = storage.object_key("figures", figure_id, version_id, os.path.basename(path))
+            stored_outputs[kind] = storage.upload_file(path, key, content_type=content_types.get(kind))
+        res.outputs = stored_outputs
+        shutil.rmtree(out_dir, ignore_errors=True)
     return res, out_dir
 
 
@@ -437,6 +454,19 @@ def save_svg_edit(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, owne
     with open(r_path, "w", encoding="utf-8") as f:
         f.write(r_code)
 
+    if storage.object_storage_enabled():
+        svg_path = storage.upload_file(
+            svg_path,
+            storage.object_key("figures", figure_id, new_version_id, "figure.svg"),
+            content_type="image/svg+xml",
+        )
+        r_path = storage.upload_file(
+            r_path,
+            storage.object_key("figures", figure_id, new_version_id, "figure.R"),
+            content_type="text/plain",
+        )
+        shutil.rmtree(out_dir, ignore_errors=True)
+
     options = {**(base.options or {}), "manual_svg_edit": True, "source_version_id": str(base.id)}
     version = FigureVersion(
         id=new_version_id, figure_id=figure_id, version_number=next_num,
@@ -460,6 +490,8 @@ def save_svg_edit(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, owne
 def delete_figure(db: Session, figure_id: uuid.UUID, owner_id: uuid.UUID) -> None:
     fig = get_figure(db, figure_id, owner_id)
     shutil.rmtree(os.path.join(settings.figures_dir, str(figure_id)), ignore_errors=True)
+    if storage.object_storage_enabled():
+        storage.delete_prefix(f"figures/{figure_id}")
     db.delete(fig)
     db.commit()
 
@@ -468,10 +500,11 @@ def delete_figure(db: Session, figure_id: uuid.UUID, owner_id: uuid.UUID) -> Non
 def review_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, owner_id: uuid.UUID) -> Review:
     fig = get_figure(db, figure_id, owner_id)
     v = get_version(fig, version_id)
-    if not v.png_path or not os.path.exists(v.png_path):
+    if not v.png_path or not storage.exists(v.png_path):
         raise BadRequestError("Rendered image not available for review", error_code="NO_IMAGE")
+    png_path = storage.materialize(v.png_path, suffix=".png")
     result = ai_client.review_figure(
-        db, v.png_path, fig.plot_type, v.mapping or {}, v.options or {},
+        db, png_path, fig.plot_type, v.mapping or {}, v.options or {},
         project_context=_project_context(db, fig.project_id), user_id=owner_id
     )
     rev = Review(
@@ -682,7 +715,7 @@ def export_path(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, fmt: s
     v = get_version(fig, version_id)
     attr, media, ext = _EXPORT[fmt]
     path = getattr(v, attr)
-    if not path or not os.path.exists(path):
+    if not path or not storage.exists(path):
         raise NotFoundError("Export file", fmt)
     safe = re.sub(r"[^A-Za-z0-9_-]+", "_", fig.name)
     filename = f"{safe}_v{v.version_number}.{ext}"
@@ -703,7 +736,7 @@ def gallery_export_path(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID
     v = get_version(fig, version_id)
     attr, media, ext = _EXPORT[fmt]
     path = getattr(v, attr)
-    if not path or not os.path.exists(path):
+    if not path or not storage.exists(path):
         raise NotFoundError("Export file", fmt)
     safe = re.sub(r"[^A-Za-z0-9_-]+", "_", fig.name)
     filename = f"gallery_{safe}_v{v.version_number}.{ext}"

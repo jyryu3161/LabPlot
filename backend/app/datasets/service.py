@@ -5,6 +5,7 @@ from io import BytesIO
 import pandas as pd
 from sqlalchemy.orm import Session
 
+from app.common import storage
 from app.config import settings
 from app.common.encryption import decrypt_private_bytes, encrypt_private_bytes
 from app.common.exceptions import BadRequestError, FileTooLargeError, NotFoundError
@@ -32,8 +33,7 @@ def _detect_format(filename: str) -> str:
 
 
 def read_file(path: str, fmt: str) -> pd.DataFrame:
-    with open(path, "rb") as f:
-        raw = decrypt_private_bytes(f.read())
+    raw = decrypt_private_bytes(storage.read_bytes(path))
     buf = BytesIO(raw)
     try:
         if fmt == "csv":
@@ -66,11 +66,18 @@ def create_dataset(db: Session, owner_id: uuid.UUID, filename: str, content: byt
         raise FileTooLargeError(settings.max_upload_size_mb)
 
     fmt = _detect_format(filename)
-    os.makedirs(settings.upload_dir, exist_ok=True)
     dataset_id = uuid.uuid4()
-    stored_path = os.path.join(settings.upload_dir, f"{dataset_id}.{fmt}")
-    with open(stored_path, "wb") as f:
-        f.write(encrypt_private_bytes(content))
+    encoded = encrypt_private_bytes(content)
+    if storage.object_storage_enabled():
+        stored_path = storage.put_bytes(
+            storage.object_key("uploads", f"{dataset_id}.{fmt}"),
+            encoded,
+            content_type="application/octet-stream",
+        )
+    else:
+        os.makedirs(settings.upload_dir, exist_ok=True)
+        stored_path = os.path.join(settings.upload_dir, f"{dataset_id}.{fmt}")
+        storage.write_bytes(stored_path, encoded, content_type="application/octet-stream")
 
     df = read_file(stored_path, fmt)
     prof = profile_dataframe(df)
@@ -134,10 +141,6 @@ def load_dataframe(dataset: Dataset) -> pd.DataFrame:
 
 def delete_dataset(db: Session, dataset_id: uuid.UUID, owner_id: uuid.UUID) -> None:
     ds = get_dataset(db, dataset_id, owner_id)
-    try:
-        if ds.file_path and os.path.exists(ds.file_path):
-            os.remove(ds.file_path)
-    except OSError:
-        pass
+    storage.delete_file(ds.file_path)
     db.delete(ds)
     db.commit()

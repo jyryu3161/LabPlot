@@ -17,6 +17,7 @@ from app.ai import models as _ai_models  # noqa: F401
 from app.audit import models as _audit_models  # noqa: F401
 from app.auth import models as _auth_models  # noqa: F401
 from app.projects import models as _project_models  # noqa: F401
+from app.common import storage
 from app.common.encryption import decrypt_private_bytes, encrypted_with_primary_key, encrypt_private_bytes
 from app.database import SessionLocal
 from app.datasets.models import Dataset
@@ -34,21 +35,17 @@ def main() -> None:
     with SessionLocal() as db:
         for (path,) in db.query(Dataset.file_path).all():
             checked += 1
-            if not path or not os.path.exists(path):
+            if not path or not storage.exists(path):
                 missing += 1
                 continue
-            with open(path, "rb") as f:
-                raw = f.read()
+            raw = storage.read_bytes(path)
             if encrypted_with_primary_key(raw):
                 continue
             plain = decrypt_private_bytes(raw)
             encoded = encrypt_private_bytes(plain)
             changed += 1
             if not args.dry_run:
-                tmp = path + ".tmp"
-                with open(tmp, "wb") as f:
-                    f.write(encoded)
-                os.replace(tmp, path)
+                storage.write_bytes(path, encoded, content_type="application/octet-stream")
     mode = "DRY-RUN" if args.dry_run else "UPDATED"
     print(f"{mode} dataset encryption rotation: checked={checked} changed={changed} missing={missing}")
 

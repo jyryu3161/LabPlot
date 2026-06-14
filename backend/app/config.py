@@ -26,6 +26,18 @@ class Settings(BaseSettings):
     figures_dir: str = "/app/backend/static/figures"
     DATA_ENCRYPTION_KEY: str = ""
     DATA_ENCRYPTION_PREVIOUS_KEYS: str = ""
+    STORAGE_BACKEND: str = "local"  # local | s3 | filesystem_object
+    OBJECT_STORAGE_BUCKET: str = ""
+    OBJECT_STORAGE_PREFIX: str = "labplot"
+    OBJECT_STORAGE_REGION: str = "us-east-1"
+    OBJECT_STORAGE_ENDPOINT_URL: str = ""
+    OBJECT_STORAGE_ACCESS_KEY_ID: str = ""
+    OBJECT_STORAGE_SECRET_ACCESS_KEY: str = ""
+    OBJECT_STORAGE_SSE: str = "AES256"
+    OBJECT_STORAGE_KMS_KEY_ID: str = ""
+    OBJECT_STORAGE_PUBLIC_BASE_URL: str = ""
+    OBJECT_STORAGE_LOCAL_DIR: str = "/app/backend/private/object-store"
+    OBJECT_STORAGE_CACHE_DIR: str = "/app/backend/private/object-cache"
 
     # Optional error monitoring
     SENTRY_DSN: str = ""

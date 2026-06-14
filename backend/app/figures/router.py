@@ -1,11 +1,12 @@
 import uuid
 
 from fastapi import APIRouter, Depends, File, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from sqlalchemy.orm import Session
 
 from app.audit import service as audit_service
 from app.auth.models import User
+from app.common import storage
 from app.common.deps import get_current_user, get_db
 from app.common.security import rate_limit
 from app.figures import service
@@ -103,6 +104,12 @@ def gallery(limit: int = 200, db: Session = Depends(get_db), _: User = Depends(g
 def gallery_export(figure_id: uuid.UUID, version_id: uuid.UUID, format: str = "r",
                    db: Session = Depends(get_db), _: User = Depends(get_current_user)):
     path, media, filename = service.gallery_export_path(db, figure_id, version_id, format)
+    if storage.is_object_ref(path):
+        return Response(
+            storage.read_bytes(path),
+            media_type=media,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
     return FileResponse(path, media_type=media, filename=filename)
 
 
@@ -190,4 +197,10 @@ def apply_improvement(figure_id: uuid.UUID, improvement_id: uuid.UUID, db: Sessi
 def export(figure_id: uuid.UUID, version_id: uuid.UUID, format: str = "png",
            db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     path, media, filename = service.export_path(db, figure_id, version_id, format, current_user.id)
+    if storage.is_object_ref(path):
+        return Response(
+            storage.read_bytes(path),
+            media_type=media,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
     return FileResponse(path, media_type=media, filename=filename)

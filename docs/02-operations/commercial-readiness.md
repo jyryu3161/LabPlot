@@ -37,6 +37,51 @@ CLIENT_ERROR_RETENTION_DAYS=90
 
 `DATA_ENCRYPTION_KEY` protects newly uploaded private datasets at rest. Existing plaintext uploads remain readable for backward compatibility. During key rotation, put the old key in `DATA_ENCRYPTION_PREVIOUS_KEYS`, deploy, run the rotation script below, then remove the old key after a verified backup.
 
+Object storage for new uploads and rendered assets:
+
+```bash
+STORAGE_BACKEND=s3
+OBJECT_STORAGE_BUCKET=labplot-prod
+OBJECT_STORAGE_PREFIX=labplot
+OBJECT_STORAGE_REGION=us-east-1
+OBJECT_STORAGE_ENDPOINT_URL=<optional S3-compatible endpoint>
+OBJECT_STORAGE_ACCESS_KEY_ID=<object storage access key>
+OBJECT_STORAGE_SECRET_ACCESS_KEY=<object storage secret key>
+OBJECT_STORAGE_SSE=AES256
+OBJECT_STORAGE_KMS_KEY_ID=<optional KMS key id>
+OBJECT_STORAGE_PUBLIC_BASE_URL=<optional CDN/public base URL for rendered assets>
+```
+
+When `STORAGE_BACKEND=s3`, new private dataset uploads and new rendered figure assets are written to `s3://...` object URIs. Dataset objects remain encrypted by LabPlot before upload; the object-storage client also sets server-side encryption headers. If `OBJECT_STORAGE_PUBLIC_BASE_URL` is not set, rendered assets are streamed by LabPlot through `/api/assets/...`.
+
+Validate object-storage code paths with the local filesystem object backend:
+
+```bash
+docker cp scripts/smoke_object_storage.py labplot-backend:/tmp/smoke_object_storage.py
+docker exec \
+  -e STORAGE_BACKEND=filesystem_object \
+  -e OBJECT_STORAGE_BUCKET=labplot-smoke \
+  -e OBJECT_STORAGE_LOCAL_DIR=/tmp/labplot-object-smoke/store \
+  -e OBJECT_STORAGE_CACHE_DIR=/tmp/labplot-object-smoke/cache \
+  labplot-backend sh -lc "cd /app/backend && /app/.pixi/envs/default/bin/python /tmp/smoke_object_storage.py"
+```
+
+Apply a conservative object-storage lifecycle policy after bucket creation:
+
+```bash
+OBJECT_STORAGE_BUCKET=labplot-prod python scripts/apply_object_lifecycle.py --dry-run
+docker cp scripts/apply_object_lifecycle.py labplot-backend:/tmp/apply_object_lifecycle.py
+docker exec \
+  -e OBJECT_STORAGE_BUCKET=labplot-prod \
+  -e OBJECT_STORAGE_PREFIX=labplot \
+  -e OBJECT_STORAGE_REGION=us-east-1 \
+  -e OBJECT_STORAGE_ACCESS_KEY_ID="$OBJECT_STORAGE_ACCESS_KEY_ID" \
+  -e OBJECT_STORAGE_SECRET_ACCESS_KEY="$OBJECT_STORAGE_SECRET_ACCESS_KEY" \
+  labplot-backend sh -lc "cd /app/backend && /app/.pixi/envs/default/bin/python /tmp/apply_object_lifecycle.py"
+```
+
+The default lifecycle rules abort incomplete multipart uploads under the `uploads/` and `figures/` prefixes after seven days. Set `OBJECT_STORAGE_TRANSITION_DAYS` and `OBJECT_STORAGE_TRANSITION_CLASS` if your provider should transition older objects to another storage class.
+
 ## Deployment
 
 Build and start the production-like Docker stack:
@@ -152,6 +197,28 @@ python scripts/uptime_check.py
 ALERT_TITLE="LabPlot test" ALERT_MESSAGE="Webhook dry run" python scripts/send_alert.py --dry-run
 ```
 
+## Client Error Alerts
+
+Browser errors are stored in `client_error_events` and visible on the Admin page. Run this from cron or a systemd timer to alert when recent frontend errors exceed a threshold:
+
+```bash
+docker cp scripts/check_client_error_alerts.py labplot-backend:/tmp/check_client_error_alerts.py
+docker exec \
+  -e CLIENT_ERROR_ALERT_WINDOW_MINUTES=15 \
+  -e CLIENT_ERROR_ALERT_THRESHOLD=25 \
+  -e CLIENT_ERROR_ALERT_WEBHOOK_URL="$CLIENT_ERROR_ALERT_WEBHOOK_URL" \
+  -e CLIENT_ERROR_ALERT_WEBHOOK_FORMAT=slack \
+  labplot-backend sh -lc "cd /app/backend && /app/.pixi/envs/default/bin/python /tmp/check_client_error_alerts.py"
+```
+
+Use `CLIENT_ERROR_ALERT_WEBHOOK_FORMAT=slack`, `discord`, or `generic`. For a non-sending verification:
+
+```bash
+docker exec \
+  -e CLIENT_ERROR_ALERT_THRESHOLD=1 \
+  labplot-backend sh -lc "cd /app/backend && /app/.pixi/envs/default/bin/python /tmp/check_client_error_alerts.py --dry-run"
+```
+
 ## Security Controls
 
 - Authentication: access and refresh JWTs include `token_version`; password reset and admin reset invalidate old tokens.
@@ -167,7 +234,7 @@ ALERT_TITLE="LabPlot test" ALERT_MESSAGE="Webhook dry run" python scripts/send_a
 - Abuse control: rate limits are applied to auth, uploads, renders, SVG edits, and AI-heavy endpoints.
 - Cost control: admin users can set per-user monthly AI request limits, render limits, and storage limits.
 - Error monitoring: configure `SENTRY_DSN` to capture backend exceptions.
-- Client monitoring: browser errors are posted to `/api/client-errors` and visible to admins.
+- Client monitoring: browser errors are posted to `/api/client-errors`, visible to admins, and can trigger threshold-based webhook alerts.
 - Database migrations: startup runs Alembic `upgrade head`; `alembic_version` tracks applied schema revisions.
 - Uptime monitoring: scheduled GitHub Actions checks validate the public home page and health endpoint, with optional webhook alerts on failure.
 - Log retention: Docker services use capped json-file logs to prevent unbounded disk growth.
@@ -186,5 +253,4 @@ Review these areas from the Admin page:
 
 These are not blockers for the current single-server deployment, but they are the next hardening steps for a larger service:
 
-- Move private uploads and rendered assets to object storage with server-side encryption and lifecycle policies.
-- Add threshold-based external alert routing for frontend client-error volume.
+- Configure a production object-storage bucket, lifecycle policy, and optional CDN in the hosting account.

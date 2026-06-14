@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import uuid
 from datetime import datetime, timezone
 
@@ -10,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.ai.models import AIUsage
 from app.auth.models import User
 from app.common.exceptions import AppError
+from app.common import storage
 from app.datasets.models import Dataset
 from app.figures.models import Figure, FigureVersion
 
@@ -54,9 +54,8 @@ def storage_used_bytes(db: Session, user_id: uuid.UUID) -> int:
     total = 0
     for path in set(paths):
         try:
-            if os.path.exists(path):
-                total += os.path.getsize(path)
-        except OSError:
+            total += storage.size(path)
+        except Exception:
             continue
     return total
 
