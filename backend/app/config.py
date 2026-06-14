@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     max_upload_size_mb: int = 50
     upload_dir: str = "/app/backend/private/uploads"
     figures_dir: str = "/app/backend/static/figures"
+    DATA_ENCRYPTION_KEY: str = ""
 
     # Password reset email. If SMTP_HOST is unset, reset links are not emailed.
     PASSWORD_RESET_EXPIRE_MINUTES: int = 30

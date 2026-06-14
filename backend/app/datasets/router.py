@@ -1,11 +1,13 @@
 import uuid
 
-from fastapi import APIRouter, Depends, File, UploadFile
+from fastapi import APIRouter, Depends, File, Request, UploadFile
 from fastapi import Form
 from sqlalchemy.orm import Session
 
+from app.audit import service as audit_service
 from app.auth.models import User
 from app.common.deps import get_current_user, get_db
+from app.common.quotas import enforce_storage_quota
 from app.common.security import rate_limit
 from app.datasets import service
 from app.datasets.schemas import DatasetListItem, DatasetResponse, DatasetUpdate
@@ -17,6 +19,7 @@ router = APIRouter(prefix="/api/datasets", tags=["datasets"])
 
 @router.post("", response_model=DatasetResponse, status_code=201)
 async def upload_dataset(
+    request: Request,
     file: UploadFile = File(...),
     name: str | None = Form(None),
     description: str | None = Form(None),
@@ -30,8 +33,20 @@ async def upload_dataset(
     else:
         project_service.get_project(db, project_id, current_user.id)  # ownership check
     content = await file.read()
-    return service.create_dataset(db, current_user.id, file.filename, content,
-                                  name=name, project_id=project_id, description=description)
+    enforce_storage_quota(db, current_user, len(content))
+    ds = service.create_dataset(db, current_user.id, file.filename, content,
+                                name=name, project_id=project_id, description=description)
+    audit_service.log_event(
+        db,
+        actor_id=current_user.id,
+        action="dataset.upload",
+        target_type="dataset",
+        target_id=ds.id,
+        metadata={"filename": file.filename, "bytes": len(content), "format": ds.format},
+        request=request,
+    )
+    db.commit()
+    return ds
 
 
 @router.get("", response_model=list[DatasetListItem])
@@ -50,8 +65,10 @@ def get_dataset(dataset_id: uuid.UUID, db: Session = Depends(get_db), current_us
 
 
 @router.delete("/{dataset_id}", status_code=204)
-def delete_dataset(dataset_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def delete_dataset(dataset_id: uuid.UUID, request: Request, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     service.delete_dataset(db, dataset_id, current_user.id)
+    audit_service.log_event(db, actor_id=current_user.id, action="dataset.delete", target_type="dataset", target_id=dataset_id, metadata={}, request=request)
+    db.commit()
 
 
 @router.get("/{dataset_id}/chart-suggestions")

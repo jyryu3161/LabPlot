@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session, joinedload
 from app.ai import client as ai_client
 from app.auth.models import User
 from app.common.exceptions import BadRequestError, NotFoundError
+from app.common.quotas import enforce_render_quota
 from app.config import settings
 from app.datasets.models import Dataset
 from app.datasets import service as ds_service
@@ -340,6 +341,9 @@ def _svg_replay_r(svg: str) -> str:
 
 
 def create_figure(db: Session, owner_id: uuid.UUID, data) -> dict:
+    owner = db.query(User).filter(User.id == owner_id).first()
+    if owner:
+        enforce_render_quota(db, owner)
     ds = ds_service.get_dataset(db, data.dataset_id, owner_id)
     preset = data.style_preset if data.style_preset in PRESETS else "nature"
     validate_mapping(data.plot_type, data.mapping)
@@ -372,6 +376,9 @@ def create_figure(db: Session, owner_id: uuid.UUID, data) -> dict:
 
 
 def rerender(db: Session, figure_id: uuid.UUID, owner_id: uuid.UUID, req) -> dict:
+    owner = db.query(User).filter(User.id == owner_id).first()
+    if owner:
+        enforce_render_quota(db, owner)
     fig = get_figure(db, figure_id, owner_id)
     base = get_version(fig, fig.current_version_id) if fig.current_version_id else fig.versions[-1]
     mapping = req.mapping if req.mapping is not None else base.mapping
@@ -410,6 +417,9 @@ def rerender(db: Session, figure_id: uuid.UUID, owner_id: uuid.UUID, req) -> dic
 
 def save_svg_edit(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, owner_id: uuid.UUID,
                   svg: str, change_note: str | None = None) -> dict:
+    owner = db.query(User).filter(User.id == owner_id).first()
+    if owner:
+        enforce_render_quota(db, owner)
     fig = get_figure(db, figure_id, owner_id)
     base = get_version(fig, version_id)
     clean_svg = _sanitize_svg(svg)

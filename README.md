@@ -11,6 +11,8 @@ LabPlot AI is a web platform for producing publication-ready scientific figures 
 - Rule-based chart suggestions for immediate feedback
 - Optional Claude or Gemini AI features for recommendations, reference-image chart matching, figure review, improvements, legend writing, and prompt enhancement
 - Admin controls for user approval, role management, AI provider settings, and per-user AI token/cost estimates
+- Audit logs plus per-user AI, render, and storage quotas for operational control
+- Private dataset uploads are stored outside public static routes and encrypted at rest for new uploads
 - Successful render code is archived as reusable figure-code artifacts for later retrieval, training-data preparation, and cross-user template reuse
 - Caddy reverse proxy with HTTPS, compression, and cache headers for rendered static assets
 
@@ -52,6 +54,7 @@ Create a `.env` file or provide equivalent environment variables to Docker Compo
 | `ANTHROPIC_MODEL` | Default Claude model |
 | `GEMINI_MODEL` | Default Gemini model |
 | `MAX_UPLOAD_SIZE_MB` | Upload size limit |
+| `DATA_ENCRYPTION_KEY` | Key material for encrypting private uploaded datasets at rest |
 | `NEXT_PUBLIC_API_URL` | Frontend API base URL, usually empty for same-origin deployment |
 
 Admins can also update the active AI provider, model names, and API keys from the Admin page.
@@ -88,6 +91,9 @@ Recommended checks before deployment:
 cd frontend && npm run lint && npm run build
 PYTHONPYCACHEPREFIX=/tmp/labplot-pycache python -m py_compile $(find backend/app -name '*.py' -not -path '*/__pycache__/*' -print)
 docker compose ps
+python scripts/smoke_security.py
+docker cp scripts/smoke_api.py labplot-backend:/tmp/smoke_api.py
+docker exec labplot-backend sh -lc "cd /app/backend && /app/.pixi/envs/default/bin/python /tmp/smoke_api.py"
 ```
 
 For deployed routing, verify the public pages and API health:
@@ -109,6 +115,7 @@ Cost estimates are operational guidance, not a billing ledger. Provider invoices
 - The backend runs Uvicorn without auto-reload in Docker Compose.
 - Caddy enables `zstd`/`gzip` compression and long-lived immutable caching for rendered figure assets.
 - Uploaded files and rendered outputs are stored under backend-managed local static directories.
+- See `docs/02-operations/commercial-readiness.md` for the deployment, backup, smoke-test, quota, audit, and security runbook.
 
 ## Security Notes
 
@@ -116,3 +123,5 @@ Cost estimates are operational guidance, not a billing ledger. Provider invoices
 - Admin privileges are required for user management and AI provider configuration.
 - AI output is treated as suggestions and is validated before it can affect figure parameters.
 - The R renderer uses fixed templates and sanitized parameters rather than executing arbitrary user-provided R code.
+- Newly uploaded private datasets are encrypted at rest and remain inaccessible through public static routes.
+- Admin-visible audit logs record account, dataset, figure, SVG edit, quota, and AI configuration events.

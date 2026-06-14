@@ -5,7 +5,7 @@ import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import {
   adminListUsers, adminCreateUser, adminUpdateUser, adminResetPassword, adminDeleteUser,
-  getAiConfig, updateAiConfig,
+  adminListAuditLogs, getAiConfig, updateAiConfig,
 } from '@/lib/api';
 import { useAuthContext } from '@/components/auth/AuthProvider';
 import { AppHeader } from '@/components/layout/AppHeader';
@@ -14,7 +14,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
-import { Loader2, Shield, UserPlus, KeyRound, Trash2, Cpu } from 'lucide-react';
+import { Activity, Loader2, Shield, UserPlus, KeyRound, Trash2, Cpu } from 'lucide-react';
 
 const numberFmt = new Intl.NumberFormat('en-US');
 const usdFmt = new Intl.NumberFormat('en-US', {
@@ -29,13 +29,17 @@ export default function AdminPage() {
   const qc = useQueryClient();
   const { user } = useAuthContext();
   const { data: users, isLoading, error } = useQuery({ queryKey: ['admin-users'], queryFn: adminListUsers });
+  const { data: auditLogs } = useQuery({ queryKey: ['admin-audit-logs'], queryFn: () => adminListAuditLogs(100) });
 
   const [email, setEmail] = useState('');
   const [name, setName] = useState('');
   const [password, setPassword] = useState('');
   const [isAdmin, setIsAdmin] = useState(false);
 
-  const refresh = () => qc.invalidateQueries({ queryKey: ['admin-users'] });
+  const refresh = () => {
+    qc.invalidateQueries({ queryKey: ['admin-users'] });
+    qc.invalidateQueries({ queryKey: ['admin-audit-logs'] });
+  };
 
   // ── AI provider config ──
   const { data: aiCfg } = useQuery({ queryKey: ['ai-config'], queryFn: getAiConfig });
@@ -66,13 +70,13 @@ export default function AdminPage() {
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Create failed'),
   });
   const update = useMutation({
-    mutationFn: ({ id, data }: { id: string; data: Record<string, boolean> }) => adminUpdateUser(id, data),
+    mutationFn: ({ id, data }: { id: string; data: Record<string, boolean | number> }) => adminUpdateUser(id, data),
     onSuccess: () => { toast.success('Updated'); refresh(); },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Update failed'),
   });
   const resetPw = useMutation({
     mutationFn: ({ id, pw }: { id: string; pw: string }) => adminResetPassword(id, pw),
-    onSuccess: () => toast.success('Password reset'),
+    onSuccess: () => { toast.success('Password reset'); refresh(); },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Reset failed'),
   });
   const del = useMutation({
@@ -80,6 +84,17 @@ export default function AdminPage() {
     onSuccess: () => { toast.success('User deleted'); refresh(); },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Delete failed'),
   });
+
+  function updateLimit(id: string, key: 'ai_monthly_limit' | 'render_monthly_limit' | 'storage_limit_mb', current: number) {
+    const raw = prompt(`Set ${key.replaceAll('_', ' ')}:`, String(current));
+    if (raw === null) return;
+    const value = Number(raw);
+    if (!Number.isInteger(value) || value < 0) {
+      toast.error('Limit must be a non-negative integer');
+      return;
+    }
+    update.mutate({ id, data: { [key]: value } });
+  }
 
   return (
     <div className="min-h-screen bg-muted/20">
@@ -142,7 +157,8 @@ export default function AdminPage() {
                   <thead><tr className="border-b text-left text-muted-foreground">
                     <th className="px-2 py-2">Email</th><th className="px-2 py-2">Name</th><th className="px-2 py-2">Role</th>
                     <th className="px-2 py-2">Approval</th><th className="px-2 py-2">Active</th><th className="px-2 py-2">Data</th><th className="px-2 py-2">Figs</th>
-                    <th className="px-2 py-2">AI Calls</th><th className="px-2 py-2">Tokens</th><th className="px-2 py-2">Est. Cost</th><th className="px-2 py-2">Actions</th>
+                    <th className="px-2 py-2">AI Calls</th><th className="px-2 py-2">Renders</th><th className="px-2 py-2">Storage</th>
+                    <th className="px-2 py-2">Tokens</th><th className="px-2 py-2">Est. Cost</th><th className="px-2 py-2">Actions</th>
                   </tr></thead>
                   <tbody>
                     {users?.map((u) => (
@@ -169,7 +185,21 @@ export default function AdminPage() {
                         </td>
                         <td className="px-2 py-2 text-muted-foreground">{u.dataset_count}</td>
                         <td className="px-2 py-2 text-muted-foreground">{u.figure_count}</td>
-                        <td className="px-2 py-2 text-muted-foreground">{numberFmt.format(u.ai_request_count)}</td>
+                        <td className="px-2 py-2 text-muted-foreground">
+                          <button className="text-left hover:underline" onClick={() => updateLimit(u.id, 'ai_monthly_limit', u.ai_monthly_limit)}>
+                            {numberFmt.format(u.ai_monthly_used)} / {u.ai_monthly_limit || 'unlimited'}
+                          </button>
+                        </td>
+                        <td className="px-2 py-2 text-muted-foreground">
+                          <button className="text-left hover:underline" onClick={() => updateLimit(u.id, 'render_monthly_limit', u.render_monthly_limit)}>
+                            {numberFmt.format(u.render_monthly_used)} / {u.render_monthly_limit || 'unlimited'}
+                          </button>
+                        </td>
+                        <td className="px-2 py-2 text-muted-foreground">
+                          <button className="text-left hover:underline" onClick={() => updateLimit(u.id, 'storage_limit_mb', u.storage_limit_mb)}>
+                            {u.storage_used_mb} / {u.storage_limit_mb || 'unlimited'} MB
+                          </button>
+                        </td>
                         <td className="px-2 py-2 text-muted-foreground" title={`${numberFmt.format(u.ai_input_tokens)} input / ${numberFmt.format(u.ai_output_tokens)} output`}>
                           {numberFmt.format(u.ai_total_tokens)}
                         </td>
@@ -197,7 +227,32 @@ export default function AdminPage() {
                     ))}
                   </tbody>
                 </table>
-              )}
+            )}
+          </CardContent>
+        </Card>
+
+        <Card className="mt-6">
+          <CardHeader className="pb-2"><CardTitle className="flex items-center gap-2 text-base"><Activity className="h-4 w-4" /> Recent audit log</CardTitle></CardHeader>
+          <CardContent className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead><tr className="border-b text-left text-muted-foreground">
+                <th className="px-2 py-2">Time</th><th className="px-2 py-2">Action</th><th className="px-2 py-2">Target</th><th className="px-2 py-2">IP</th><th className="px-2 py-2">Metadata</th>
+              </tr></thead>
+              <tbody>
+                {(auditLogs ?? []).slice(0, 40).map((log) => (
+                  <tr key={log.id} className="border-b last:border-0">
+                    <td className="whitespace-nowrap px-2 py-2 text-muted-foreground">{new Date(log.created_at).toLocaleString()}</td>
+                    <td className="px-2 py-2 font-medium">{log.action}</td>
+                    <td className="px-2 py-2 text-muted-foreground">{log.target_type ?? '-'} {log.target_id ? String(log.target_id).slice(0, 8) : ''}</td>
+                    <td className="px-2 py-2 text-muted-foreground">{log.ip_address ?? '-'}</td>
+                    <td className="max-w-md truncate px-2 py-2 text-muted-foreground">{JSON.stringify(log.metadata_json)}</td>
+                  </tr>
+                ))}
+                {(!auditLogs || auditLogs.length === 0) && (
+                  <tr><td colSpan={5} className="px-2 py-6 text-center text-muted-foreground">No audit events yet.</td></tr>
+                )}
+              </tbody>
+            </table>
           </CardContent>
         </Card>
       </main>

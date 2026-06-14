@@ -1,10 +1,12 @@
 import os
 import uuid
+from io import BytesIO
 
 import pandas as pd
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.common.encryption import decrypt_private_bytes, encrypt_private_bytes
 from app.common.exceptions import BadRequestError, FileTooLargeError, NotFoundError
 from app.datasets.models import Dataset
 from app.datasets.profiler import profile_dataframe
@@ -30,15 +32,18 @@ def _detect_format(filename: str) -> str:
 
 
 def read_file(path: str, fmt: str) -> pd.DataFrame:
+    with open(path, "rb") as f:
+        raw = decrypt_private_bytes(f.read())
+    buf = BytesIO(raw)
     try:
         if fmt == "csv":
-            df = pd.read_csv(path)
+            df = pd.read_csv(buf)
         elif fmt == "tsv":
-            df = pd.read_csv(path, sep="\t")
+            df = pd.read_csv(buf, sep="\t")
         elif fmt == "txt":
-            df = pd.read_csv(path, sep=None, engine="python")
+            df = pd.read_csv(buf, sep=None, engine="python")
         elif fmt in ("xlsx", "xls"):
-            df = pd.read_excel(path)
+            df = pd.read_excel(buf)
         else:  # pragma: no cover
             raise BadRequestError("Unsupported format")
     except BadRequestError:
@@ -65,7 +70,7 @@ def create_dataset(db: Session, owner_id: uuid.UUID, filename: str, content: byt
     dataset_id = uuid.uuid4()
     stored_path = os.path.join(settings.upload_dir, f"{dataset_id}.{fmt}")
     with open(stored_path, "wb") as f:
-        f.write(content)
+        f.write(encrypt_private_bytes(content))
 
     df = read_file(stored_path, fmt)
     prof = profile_dataframe(df)

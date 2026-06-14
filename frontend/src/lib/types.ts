@@ -185,4 +185,22 @@ export interface AdminUser {
   ai_output_tokens: number;
   ai_total_tokens: number;
   ai_estimated_cost_usd: number;
+  ai_monthly_limit: number;
+  render_monthly_limit: number;
+  storage_limit_mb: number;
+  ai_monthly_used: number;
+  render_monthly_used: number;
+  storage_used_mb: number;
+}
+
+export interface AuditLogItem {
+  id: string;
+  actor_id?: string;
+  action: string;
+  target_type?: string;
+  target_id?: string;
+  ip_address?: string;
+  user_agent?: string;
+  metadata_json: Record<string, unknown>;
+  created_at: string;
 }

@@ -1,14 +1,15 @@
 import uuid
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 
 from app.admin import service
 from app.admin.schemas import (
     AdminPasswordReset, AdminUserCreate, AdminUserItem, AdminUserUpdate,
-    AIConfigUpdate, AIConfigView,
+    AIConfigUpdate, AIConfigView, AuditLogItem,
 )
 from app.ai import config_service
+from app.audit import service as audit_service
 from app.auth.models import User
 from app.auth.schemas import UserResponse
 from app.common.deps import get_current_admin, get_db
@@ -22,8 +23,18 @@ def get_ai_config(db: Session = Depends(get_db), _: User = Depends(get_current_a
 
 
 @router.put("/ai-config", response_model=AIConfigView)
-def update_ai_config(data: AIConfigUpdate, db: Session = Depends(get_db), _: User = Depends(get_current_admin)):
+def update_ai_config(data: AIConfigUpdate, request: Request, db: Session = Depends(get_db), admin: User = Depends(get_current_admin)):
     cfg = config_service.update_config(db, data.model_dump(exclude_unset=True))
+    audit_service.log_event(
+        db,
+        actor_id=admin.id,
+        action="admin.ai_config.update",
+        target_type="ai_config",
+        target_id=str(cfg.id),
+        metadata=data.model_dump(exclude_unset=True),
+        request=request,
+    )
+    db.commit()
     return config_service.public_view(cfg)
 
 
@@ -33,34 +44,42 @@ def list_users(db: Session = Depends(get_db), _: User = Depends(get_current_admi
 
 
 @router.post("/users", response_model=UserResponse, status_code=201)
-def create_user(data: AdminUserCreate, db: Session = Depends(get_db), _: User = Depends(get_current_admin)):
-    return service.create_user(db, data.email, data.password, data.display_name, data.is_admin)
+def create_user(data: AdminUserCreate, request: Request, db: Session = Depends(get_db), admin: User = Depends(get_current_admin)):
+    return service.create_user(db, data.email, data.password, data.display_name, data.is_admin, acting_user=admin, request=request)
 
 
 @router.patch("/users/{user_id}", response_model=UserResponse)
 def update_user(
     user_id: uuid.UUID,
     data: AdminUserUpdate,
+    request: Request,
     db: Session = Depends(get_db),
     admin: User = Depends(get_current_admin),
 ):
-    return service.update_user(db, user_id, data, acting_user=admin)
+    return service.update_user(db, user_id, data, acting_user=admin, request=request)
 
 
 @router.post("/users/{user_id}/reset-password", response_model=UserResponse)
 def reset_password(
     user_id: uuid.UUID,
     data: AdminPasswordReset,
+    request: Request,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_admin),
+    admin: User = Depends(get_current_admin),
 ):
-    return service.reset_password(db, user_id, data.password)
+    return service.reset_password(db, user_id, data.password, acting_user=admin, request=request)
 
 
 @router.delete("/users/{user_id}", status_code=204)
 def delete_user(
     user_id: uuid.UUID,
+    request: Request,
     db: Session = Depends(get_db),
     admin: User = Depends(get_current_admin),
 ):
-    service.delete_user(db, user_id, acting_user=admin)
+    service.delete_user(db, user_id, acting_user=admin, request=request)
+
+
+@router.get("/audit-logs", response_model=list[AuditLogItem])
+def audit_logs(limit: int = 200, db: Session = Depends(get_db), _: User = Depends(get_current_admin)):
+    return service.list_audit_logs(db, limit=limit)

@@ -8,7 +8,7 @@ WORKDIR /app
 # add the two Python deps LabPlot needs on top of the base env
 # (pip isn't preinstalled in the pixi env; bootstrap it with ensurepip)
 RUN pixi run python -m ensurepip --upgrade \
- && pixi run python -m pip install --no-cache-dir "anthropic>=0.39" openpyxl
+ && pixi run python -m pip install --no-cache-dir "anthropic>=0.39" openpyxl "cryptography>=42"
 
 # professional-domain R packages (annotated heatmaps, networks, enrichment, etc.)
 # NOTE: slow solve; the running image is also persisted via `docker commit`.

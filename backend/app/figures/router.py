@@ -1,9 +1,10 @@
 import uuid
 
-from fastapi import APIRouter, Depends, File, UploadFile
+from fastapi import APIRouter, Depends, File, Request, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
+from app.audit import service as audit_service
 from app.auth.models import User
 from app.common.deps import get_current_user, get_db
 from app.common.security import rate_limit
@@ -73,8 +74,19 @@ async def ai_recommend_from_image(dataset_id: uuid.UUID, file: UploadFile = File
 # -------- figures --------
 @router.post("", response_model=FigureDetail, status_code=201,
              dependencies=[Depends(rate_limit("figure_create", 60, 3600))])
-def create_figure(data: FigureCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    return service.create_figure(db, current_user.id, data)
+def create_figure(data: FigureCreate, request: Request, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    detail = service.create_figure(db, current_user.id, data)
+    audit_service.log_event(
+        db,
+        actor_id=current_user.id,
+        action="figure.create",
+        target_type="figure",
+        target_id=detail["id"],
+        metadata={"plot_type": detail["plot_type"], "version_id": detail.get("current_version_id")},
+        request=request,
+    )
+    db.commit()
+    return detail
 
 
 @router.get("", response_model=list[FigureListItem])
@@ -111,21 +123,45 @@ def generate_legend(figure_id: uuid.UUID, version_id: uuid.UUID, db: Session = D
 
 
 @router.delete("/{figure_id}", status_code=204)
-def delete_figure(figure_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def delete_figure(figure_id: uuid.UUID, request: Request, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     service.delete_figure(db, figure_id, current_user.id)
+    audit_service.log_event(db, actor_id=current_user.id, action="figure.delete", target_type="figure", target_id=figure_id, metadata={}, request=request)
+    db.commit()
 
 
 @router.post("/{figure_id}/rerender", response_model=VersionResponse,
              dependencies=[Depends(rate_limit("figure_rerender", 60, 3600))])
-def rerender(figure_id: uuid.UUID, req: RerenderRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    return service.rerender(db, figure_id, current_user.id, req)
+def rerender(figure_id: uuid.UUID, req: RerenderRequest, request: Request, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    version = service.rerender(db, figure_id, current_user.id, req)
+    audit_service.log_event(
+        db,
+        actor_id=current_user.id,
+        action="figure.rerender",
+        target_type="figure",
+        target_id=figure_id,
+        metadata={"version_id": version["id"], "style_preset": version["style_preset"]},
+        request=request,
+    )
+    db.commit()
+    return version
 
 
 @router.post("/{figure_id}/versions/{version_id}/svg-edit", response_model=VersionResponse,
              dependencies=[Depends(rate_limit("figure_svg_edit", 120, 3600))])
 def save_svg_edit(figure_id: uuid.UUID, version_id: uuid.UUID, data: SvgEditRequest,
-                  db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    return service.save_svg_edit(db, figure_id, version_id, current_user.id, data.svg, data.change_note)
+                  request: Request, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    version = service.save_svg_edit(db, figure_id, version_id, current_user.id, data.svg, data.change_note)
+    audit_service.log_event(
+        db,
+        actor_id=current_user.id,
+        action="figure.svg_edit",
+        target_type="figure",
+        target_id=figure_id,
+        metadata={"source_version_id": str(version_id), "version_id": version["id"]},
+        request=request,
+    )
+    db.commit()
+    return version
 
 
 @router.post("/{figure_id}/versions/{version_id}/review", response_model=ReviewResponse,

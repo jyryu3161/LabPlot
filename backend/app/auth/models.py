@@ -19,6 +19,9 @@ class User(Base):
     is_approved = Column(Boolean, nullable=False, default=False)
     is_admin = Column(Boolean, nullable=False, default=False)
     token_version = Column(Integer, nullable=False, default=0)
+    ai_monthly_limit = Column(Integer, nullable=False, default=200)
+    render_monthly_limit = Column(Integer, nullable=False, default=300)
+    storage_limit_mb = Column(Integer, nullable=False, default=1024)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 

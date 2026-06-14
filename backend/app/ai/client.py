@@ -146,6 +146,13 @@ def _record_usage(user_id: uuid.UUID | None, provider: str, model: str, feature:
 
 def _run_logged(db: Session, user_id: uuid.UUID | None, feature: str, system: str, content: list[dict],
                 schema: dict, tool_name: str, max_tokens: int) -> dict:
+    if user_id:
+        from app.auth.models import User
+        from app.common.quotas import enforce_ai_quota
+
+        user = db.query(User).filter(User.id == user_id).first()
+        if user:
+            enforce_ai_quota(db, user)
     cfg, model, key = _ready(db)
     payload, usage = providers.run_structured_with_usage(
         cfg.provider, model, key, system, content, schema, tool_name, max_tokens

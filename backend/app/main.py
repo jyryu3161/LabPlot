@@ -16,6 +16,7 @@ from app.projects import models as _proj_models  # noqa: F401
 from app.datasets import models as _ds_models  # noqa: F401
 from app.figures import models as _fig_models  # noqa: F401
 from app.ai import models as _ai_models  # noqa: F401
+from app.audit import models as _audit_models  # noqa: F401
 from app.database import Base, engine
 
 from app.auth.router import router as auth_router
@@ -96,6 +97,9 @@ def _seed_ai_config():
 _MIGRATIONS = [
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_approved BOOLEAN NOT NULL DEFAULT TRUE",
     "ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS ai_monthly_limit INTEGER NOT NULL DEFAULT 200",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS render_monthly_limit INTEGER NOT NULL DEFAULT 300",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS storage_limit_mb INTEGER NOT NULL DEFAULT 1024",
     "ALTER TABLE datasets ADD COLUMN IF NOT EXISTS project_id UUID",
     "ALTER TABLE datasets ADD COLUMN IF NOT EXISTS statistics JSONB",
     "ALTER TABLE datasets ADD COLUMN IF NOT EXISTS description TEXT",
@@ -158,6 +162,22 @@ _MIGRATIONS = [
     """,
     "CREATE INDEX IF NOT EXISTS ix_password_reset_tokens_user_id ON password_reset_tokens (user_id)",
     "CREATE INDEX IF NOT EXISTS ix_password_reset_tokens_token_hash ON password_reset_tokens (token_hash)",
+    """
+    CREATE TABLE IF NOT EXISTS audit_logs (
+        id UUID PRIMARY KEY,
+        actor_id UUID REFERENCES users(id) ON DELETE SET NULL,
+        action VARCHAR(80) NOT NULL,
+        target_type VARCHAR(80),
+        target_id VARCHAR(128),
+        ip_address VARCHAR(64),
+        user_agent VARCHAR(512),
+        metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS ix_audit_logs_actor_id ON audit_logs (actor_id)",
+    "CREATE INDEX IF NOT EXISTS ix_audit_logs_action ON audit_logs (action)",
+    "CREATE INDEX IF NOT EXISTS ix_audit_logs_created_at ON audit_logs (created_at DESC)",
 ]
 
 

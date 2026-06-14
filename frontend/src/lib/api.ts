@@ -1,7 +1,7 @@
 import type {
   User, TokenResponse, LoginRequest, RegisterRequest,
   DatasetListItem, DatasetDetail, ChartSuggestion, PlotTypeDef, StyleDef,
-  FigureListItem, FigureDetail, FigureVersion, Review, Improvement, AdminUser, AIConfig, GalleryFigureItem,
+  FigureListItem, FigureDetail, FigureVersion, Review, Improvement, AdminUser, AIConfig, GalleryFigureItem, AuditLogItem,
   Project, ProjectListItem,
 } from './types';
 
@@ -243,13 +243,16 @@ export async function adminListUsers(): Promise<AdminUser[]> { return fetcher('/
 export async function adminCreateUser(data: { email: string; password: string; display_name: string; is_admin: boolean }): Promise<User> {
   return fetcher('/api/admin/users', { method: 'POST', body: JSON.stringify(data) });
 }
-export async function adminUpdateUser(id: string, data: { display_name?: string; is_active?: boolean; is_approved?: boolean; is_admin?: boolean }): Promise<User> {
+export async function adminUpdateUser(id: string, data: Record<string, unknown>): Promise<User> {
   return fetcher(`/api/admin/users/${id}`, { method: 'PATCH', body: JSON.stringify(data) });
 }
 export async function adminResetPassword(id: string, password: string): Promise<User> {
   return fetcher(`/api/admin/users/${id}/reset-password`, { method: 'POST', body: JSON.stringify({ password }) });
 }
 export async function adminDeleteUser(id: string): Promise<void> { return fetcher(`/api/admin/users/${id}`, { method: 'DELETE' }); }
+export async function adminListAuditLogs(limit = 200): Promise<AuditLogItem[]> {
+  return fetcher(`/api/admin/audit-logs?limit=${limit}`);
+}
 
 // ── admin: AI config ──
 export async function getAiConfig(): Promise<AIConfig> { return fetcher('/api/admin/ai-config'); }
