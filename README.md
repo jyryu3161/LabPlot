@@ -99,12 +99,9 @@ Recommended checks before deployment:
 ```bash
 cd frontend && npm run lint && npm run build
 PYTHONPYCACHEPREFIX=/tmp/labplot-pycache python -m py_compile $(find backend/app -name '*.py' -not -path '*/__pycache__/*' -print)
-docker compose ps
-python scripts/smoke_security.py
-docker cp scripts/smoke_api.py labplot-backend:/tmp/smoke_api.py
-docker exec labplot-backend sh -lc "cd /app/backend && /app/.pixi/envs/default/bin/python /tmp/smoke_api.py"
-docker cp scripts/smoke_services.py labplot-backend:/tmp/smoke_services.py
-docker exec labplot-backend sh -lc "cd /app/backend && /app/.pixi/envs/default/bin/python /tmp/smoke_services.py"
+docker compose config --quiet
+git diff --check
+scripts/run_production_smoke_suite.sh
 ```
 
 For deployed routing, verify the public pages and API health:

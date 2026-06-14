@@ -138,16 +138,10 @@ git diff --check
 After deployment, run:
 
 ```bash
-python scripts/smoke_security.py
-docker cp scripts/smoke_api.py labplot-backend:/tmp/smoke_api.py
-docker cp scripts/smoke_services.py labplot-backend:/tmp/smoke_services.py
-docker exec labplot-backend sh -lc "cd /app/backend && /app/.pixi/envs/default/bin/python /tmp/smoke_api.py"
-docker exec labplot-backend sh -lc "cd /app/backend && /app/.pixi/envs/default/bin/python /tmp/smoke_services.py"
-docker exec labplot-backend sh -lc "cd /app/backend && /app/.pixi/envs/default/bin/alembic current"
-curl -k --resolve labplotai.com:443:127.0.0.1 -I https://labplotai.com/
+scripts/run_production_smoke_suite.sh
 ```
 
-The security smoke script checks API health, CORS origin restriction, private upload exposure, and login rate limiting. The API smoke script checks admin login, test-user provisioning, encrypted dataset upload, AI/render/storage quota blocking, figure rendering, audit logs, and delete cleanup. The service smoke script checks password reset, AI quota enforcement, prompt-injection neutralization, and SVG sanitization. The curl command checks edge security headers through Caddy.
+The production smoke suite checks Python compilation, Docker Compose config, running service health, Alembic state, public uptime, API security controls, password reset, AI quota enforcement, prompt-injection neutralization, SVG sanitization, encrypted dataset upload, figure rendering, account export/delete, quotas, audit logs, object-storage asset paths, object migration, retention dry-run, key-rotation dry-run, client-error alert dry-run, object lifecycle dry-run, restore drill, and git whitespace hygiene.
 
 ## Backup And Restore
 
