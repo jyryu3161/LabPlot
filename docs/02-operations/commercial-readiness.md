@@ -10,6 +10,7 @@ Set these values in `.env` before public deployment:
 POSTGRES_PASSWORD=$(openssl rand -hex 32)
 JWT_SECRET=$(openssl rand -hex 64)
 DATA_ENCRYPTION_KEY=$(openssl rand -base64 32)
+DATA_ENCRYPTION_PREVIOUS_KEYS=
 ROOT_EMAIL=admin@your-domain.example
 ROOT_PASSWORD=<long one-time bootstrap password>
 APP_BASE_URL=https://your-domain.example
@@ -26,9 +27,12 @@ SMTP_FROM=no-reply@your-domain.example
 NEXT_PUBLIC_GA_ID=G-XXXXXXXXXX
 ANTHROPIC_API_KEY=<only if AI features are enabled>
 GEMINI_API_KEY=<only if Gemini is enabled>
+SENTRY_DSN=<optional backend error monitoring DSN>
+SENTRY_ENVIRONMENT=production
+SENTRY_RELEASE=<git sha or release version>
 ```
 
-`DATA_ENCRYPTION_KEY` protects newly uploaded private datasets at rest. Existing plaintext uploads remain readable for backward compatibility; re-uploading or running a future migration can convert old files.
+`DATA_ENCRYPTION_KEY` protects newly uploaded private datasets at rest. Existing plaintext uploads remain readable for backward compatibility. During key rotation, put the old key in `DATA_ENCRYPTION_PREVIOUS_KEYS`, deploy, run the rotation script below, then remove the old key after a verified backup.
 
 ## Deployment
 
@@ -79,13 +83,14 @@ The security smoke script checks API health, CORS origin restriction, private up
 Database backup:
 
 ```bash
-mkdir -p backups
-docker exec labplot-db pg_dump -U labplot -d labplot --format=custom > backups/labplot-$(date +%Y%m%d-%H%M%S).dump
+scripts/backup_labplot.sh
 ```
 
-Private uploads and rendered figures:
+Manual equivalent:
 
 ```bash
+mkdir -p backups
+docker exec labplot-db pg_dump -U labplot -d labplot --format=custom > backups/labplot-$(date +%Y%m%d-%H%M%S).dump
 tar -czf backups/labplot-files-$(date +%Y%m%d-%H%M%S).tgz backend/private backend/static/figures
 ```
 
@@ -96,6 +101,19 @@ cat backups/labplot.dump | docker exec -i labplot-db pg_restore -U labplot -d la
 ```
 
 Restore file assets only from trusted backups. Keep `DATA_ENCRYPTION_KEY` with the backup metadata; encrypted datasets cannot be recovered without it.
+
+## Dataset Key Rotation
+
+Use this when changing `DATA_ENCRYPTION_KEY`:
+
+```bash
+scripts/backup_labplot.sh
+docker cp scripts/rotate_dataset_encryption.py labplot-backend:/tmp/rotate_dataset_encryption.py
+docker exec labplot-backend sh -lc "cd /app/backend && /app/.pixi/envs/default/bin/python /tmp/rotate_dataset_encryption.py --dry-run"
+docker exec labplot-backend sh -lc "cd /app/backend && /app/.pixi/envs/default/bin/python /tmp/rotate_dataset_encryption.py"
+```
+
+Keep the old key in `DATA_ENCRYPTION_PREVIOUS_KEYS` until the non-dry-run script reports success and newly uploaded plus old datasets have been opened successfully.
 
 ## Security Controls
 
@@ -110,6 +128,8 @@ Restore file assets only from trusted backups. Keep `DATA_ENCRYPTION_KEY` with t
 - Auditability: account, dataset, figure, SVG-edit, and admin configuration events are written to `audit_logs`.
 - Abuse control: rate limits are applied to auth, uploads, renders, SVG edits, and AI-heavy endpoints.
 - Cost control: admin users can set per-user monthly AI request limits, render limits, and storage limits.
+- Error monitoring: configure `SENTRY_DSN` to capture backend exceptions.
+- Log retention: Docker services use capped json-file logs to prevent unbounded disk growth.
 
 ## Admin Operations
 
@@ -125,11 +145,9 @@ Review these areas from the Admin page:
 
 These are not blockers for the current single-server deployment, but they are the next hardening steps for a larger service:
 
-- Replace startup SQL snippets with Alembic migrations.
 - Move private uploads and rendered assets to object storage with server-side encryption and lifecycle policies.
-- Add CI that runs backend compile checks, frontend lint/build, Docker build, and smoke tests.
-- Add Sentry or equivalent error monitoring for backend and frontend.
-- Add uptime checks and log retention.
+- Add external uptime checks.
 - Add per-tenant data retention and deletion policies.
-- Add key rotation support for `DATA_ENCRYPTION_KEY`.
+- Replace startup SQL snippets with Alembic migrations for more formal release tracking.
+- Extend Sentry or equivalent monitoring to the frontend.
 - Add disaster recovery drills with timed restore validation.

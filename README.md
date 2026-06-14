@@ -55,6 +55,8 @@ Create a `.env` file or provide equivalent environment variables to Docker Compo
 | `GEMINI_MODEL` | Default Gemini model |
 | `MAX_UPLOAD_SIZE_MB` | Upload size limit |
 | `DATA_ENCRYPTION_KEY` | Key material for encrypting private uploaded datasets at rest |
+| `DATA_ENCRYPTION_PREVIOUS_KEYS` | Optional comma-separated old encryption keys during dataset key rotation |
+| `SENTRY_DSN` | Optional backend error monitoring DSN |
 | `NEXT_PUBLIC_API_URL` | Frontend API base URL, usually empty for same-origin deployment |
 
 Admins can also update the active AI provider, model names, and API keys from the Admin page.
@@ -94,6 +96,8 @@ docker compose ps
 python scripts/smoke_security.py
 docker cp scripts/smoke_api.py labplot-backend:/tmp/smoke_api.py
 docker exec labplot-backend sh -lc "cd /app/backend && /app/.pixi/envs/default/bin/python /tmp/smoke_api.py"
+docker cp scripts/smoke_services.py labplot-backend:/tmp/smoke_services.py
+docker exec labplot-backend sh -lc "cd /app/backend && /app/.pixi/envs/default/bin/python /tmp/smoke_services.py"
 ```
 
 For deployed routing, verify the public pages and API health:
@@ -115,6 +119,7 @@ Cost estimates are operational guidance, not a billing ledger. Provider invoices
 - The backend runs Uvicorn without auto-reload in Docker Compose.
 - Caddy enables `zstd`/`gzip` compression and long-lived immutable caching for rendered figure assets.
 - Uploaded files and rendered outputs are stored under backend-managed local static directories.
+- Docker json-file logs are capped by size and file count in Compose.
 - See `docs/02-operations/commercial-readiness.md` for the deployment, backup, smoke-test, quota, audit, and security runbook.
 
 ## Security Notes

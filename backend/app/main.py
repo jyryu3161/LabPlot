@@ -26,6 +26,28 @@ from app.datasets.router import router as datasets_router
 from app.figures.router import router as figures_router, meta_router
 from app.public.router import router as public_router
 
+
+def _init_sentry() -> None:
+    if not settings.SENTRY_DSN:
+        return
+    try:
+        import sentry_sdk
+        from sentry_sdk.integrations.fastapi import FastApiIntegration
+        from sentry_sdk.integrations.sqlalchemy import SqlalchemyIntegration
+    except Exception:
+        return
+    sentry_sdk.init(
+        dsn=settings.SENTRY_DSN,
+        environment=settings.SENTRY_ENVIRONMENT,
+        release=settings.SENTRY_RELEASE or None,
+        traces_sample_rate=0.05,
+        profiles_sample_rate=0.0,
+        integrations=[FastApiIntegration(), SqlalchemyIntegration()],
+    )
+
+
+_init_sentry()
+
 app = FastAPI(title="LabPlot AI", description="AI-powered publication figure copilot", version="1.0.0")
 
 app.add_middleware(

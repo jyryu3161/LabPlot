@@ -25,6 +25,12 @@ class Settings(BaseSettings):
     upload_dir: str = "/app/backend/private/uploads"
     figures_dir: str = "/app/backend/static/figures"
     DATA_ENCRYPTION_KEY: str = ""
+    DATA_ENCRYPTION_PREVIOUS_KEYS: str = ""
+
+    # Optional error monitoring
+    SENTRY_DSN: str = ""
+    SENTRY_ENVIRONMENT: str = "production"
+    SENTRY_RELEASE: str = ""
 
     # Password reset email. If SMTP_HOST is unset, reset links are not emailed.
     PASSWORD_RESET_EXPIRE_MINUTES: int = 30
