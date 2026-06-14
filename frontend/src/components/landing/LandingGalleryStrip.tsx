@@ -13,30 +13,42 @@ const CAPTURES = [
     label: 'Gallery',
     src: '/landing/capture-gallery.png',
     detail: 'Browse real rendered examples before starting.',
+    fit: 'contain',
+    position: 'center top',
+    zoom: 1,
+    origin: 'center top',
     icon: GalleryHorizontal,
   },
   {
     label: 'Generate',
     src: '/landing/capture-generate.png',
     detail: 'Map columns, compare ranked suggestions, and render.',
+    fit: 'contain',
+    position: 'center top',
+    zoom: 1,
+    origin: 'center top',
     icon: Sparkles,
   },
   {
     label: 'Edit',
     src: '/landing/capture-editing.png',
     detail: 'Polish SVG labels, colors, and layout with version history.',
+    fit: 'cover',
+    position: '78% top',
+    zoom: 1.28,
+    origin: 'right top',
     icon: PencilRuler,
   },
-];
+] as const;
 
 export function LandingGalleryStrip() {
-  const [active, setActive] = useState(1);
+  const [active, setActive] = useState(2);
   const { data } = useQuery({ queryKey: ['public-gallery', 8], queryFn: () => getPublicGallery(8) });
   const figures = data?.figures ?? [];
   const activeCapture = CAPTURES[active];
 
   return (
-    <section className="border-b bg-background py-14 sm:py-16">
+    <section className="border-b bg-background py-12 sm:py-16">
       <div className="mx-auto max-w-6xl px-4">
         <div className="mx-auto mb-7 max-w-3xl text-center">
           <p className="text-xs font-semibold uppercase tracking-[0.18em] text-primary">Workflow</p>
@@ -76,15 +88,22 @@ export function LandingGalleryStrip() {
             <p className="text-sm font-semibold">{activeCapture.label}</p>
             <p className="text-sm text-muted-foreground">{activeCapture.detail}</p>
           </div>
-          <Image
-            src={activeCapture.src}
-            alt={`${activeCapture.label} screenshot`}
-            width={1440}
-            height={842}
-            loading="lazy"
-            sizes="(min-width: 1024px) 1024px, 100vw"
-            className="aspect-[1440/842] w-full bg-white object-contain"
-          />
+          <div className="relative h-[320px] bg-white sm:h-[430px] lg:h-[520px]">
+            <Image
+              src={activeCapture.src}
+              alt={`${activeCapture.label} screenshot`}
+              fill
+              loading="lazy"
+              sizes="(min-width: 1024px) 1024px, 100vw"
+              className="transition-transform duration-300"
+              style={{
+                objectFit: activeCapture.fit,
+                objectPosition: activeCapture.position,
+                transform: `scale(${activeCapture.zoom})`,
+                transformOrigin: activeCapture.origin,
+              }}
+            />
+          </div>
         </div>
 
         {figures.length > 0 && (
