@@ -23,7 +23,8 @@ from app.auth.models import User
 from app.common.exceptions import AppError, BadRequestError
 from app.common.quotas import enforce_ai_quota
 from app.database import SessionLocal
-from app.figures.service import _sanitize_svg
+from app.figures.service import _sanitize_svg, sanitize_options
+from app.r_engine.renderer import build_script
 
 
 def main() -> None:
@@ -82,9 +83,34 @@ def main() -> None:
         except BadRequestError:
             pass
 
+        injected_layout = 'fr") ; system("id > /tmp/pwn") ; print(ggraph(.g, layout="fr'
+        network_options = sanitize_options("network", {"layout": injected_layout, "show_labels": True})
+        assert "layout" not in network_options
+        network_script = build_script(
+            "network",
+            {"source": "source", "target": "target"},
+            network_options,
+            "publication",
+        )
+        assert injected_layout not in network_script
+        assert 'system("id' not in network_script
+        assert 'layout = "fr"' in network_script
+
+        injected_palette = 'viridis"); system("id > /tmp/pwn"); print("'
+        heatmap_options = sanitize_options("heatmap", {"palette": injected_palette})
+        assert "palette" not in heatmap_options
+        heatmap_script = build_script(
+            "heatmap",
+            {"columns": ["value"]},
+            heatmap_options,
+            "publication",
+        )
+        assert injected_palette not in heatmap_script
+        assert 'system("id' not in heatmap_script
+
         db.delete(user)
         db.commit()
-    print("PASS service scenario: password reset, AI quota, prompt neutralization, SVG sanitizer")
+    print("PASS service scenario: password reset, AI quota, prompt neutralization, SVG sanitizer, option sanitizer")
 
 
 if __name__ == "__main__":

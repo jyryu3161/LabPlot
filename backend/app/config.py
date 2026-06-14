@@ -66,6 +66,7 @@ class Settings(BaseSettings):
     # R engine
     RSCRIPT_PATH: str = "/app/.pixi/envs/r-viz/bin/Rscript"
     RENDER_TIMEOUT_SEC: int = 120
+    ALLOW_INSECURE_DEV_CONFIG: bool = False
 
     model_config = SettingsConfigDict(
         env_file=str(_ENV_FILE),
@@ -73,6 +74,35 @@ class Settings(BaseSettings):
         case_sensitive=False,
         extra="ignore",
     )
+
+    def validate_runtime_security(self) -> None:
+        """Fail fast when deployment secrets are still development defaults."""
+        if self.ALLOW_INSECURE_DEV_CONFIG:
+            return
+
+        errors: list[str] = []
+        jwt = (self.JWT_SECRET or "").strip()
+        root_password = (self.ROOT_PASSWORD or "").strip()
+        data_key = (self.DATA_ENCRYPTION_KEY or "").strip()
+        default_jwt = "change-me-in-production-use-a-long-random-string"
+
+        if not jwt or jwt == default_jwt or "change-me" in jwt.lower() or len(jwt) < 32:
+            errors.append("JWT_SECRET must be a long non-default secret")
+
+        weak_root_values = {"root", "admin", "password", "changeme", "change-me"}
+        if (
+            not root_password
+            or root_password.lower() in weak_root_values
+            or "change-me" in root_password.lower()
+            or len(root_password) < 10
+        ):
+            errors.append("ROOT_PASSWORD must be a strong non-default password")
+
+        if not data_key or data_key == jwt or "change-me" in data_key.lower() or len(data_key) < 32:
+            errors.append("DATA_ENCRYPTION_KEY must be set and distinct from JWT_SECRET")
+
+        if errors:
+            raise RuntimeError("Unsafe LabPlot configuration: " + "; ".join(errors))
 
 
 settings = Settings()

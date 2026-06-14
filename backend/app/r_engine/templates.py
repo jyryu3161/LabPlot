@@ -29,6 +29,14 @@ def _num(v, default):
         return float(default)
 
 
+_VIRIDIS_OPTIONS = ("viridis", "magma", "inferno", "plasma", "cividis")
+_GRAPH_LAYOUTS = ("fr", "kk", "circle", "stress")
+
+
+def _choice(value, allowed: tuple[str, ...], default: str) -> str:
+    return value if isinstance(value, str) and value in allowed else default
+
+
 def _labs(options: dict, default_x="", default_y="", default_fill="NULL_DEFAULT") -> str:
     title = options.get("title")
     subtitle = options.get("subtitle")
@@ -199,7 +207,7 @@ def _correlation_heatmap(m, o):
 .cols <- {col_vec}
 .mat <- as.matrix(df[, .cols, drop = FALSE])
 storage.mode(.mat) <- "double"
-.cor <- stats::cor(.mat, use = "pairwise.complete.obs", method = "{method}")
+.cor <- stats::cor(.mat, use = "pairwise.complete.obs", method = {rq(method)})
 .long <- as.data.frame(as.table(.cor))
 colnames(.long) <- c("x", "y", "value")
 .long$x <- factor(.long$x, levels = .cols)
@@ -234,7 +242,7 @@ def _heatmap(m, o):
     if o.get("color_mode") == "grayscale":
         fill_scale = 'scale_fill_gradient(low = "grey92", high = "grey15", na.value = "grey85")'
     else:
-        fill_scale = f'scale_fill_viridis_c(option = "{o.get("palette", "viridis")}", na.value = "grey85")'
+        fill_scale = f"scale_fill_viridis_c(option = {rq(_choice(o.get('palette'), _VIRIDIS_OPTIONS, 'viridis'))}, na.value = \"grey85\")"
     return f"""
 .cols <- {col_vec}
 .mat <- as.matrix(df[, .cols, drop = FALSE])
@@ -460,9 +468,7 @@ def _contour(m, o):
     x, y, z = m["x"], m["y"], m["z"]
     bins = int(_num(o.get("bins", 10), 10))
     bins = max(3, min(40, bins))
-    palette = o.get("palette", "viridis")
-    if palette not in ("viridis", "magma", "inferno", "plasma", "cividis"):
-        palette = "viridis"
+    palette = _choice(o.get("palette"), _VIRIDIS_OPTIONS, "viridis")
     show_lines = "TRUE" if o.get("show_contour_lines", True) else "FALSE"
     return f"""
 .plot <- data.frame(
@@ -474,7 +480,7 @@ def _contour(m, o):
 if (length(unique(.plot$.x)) < 2 || length(unique(.plot$.y)) < 2) stop("Contour plot needs at least two unique x and y values")
 p <- ggplot(.plot, aes(x = .x, y = .y, z = .z)) +
   geom_contour_filled(bins = {bins}, alpha = 0.92) +
-  scale_fill_viridis_d(option = "{palette}", name = {rq(z)}) +
+  scale_fill_viridis_d(option = {rq(palette)}, name = {rq(z)}) +
   coord_equal(expand = FALSE) +
   {_labs(o, x, y)}
 if ({show_lines}) {{
@@ -717,7 +723,7 @@ p <- ggplot(df, {aes}) +
 def _network(m, o):
     src, tgt = m["source"], m["target"]
     weight = m.get("weight")
-    layout = o.get("layout", "fr")
+    layout = _choice(o.get("layout"), _GRAPH_LAYOUTS, "fr")
     label = o.get("show_labels", True)
     label_block = "  geom_node_text(aes(label = name), repel = TRUE, size = 2.6, colour = \"grey20\") +\n" if label else ""
     edge_w = f"aes(width = {_data(weight)}), " if weight else ""
@@ -728,7 +734,7 @@ suppressMessages({{library(igraph); library(ggraph); library(tidygraph)}})
 {f'.edges$weight <- suppressWarnings(as.numeric({_col(weight)}))' if weight else ''}
 .g <- igraph::graph_from_data_frame(.edges, directed = FALSE)
 igraph::V(.g)$deg <- igraph::degree(.g)
-p <- ggraph(.g, layout = "{layout}") +
+p <- ggraph(.g, layout = {rq(layout)}) +
   geom_edge_link({edge_w}alpha = 0.25, colour = "grey55") +
 {edge_width_scale}  geom_node_point(aes(size = deg), colour = "#E64B35", alpha = 0.9) +
 {label_block}  scale_size(range = c(2, 9), guide = "none") +

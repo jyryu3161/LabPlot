@@ -5,7 +5,7 @@ import type {
   ClientErrorItem, Project, ProjectListItem,
 } from './types';
 
-// Same-origin by default (Caddy proxies /api and /static on :7070).
+// Same-origin by default; Caddy proxies /api and /static to the backend.
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? '';
 
 export class ApiError extends Error {

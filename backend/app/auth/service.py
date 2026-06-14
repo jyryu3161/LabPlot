@@ -16,6 +16,7 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 _PASSWORD_MIN_LENGTH = 10
+_DUMMY_PASSWORD_HASH = "$2b$12$pO9hpU9jrKBlz9wR62LnVOERfyY7yWSOIAAxaEnec82l3JgH3J2be"
 
 
 def _hash_password(password: str) -> str:
@@ -77,7 +78,9 @@ def register_user(db: Session, email: str, password: str, display_name: str) -> 
 def authenticate_user(db: Session, email: str, password: str) -> User:
     email = _normalize_email(email)
     user = db.query(User).filter(User.email == email).first()
-    if not user or not _verify_password(password, user.hashed_password):
+    password_hash = user.hashed_password if user else _DUMMY_PASSWORD_HASH
+    password_ok = _verify_password(password, password_hash)
+    if not user or not password_ok:
         raise BadRequestError("Invalid email or password", error_code="INVALID_CREDENTIALS")
     if not user.is_active:
         raise BadRequestError("Account is deactivated", error_code="ACCOUNT_INACTIVE")
@@ -97,7 +100,11 @@ def refresh_tokens(db: Session, refresh_token: str) -> dict:
         raise BadRequestError("Invalid refresh token", error_code="INVALID_TOKEN")
 
     user_id = payload.get("sub")
-    user = db.query(User).filter(User.id == uuid.UUID(user_id)).first()
+    try:
+        parsed_user_id = uuid.UUID(user_id)
+    except (TypeError, ValueError):
+        raise BadRequestError("Invalid refresh token", error_code="INVALID_TOKEN")
+    user = db.query(User).filter(User.id == parsed_user_id).first()
     if not user or not user.is_active:
         raise BadRequestError("User not found or inactive", error_code="USER_NOT_FOUND")
     if not user.is_approved:

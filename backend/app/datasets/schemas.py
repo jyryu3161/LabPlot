@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ColumnProfile(BaseModel):
@@ -11,7 +11,7 @@ class ColumnProfile(BaseModel):
     role: str           # numeric | category | group | time | status | gene | log2fc | pvalue | expression | text
     n_unique: int
     n_missing: int
-    sample_values: list[Any] = []
+    sample_values: list[Any] = Field(default_factory=list)
     stats: dict[str, Any] | None = None
 
 

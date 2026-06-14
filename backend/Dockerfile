@@ -17,7 +17,12 @@ RUN pixi project channel add bioconda \
 
 # replace AL application code with LabPlot's
 RUN rm -rf backend
-COPY backend/ backend/
+RUN groupadd --gid 1000 labplot \
+ && useradd --uid 1000 --gid labplot --home-dir /home/labplot --create-home --shell /usr/sbin/nologin labplot
+COPY --chown=1000:1000 backend/ backend/
+RUN mkdir -p /app/backend/private /app/backend/static \
+ && chown -R 1000:1000 /app/backend /home/labplot
+USER 1000:1000
 
 EXPOSE 8000
 CMD ["pixi", "run", "serve"]

@@ -38,12 +38,17 @@ _OPTION_CHOICES = {
     "stat": {"mean", "sum", "count"},
     "palette": {"viridis", "magma", "inferno", "plasma", "cividis"},
     "corr_method": {"pearson", "spearman"},
+    "layout": {"fr", "kk", "circle", "stress"},
 }
 _BOOL_OPTIONS = {
     "show_points", "show_box", "error_bars", "scale_rows", "add_smooth", "show_density", "show_rug",
     "show_values", "hide_legend", "log_x", "log_y", "flip_coords", "connect_points", "show_contour_lines",
+    "cluster_rows", "cluster_cols", "show_row_names", "show_labels",
 }
-_NUMBER_OPTIONS = {"fc_threshold", "p_threshold", "label_top", "font_scale", "dpi", "width_in", "height_in", "bins"}
+_NUMBER_OPTIONS = {
+    "fc_threshold", "p_threshold", "label_top", "font_scale", "dpi", "width_in", "height_in",
+    "bins", "sig_threshold",
+}
 _MAX_SVG_BYTES = 5 * 1024 * 1024
 _BLOCKED_SVG_TAGS = {"script", "foreignobject", "iframe", "object", "embed", "link"}
 
@@ -84,7 +89,9 @@ def _friendly_error(log: str) -> str:
         msg = "A selected column was not found in the data. Check your column mapping."
     if "must be a numeric" in msg or "non-numeric" in msg:
         msg = "A column expected to be numeric contains non-numeric values."
-    return msg[:300] or "Rendering failed."
+    if msg.startswith("A selected column") or msg.startswith("A column expected"):
+        return msg
+    return "Rendering failed. Check the chart type, column mappings, and options."
 
 
 def _plot_def(plot_type: str) -> dict:
@@ -109,6 +116,21 @@ def validate_mapping(plot_type: str, mapping: dict) -> None:
             missing.append(req["label"])
     if missing:
         raise BadRequestError("Missing required mapping: " + ", ".join(missing), error_code="MISSING_MAPPING")
+
+
+def sanitize_options(plot_type: str, options: dict | None) -> dict:
+    pdef = _plot_def(plot_type)
+    allowed_options = {o["key"] for o in pdef.get("options", [])} | _UNIVERSAL_OPTION_KEYS
+    clean: dict[str, Any] = {}
+    if not isinstance(options, dict):
+        return clean
+    for key, value in options.items():
+        if key not in allowed_options:
+            continue
+        sanitized = _sanitize_option(key, value)
+        if sanitized is not None:
+            clean[key] = sanitized
+    return clean
 
 
 def version_response(v: FigureVersion) -> dict:
@@ -364,11 +386,12 @@ def create_figure(db: Session, owner_id: uuid.UUID, data) -> dict:
     ds = ds_service.get_dataset(db, data.dataset_id, owner_id)
     preset = data.style_preset if data.style_preset in PRESETS else "nature"
     validate_mapping(data.plot_type, data.mapping)
+    options = sanitize_options(data.plot_type, data.options)
     df = ds_service.load_dataframe(ds)
 
     figure_id = uuid.uuid4()
     version_id = uuid.uuid4()
-    res, _ = _render_into_version(df, data.plot_type, data.mapping, data.options, preset, figure_id, version_id)
+    res, _ = _render_into_version(df, data.plot_type, data.mapping, options, preset, figure_id, version_id)
 
     fig = Figure(
         id=figure_id, owner_id=owner_id, dataset_id=ds.id, project_id=ds.project_id, name=data.name,
@@ -379,7 +402,7 @@ def create_figure(db: Session, owner_id: uuid.UUID, data) -> dict:
     db.flush()
     version = FigureVersion(
         id=version_id, figure_id=figure_id, version_number=1,
-        mapping=data.mapping, options=data.options or {}, style_preset=preset,
+        mapping=data.mapping, options=options, style_preset=preset,
         r_code=res.r_code, change_note="Initial figure",
         png_path=res.outputs.get("png"), svg_path=res.outputs.get("svg"),
         tiff_path=res.outputs.get("tiff"), pdf_path=res.outputs.get("pdf"),
@@ -405,6 +428,7 @@ def rerender(db: Session, figure_id: uuid.UUID, owner_id: uuid.UUID, req) -> dic
         preset = "nature"
     plot_type = getattr(req, "plot_type", None) or fig.plot_type
     validate_mapping(plot_type, mapping)
+    options = sanitize_options(plot_type, options)
 
     ds = ds_service.get_dataset(db, fig.dataset_id, owner_id)
     df = ds_service.load_dataframe(ds)

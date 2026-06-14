@@ -11,7 +11,8 @@ from app.common.deps import get_db
 from app.config import settings
 from app.figures.models import Figure, FigureVersion
 from app.figures.service import _url
-from app.r_engine.templates import DOMAIN_LABELS, PLOT_DOMAINS
+from app.r_engine.presets import PRESETS, list_palettes
+from app.r_engine.templates import DOMAIN_LABELS, PLOT_DOMAINS, PLOT_TYPES
 
 router = APIRouter(prefix="/api/public", tags=["public"])
 
@@ -54,4 +55,4 @@ def public_gallery(limit: int = 12, db: Session = Depends(get_db)):
 
 @router.get("/stats")
 def public_stats(db: Session = Depends(get_db)):
-    return {"plot_types": 22, "style_presets": 5, "palettes": 5}
+    return {"plot_types": len(PLOT_TYPES), "style_presets": len(PRESETS), "palettes": len(list_palettes())}

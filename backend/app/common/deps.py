@@ -38,7 +38,12 @@ def get_current_user(
     if not user_id:
         raise UnauthorizedError("Invalid token payload", error_code="INVALID_TOKEN")
 
-    user = db.query(User).filter(User.id == uuid.UUID(user_id), User.is_active == True).first()
+    try:
+        parsed_user_id = uuid.UUID(user_id)
+    except (TypeError, ValueError):
+        raise UnauthorizedError("Invalid token payload", error_code="INVALID_TOKEN")
+
+    user = db.query(User).filter(User.id == parsed_user_id, User.is_active == True).first()
     if not user:
         raise UnauthorizedError("User not found or inactive", error_code="USER_NOT_FOUND")
     if not user.is_approved:

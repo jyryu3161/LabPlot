@@ -21,7 +21,7 @@ def _fernet_for_secret(secret: str) -> Fernet:
 
 
 def _primary_secret() -> str:
-    secret = (settings.DATA_ENCRYPTION_KEY or settings.JWT_SECRET or "").strip()
+    secret = (settings.DATA_ENCRYPTION_KEY or "").strip()
     if not secret:
         raise BadRequestError(
             "Dataset encryption key is not configured",

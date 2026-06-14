@@ -9,8 +9,8 @@ class FigureCreate(BaseModel):
     dataset_id: uuid.UUID
     name: str = Field(..., min_length=1, max_length=255)
     plot_type: str
-    mapping: dict[str, Any] = {}
-    options: dict[str, Any] = {}
+    mapping: dict[str, Any] = Field(default_factory=dict)
+    options: dict[str, Any] = Field(default_factory=dict)
     style_preset: str = "nature"
 
 
@@ -108,7 +108,7 @@ class FigureDetail(BaseModel):
     current_version_id: uuid.UUID | None = None
     created_at: datetime
     updated_at: datetime
-    versions: list[VersionResponse] = []
+    versions: list[VersionResponse] = Field(default_factory=list)
 
 
 class ReviewResponse(BaseModel):

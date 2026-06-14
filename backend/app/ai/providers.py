@@ -14,7 +14,7 @@ import urllib.error
 
 from app.common.exceptions import BadRequestError
 
-_GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+_GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
 
 def run_structured(provider: str, model: str, key: str | None, system: str,
@@ -144,9 +144,10 @@ def _gemini(model, key, system, content, schema, max_tokens) -> tuple[dict, dict
         "contents": [{"parts": parts}],
         "generationConfig": gen,
     }
-    url = _GEMINI_URL.format(model=model, key=key)
+    url = _GEMINI_URL.format(model=model)
     req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"),
-                                 headers={"Content-Type": "application/json"}, method="POST")
+                                 headers={"Content-Type": "application/json", "x-goog-api-key": key},
+                                 method="POST")
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
             payload = json.loads(resp.read().decode("utf-8"))

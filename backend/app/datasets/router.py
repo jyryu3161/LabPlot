@@ -7,14 +7,31 @@ from sqlalchemy.orm import Session
 from app.audit import service as audit_service
 from app.auth.models import User
 from app.common.deps import get_current_user, get_db
+from app.common.exceptions import FileTooLargeError
 from app.common.quotas import enforce_storage_quota
 from app.common.security import rate_limit
+from app.config import settings
 from app.datasets import service
 from app.datasets.schemas import DatasetListItem, DatasetResponse, DatasetUpdate
 from app.projects import service as project_service
 from app.recommend import rules
 
 router = APIRouter(prefix="/api/datasets", tags=["datasets"])
+
+
+async def _read_upload_limited(file: UploadFile) -> bytes:
+    max_bytes = int(settings.max_upload_size_mb) * 1024 * 1024
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise FileTooLargeError(settings.max_upload_size_mb)
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 @router.post("", response_model=DatasetResponse, status_code=201)
@@ -32,7 +49,7 @@ async def upload_dataset(
         project_id = project_service.ensure_default_project(db, current_user.id).id
     else:
         project_service.get_project(db, project_id, current_user.id)  # ownership check
-    content = await file.read()
+    content = await _read_upload_limited(file)
     enforce_storage_quota(db, current_user, len(content))
     ds = service.create_dataset(db, current_user.id, file.filename, content,
                                 name=name, project_id=project_id, description=description)

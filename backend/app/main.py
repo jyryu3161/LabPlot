@@ -87,12 +87,16 @@ app.mount("/static", StaticFiles(directory=_static_root), name="static")
 def _seed_root():
     from sqlalchemy.orm import Session
     from app.auth.models import User
-    from app.auth.service import _hash_password
+    from app.auth.service import _hash_password, _verify_password
 
     with Session(engine) as db:
         existing = db.query(User).filter(User.email == settings.ROOT_EMAIL).first()
         if existing:
             changed = False
+            if not _verify_password(settings.ROOT_PASSWORD, existing.hashed_password):
+                existing.hashed_password = _hash_password(settings.ROOT_PASSWORD)
+                existing.token_version = int(existing.token_version or 0) + 1
+                changed = True
             if not existing.is_admin:
                 existing.is_admin = True
                 changed = True
@@ -158,6 +162,7 @@ def _backfill_projects():
 
 @app.on_event("startup")
 def on_startup():
+    settings.validate_runtime_security()
     _run_migrations()
     _seed_root()
     _seed_ai_config()

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import mimetypes
 import os
+import posixpath
 import shutil
 from pathlib import Path
 from urllib.parse import quote, urlparse
@@ -68,8 +69,22 @@ def asset_url(ref: str | None) -> str | None:
     return "/api/assets/" + quote(key)
 
 
+def _safe_object_key(key: str) -> str:
+    if "\x00" in key or "\\" in key:
+        raise ValueError("Invalid object key")
+    normalized = posixpath.normpath(key.lstrip("/"))
+    if normalized in {"", ".", ".."} or normalized.startswith("../"):
+        raise ValueError("Invalid object key")
+    return normalized
+
+
 def _local_object_path(bucket: str, key: str) -> str:
-    return os.path.join(settings.OBJECT_STORAGE_LOCAL_DIR, bucket, key)
+    safe_key = _safe_object_key(key)
+    base = os.path.abspath(os.path.join(settings.OBJECT_STORAGE_LOCAL_DIR, bucket))
+    path = os.path.abspath(os.path.join(base, safe_key))
+    if os.path.commonpath([base, path]) != base:
+        raise ValueError("Invalid object key")
+    return path
 
 
 def _s3_client():
@@ -98,7 +113,7 @@ def _put_extra_args(content_type: str | None = None) -> dict:
 
 def put_bytes(key: str, data: bytes, content_type: str | None = None) -> str:
     bucket = _require_bucket()
-    key = key.lstrip("/")
+    key = _safe_object_key(key)
     if backend() == "filesystem_object":
         path = _local_object_path(bucket, key)
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -112,7 +127,7 @@ def put_bytes(key: str, data: bytes, content_type: str | None = None) -> str:
 
 
 def upload_file(path: str, key: str, content_type: str | None = None) -> str:
-    key = key.lstrip("/")
+    key = _safe_object_key(key)
     if backend() == "local":
         return path
     bucket = _require_bucket()
@@ -149,6 +164,7 @@ def write_bytes(ref: str, data: bytes, content_type: str | None = None) -> str:
             f.write(data)
         return ref
     _, key = parse_object_ref(ref)
+    key = _safe_object_key(key)
     return put_bytes(key, data, content_type=content_type)
 
 
@@ -207,7 +223,7 @@ def delete_file(ref: str | None) -> None:
 
 
 def delete_prefix(key_prefix: str) -> None:
-    key_prefix = key_prefix.strip("/")
+    key_prefix = _safe_object_key(key_prefix)
     if not object_storage_enabled():
         return
     bucket = _require_bucket()
