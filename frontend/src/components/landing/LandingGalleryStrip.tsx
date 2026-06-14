@@ -11,7 +11,7 @@ export function LandingGalleryStrip() {
   if (figures.length === 0) return null;
 
   return (
-    <section className="bg-muted/30 py-12">
+    <section className="bg-muted/30 py-8 sm:py-12">
       <div className="mx-auto max-w-6xl px-4">
         <div className="mb-5 flex items-end justify-between">
           <div>

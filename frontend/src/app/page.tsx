@@ -42,7 +42,7 @@ export default function LandingPage() {
       <LandingGalleryStrip />
 
       {/* features */}
-      <section className="mx-auto max-w-6xl px-4 py-20">
+      <section className="mx-auto max-w-6xl px-4 py-10 md:py-20">
         <div className="mx-auto mb-12 max-w-2xl text-center">
           <h2 className="text-3xl font-bold tracking-tight">Everything you need for a figure</h2>
           <p className="mt-3 text-muted-foreground">No R expertise required — yet every result is fully reproducible in R.</p>
