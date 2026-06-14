@@ -143,10 +143,13 @@ The cleanup removes audit logs older than `AUDIT_LOG_RETENTION_DAYS`, expired or
 
 GitHub Actions runs `.github/workflows/uptime.yml` every 15 minutes against the public home page and health endpoint. Override `UPTIME_HEALTH_URL` and `UPTIME_HOME_URL` with repository variables if the production domain changes.
 
+For external uptime alerts, set repository secret `UPTIME_ALERT_WEBHOOK_URL`. Set repository variable `UPTIME_ALERT_WEBHOOK_FORMAT` to `slack`, `discord`, or `generic` depending on the webhook receiver.
+
 Manual check:
 
 ```bash
 python scripts/uptime_check.py
+ALERT_TITLE="LabPlot test" ALERT_MESSAGE="Webhook dry run" python scripts/send_alert.py --dry-run
 ```
 
 ## Security Controls
@@ -166,7 +169,7 @@ python scripts/uptime_check.py
 - Error monitoring: configure `SENTRY_DSN` to capture backend exceptions.
 - Client monitoring: browser errors are posted to `/api/client-errors` and visible to admins.
 - Database migrations: startup runs Alembic `upgrade head`; `alembic_version` tracks applied schema revisions.
-- Uptime monitoring: scheduled GitHub Actions checks validate the public home page and health endpoint.
+- Uptime monitoring: scheduled GitHub Actions checks validate the public home page and health endpoint, with optional webhook alerts on failure.
 - Log retention: Docker services use capped json-file logs to prevent unbounded disk growth.
 
 ## Admin Operations
@@ -184,4 +187,4 @@ Review these areas from the Admin page:
 These are not blockers for the current single-server deployment, but they are the next hardening steps for a larger service:
 
 - Move private uploads and rendered assets to object storage with server-side encryption and lifecycle policies.
-- Add external alert routing for backend exceptions, frontend client errors, and uptime failures.
+- Add threshold-based external alert routing for frontend client-error volume.

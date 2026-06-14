@@ -9,6 +9,8 @@ jobs:
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 2
+    env:
+      ALERT_WEBHOOK_URL: ${{ secrets.UPTIME_ALERT_WEBHOOK_URL }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -20,3 +22,13 @@ jobs:
           UPTIME_HOME_URL: ${{ vars.UPTIME_HOME_URL || 'https://labplotai.com/' }}
           UPTIME_TIMEOUT_SEC: "20"
         run: python scripts/uptime_check.py
+      - name: Alert on uptime failure
+        if: ${{ failure() && env.ALERT_WEBHOOK_URL != '' }}
+        env:
+          ALERT_WEBHOOK_FORMAT: ${{ vars.UPTIME_ALERT_WEBHOOK_FORMAT || 'generic' }}
+          ALERT_TITLE: "LabPlot uptime check failed"
+          ALERT_MESSAGE: "The scheduled public uptime check failed. Review the GitHub Actions run for details."
+          ALERT_SEVERITY: "critical"
+          ALERT_SOURCE: "github-actions-uptime"
+          ALERT_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python scripts/send_alert.py
