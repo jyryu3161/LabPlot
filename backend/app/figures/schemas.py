@@ -22,6 +22,11 @@ class RerenderRequest(BaseModel):
     change_note: str | None = None
 
 
+class SvgEditRequest(BaseModel):
+    svg: str = Field(..., min_length=1, max_length=5_000_000)
+    change_note: str | None = Field(default=None, max_length=512)
+
+
 class FigureUpdate(BaseModel):
     name: str | None = None
     description: str | None = None

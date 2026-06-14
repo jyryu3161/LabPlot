@@ -189,6 +189,9 @@ export async function generateLegend(figureId: string, versionId: string): Promi
 export async function rerenderFigure(id: string, body: { plot_type?: string; mapping?: Record<string, unknown>; options?: Record<string, unknown>; style_preset?: string; change_note?: string }): Promise<FigureVersion> {
   return fetcher(`/api/figures/${id}/rerender`, { method: 'POST', body: JSON.stringify(body) });
 }
+export async function saveSvgEditVersion(figureId: string, versionId: string, body: { svg: string; change_note?: string }): Promise<FigureVersion> {
+  return fetcher(`/api/figures/${figureId}/versions/${versionId}/svg-edit`, { method: 'POST', body: JSON.stringify(body) });
+}
 export async function reviewVersion(figureId: string, versionId: string): Promise<Review> {
   return fetcher(`/api/figures/${figureId}/versions/${versionId}/review`, { method: 'POST' });
 }

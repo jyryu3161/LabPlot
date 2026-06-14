@@ -20,6 +20,7 @@ from app.figures.schemas import (
     RecommendationItem,
     RerenderRequest,
     ReviewResponse,
+    SvgEditRequest,
     VersionResponse,
 )
 from app.r_engine.presets import PRESET_LABELS, PRESETS, list_palettes
@@ -111,6 +112,12 @@ def delete_figure(figure_id: uuid.UUID, db: Session = Depends(get_db), current_u
 @router.post("/{figure_id}/rerender", response_model=VersionResponse)
 def rerender(figure_id: uuid.UUID, req: RerenderRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     return service.rerender(db, figure_id, current_user.id, req)
+
+
+@router.post("/{figure_id}/versions/{version_id}/svg-edit", response_model=VersionResponse)
+def save_svg_edit(figure_id: uuid.UUID, version_id: uuid.UUID, data: SvgEditRequest,
+                  db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    return service.save_svg_edit(db, figure_id, version_id, current_user.id, data.svg, data.change_note)
 
 
 @router.post("/{figure_id}/versions/{version_id}/review", response_model=ReviewResponse)

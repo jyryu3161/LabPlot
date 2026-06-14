@@ -50,7 +50,8 @@ def _box(m, o):
     points = "  geom_jitter(width = 0.15, size = 1.1, alpha = 0.45) +\n" if o.get("show_points", True) else ""
     return f"""
 p <- ggplot(df, aes(x = factor({_data(x)}), y = {_data(y)}, fill = factor({_data(color)}))) +
-  geom_boxplot(outlier.size = 0.8, alpha = 0.9, width = 0.65) +
+  geom_boxplot(outlier.size = 0.8, alpha = 0.9, width = 0.65,
+               box.linewidth = 0.35, whisker.linewidth = 0.35, median.linewidth = 0.35) +
 {points}  scale_fill_manual(values = labplot_palette()) +
   {_labs(o, x, y)} + guides(fill = guide_legend(title = {rq(color)}))
 """
@@ -59,11 +60,14 @@ p <- ggplot(df, aes(x = factor({_data(x)}), y = {_data(y)}, fill = factor({_data
 def _violin(m, o):
     x, y = m["x"], m["y"]
     color = m.get("color") or x
-    inner = "  geom_boxplot(width = 0.12, fill = \"white\", alpha = 0.7, outlier.shape = NA) +\n" if o.get("show_box", True) else ""
+    inner = (
+        "  geom_boxplot(width = 0.12, fill = \"white\", alpha = 0.7, outlier.shape = NA, "
+        "box.linewidth = 0.3, whisker.linewidth = 0.3, median.linewidth = 0.3) +\n"
+    ) if o.get("show_box", True) else ""
     points = "  geom_jitter(width = 0.12, size = 1.0, alpha = 0.4) +\n" if o.get("show_points", False) else ""
     return f"""
 p <- ggplot(df, aes(x = factor({_data(x)}), y = {_data(y)}, fill = factor({_data(color)}))) +
-  geom_violin(trim = FALSE, alpha = 0.85, scale = "width") +
+  geom_violin(trim = FALSE, alpha = 0.85, scale = "width", linewidth = 0.35) +
 {inner}{points}  scale_fill_manual(values = labplot_palette()) +
   {_labs(o, x, y)} + guides(fill = guide_legend(title = {rq(color)}))
 """
@@ -72,7 +76,7 @@ p <- ggplot(df, aes(x = factor({_data(x)}), y = {_data(y)}, fill = factor({_data
 def _scatter(m, o):
     x, y = m["x"], m["y"]
     color = m.get("color")
-    smooth = '  geom_smooth(method = "lm", se = TRUE, colour = "#3C5488", fill = "grey80", alpha = 0.4) +\n' if o.get("add_smooth", False) else ""
+    smooth = '  geom_smooth(method = "lm", se = TRUE, colour = "#3C5488", fill = "grey80", alpha = 0.4, linewidth = 0.35) +\n' if o.get("add_smooth", False) else ""
     if color:
         aes = f"aes(x = {_data(x)}, y = {_data(y)}, colour = factor({_data(color)}))"
         scale = "  scale_colour_manual(values = labplot_palette()) +\n"
@@ -102,7 +106,7 @@ p <- ggplot(df, aes(x = factor({_data(x)}), fill = factor({_data(x)}))) +
     fun = "mean" if stat == "mean" else "sum"
     err = ""
     if stat == "mean" and o.get("error_bars", True):
-        err = """  geom_errorbar(aes(ymin = .val - .sd, ymax = .val + .sd), width = 0.2, linewidth = 0.4) +
+        err = """  geom_errorbar(aes(ymin = .val - .sd, ymax = .val + .sd), width = 0.2, linewidth = 0.25) +
 """
     return f"""
 .summ <- df %>% dplyr::group_by(.grp = factor({_data(x)})) %>%
@@ -129,7 +133,7 @@ def _line(m, o):
         guide = ""
     return f"""
 p <- ggplot(df, {aes}) +
-  geom_line(linewidth = 0.9) +
+  geom_line(linewidth = 0.35) +
   geom_point(size = 1.8) +
 {scale}  {_labs(o, x, y)}{guide}
 """
@@ -152,12 +156,12 @@ def _histogram(m, o):
         guide = ""
         position = ""
     density_layer = (
-        f"  geom_density(aes(y = after_stat(count)), linewidth = 0.7, colour = \"grey20\", fill = NA) +\n"
+        f"  geom_density(aes(y = after_stat(count)), linewidth = 0.35, colour = \"grey20\", fill = NA) +\n"
         if density and not group else ""
     )
     return f"""
 p <- ggplot(df, {aes}) +
-  geom_histogram(bins = {bins}, colour = "white", linewidth = 0.2, alpha = 0.85{position}) +
+  geom_histogram(bins = {bins}, colour = "white", linewidth = 0.15, alpha = 0.85{position}) +
 {density_layer}{scale}  {_labs(o, value, "count")}{guide}
 """
 
@@ -174,10 +178,10 @@ def _density(m, o):
         aes = f"aes(x = {_data(value)})"
         scale = ""
         guide = ""
-    rug_layer = "  geom_rug(alpha = 0.25, linewidth = 0.2) +\n" if rug else ""
+    rug_layer = "  geom_rug(alpha = 0.25, linewidth = 0.15) +\n" if rug else ""
     return f"""
 p <- ggplot(df, {aes}) +
-  geom_density(alpha = 0.28, linewidth = 0.9) +
+  geom_density(alpha = 0.28, linewidth = 0.35) +
 {rug_layer}{scale}  {_labs(o, value, "density")}{guide}
 """
 
@@ -201,7 +205,7 @@ colnames(.long) <- c("x", "y", "value")
 .long$x <- factor(.long$x, levels = .cols)
 .long$y <- factor(.long$y, levels = rev(.cols))
 p <- ggplot(.long, aes(x = x, y = y, fill = value)) +
-  geom_tile(colour = "white", linewidth = 0.4) +
+  geom_tile(colour = "white", linewidth = 0.2) +
   scale_fill_gradient2(low = "#3C5488", mid = "white", high = "#E64B35", midpoint = 0,
                        limits = c(-1, 1), name = "r") +
   {_labs(o, "", "")} +
@@ -278,8 +282,8 @@ if (!is.finite(.minp)) .minp <- 1e-300
 p <- ggplot(.d, aes(x = .lfc, y = .neglogp, colour = .sig)) +
   geom_point(alpha = 0.75, size = 1.6) +
   {'scale_colour_manual(values = c(Down = "grey60", NS = "grey85", Up = "black"))' if o.get("color_mode") == "grayscale" else 'scale_colour_manual(values = c(Down = "#4DBBD5", NS = "grey70", Up = "#E64B35"))'} +
-  geom_vline(xintercept = c(-{fc_t}, {fc_t}), linetype = "dashed", colour = "grey50", linewidth = 0.3) +
-  geom_hline(yintercept = -log10({p_t}), linetype = "dashed", colour = "grey50", linewidth = 0.3) +
+  geom_vline(xintercept = c(-{fc_t}, {fc_t}), linetype = "dashed", colour = "grey50", linewidth = 0.25) +
+  geom_hline(yintercept = -log10({p_t}), linetype = "dashed", colour = "grey50", linewidth = 0.25) +
   {_labs(o, "log2 fold change", "-log10(p-value)")} +
   guides(colour = guide_legend(title = NULL))
 {label_block}"""
@@ -359,7 +363,7 @@ km_one <- function(tt, ss) {{
 }}))
 
 p <- ggplot(.curves, aes(x = time, y = surv, colour = factor(grp))) +
-  geom_step(linewidth = 0.9) +
+  geom_step(linewidth = 0.35) +
   scale_colour_manual(values = labplot_palette()) +
   coord_cartesian(ylim = c(0, 1)) +
   {_labs(o, "Time", "Survival probability")} +
@@ -518,7 +522,7 @@ p <- ggplot(df, aes(x = .cum, y = -log10(.p), colour = .band)) +
   geom_point(size = 0.9, alpha = 0.8) +
   scale_colour_manual(values = c("0" = "#3C5488", "1" = "#4DBBD5"), guide = "none") +
   scale_x_continuous(breaks = as.numeric(.centers), labels = names(.centers), expand = c(0.01, 0)) +
-  geom_hline(yintercept = -log10({thr}), linetype = "dashed", colour = "#E64B35", linewidth = 0.4) +
+  geom_hline(yintercept = -log10({thr}), linetype = "dashed", colour = "#E64B35", linewidth = 0.25) +
   {_labs(o, "Chromosome", "-log10(p)")}
 """
 
@@ -548,7 +552,7 @@ def _network(m, o):
     label = o.get("show_labels", True)
     label_block = "  geom_node_text(aes(label = name), repel = TRUE, size = 2.6, colour = \"grey20\") +\n" if label else ""
     edge_w = f"aes(width = {_data(weight)}), " if weight else ""
-    edge_width_scale = "  ggraph::scale_edge_width(range = c(0.3, 2), guide = \"none\") +\n" if weight else ""
+    edge_width_scale = "  ggraph::scale_edge_width(range = c(0.25, 1.1), guide = \"none\") +\n" if weight else ""
     return f"""
 suppressMessages({{library(igraph); library(ggraph); library(tidygraph)}})
 .edges <- data.frame(from = as.character({_col(src)}), to = as.character({_col(tgt)}), stringsAsFactors = FALSE)

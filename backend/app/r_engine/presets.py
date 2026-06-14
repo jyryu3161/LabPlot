@@ -75,7 +75,7 @@ def theme_r(preset: str, color_mode: str = "color", font_scale: float = 1.0, pal
     except (TypeError, ValueError):
         size = cfg["size"]
     grid_line = (
-        'panel.grid.major = element_line(colour = "grey92", linewidth = 0.3), panel.grid.minor = element_blank(),'
+        'panel.grid.major = element_line(colour = "grey92", linewidth = 0.18), panel.grid.minor = element_blank(),'
         if cfg["grid"] else
         'panel.grid = element_blank(),'
     )
@@ -92,6 +92,8 @@ labplot_theme <- function() {{
     plot.subtitle = element_text(size = {size}, colour = "grey30", hjust = 0.5),
     axis.title = element_text(face = "bold"),
     axis.text = element_text(colour = "grey20"),
+    axis.line = element_line(colour = "grey20", linewidth = 0.25),
+    axis.ticks = element_line(colour = "grey20", linewidth = 0.25),
     legend.position = "right",
     legend.key = element_blank(),
     {grid_line}

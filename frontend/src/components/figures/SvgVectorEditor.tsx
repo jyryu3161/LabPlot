@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, type MouseEvent } from 'react';
 import { toast } from 'sonner';
-import { AlertTriangle, Download, Loader2, MousePointer2, RefreshCw, Type } from 'lucide-react';
+import { AlertTriangle, Download, Loader2, MousePointer2, RefreshCw, Save, Type } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -21,6 +21,8 @@ interface SvgVectorEditorProps {
   svgUrl?: string | null;
   filenameBase: string;
   versionNumber?: number;
+  isSaving?: boolean;
+  onSaveVersion?: (svg: string) => void;
 }
 
 function sanitizeSvg(raw: string): string {
@@ -89,7 +91,7 @@ function safeFilename(name: string): string {
   return name.trim().replace(/[^A-Za-z0-9_.-]+/g, '_').replace(/^_+|_+$/g, '') || 'figure';
 }
 
-export function SvgVectorEditor({ svgUrl, filenameBase, versionNumber }: SvgVectorEditorProps) {
+export function SvgVectorEditor({ svgUrl, filenameBase, versionNumber, isSaving = false, onSaveVersion }: SvgVectorEditorProps) {
   const stageRef = useRef<HTMLDivElement>(null);
   const [svgMarkup, setSvgMarkup] = useState('');
   const [originalMarkup, setOriginalMarkup] = useState('');
@@ -101,7 +103,7 @@ export function SvgVectorEditor({ svgUrl, filenameBase, versionNumber }: SvgVect
   const [textItems, setTextItems] = useState<TextItem[]>([]);
   const [fillColor, setFillColor] = useState('#000000');
   const [strokeColor, setStrokeColor] = useState('#000000');
-  const [strokeWidth, setStrokeWidth] = useState('1');
+  const [strokeWidth, setStrokeWidth] = useState('0.75');
   const [textValue, setTextValue] = useState('');
 
   const refreshTextItems = useCallback(() => {
@@ -130,7 +132,8 @@ export function SvgVectorEditor({ svgUrl, filenameBase, versionNumber }: SvgVect
     setSelectedLabel(text ? `${tag}: ${text.slice(0, 48)}` : tag);
     setFillColor(colorValue(styleValue(el, 'fill'), '#000000'));
     setStrokeColor(colorValue(styleValue(el, 'stroke'), '#000000'));
-    setStrokeWidth(String(parseFloat(styleValue(el, 'stroke-width')) || 1));
+    const parsedStrokeWidth = parseFloat(styleValue(el, 'stroke-width'));
+    setStrokeWidth(String(Number.isFinite(parsedStrokeWidth) ? parsedStrokeWidth : 0.75));
     setTextValue(tag === 'text' || tag === 'tspan' ? (el.textContent || '') : '');
   }, []);
 
@@ -247,6 +250,12 @@ export function SvgVectorEditor({ svgUrl, filenameBase, versionNumber }: SvgVect
     toast.success('Edited SVG downloaded');
   }
 
+  function saveEditedVersion() {
+    const serialized = serializeEditedSvg();
+    if (!serialized) return;
+    onSaveVersion?.(serialized);
+  }
+
   function resetSvg() {
     const host = stageRef.current;
     if (host) {
@@ -324,7 +333,7 @@ export function SvgVectorEditor({ svgUrl, filenameBase, versionNumber }: SvgVect
               </div>
               <div className="space-y-1">
                 <Label className="text-xs">Stroke width</Label>
-                <Input data-testid="svg-stroke-width" type="number" min="0" step="0.1" value={strokeWidth} onChange={(e) => { setStrokeWidth(e.target.value); applyStyle('stroke-width', e.target.value || '0'); }} />
+                <Input data-testid="svg-stroke-width" type="number" min="0" step="0.05" value={strokeWidth} onChange={(e) => { setStrokeWidth(e.target.value); applyStyle('stroke-width', e.target.value || '0'); }} />
               </div>
               <div className="space-y-1">
                 <Label className="text-xs">Text content</Label>
@@ -333,6 +342,11 @@ export function SvgVectorEditor({ svgUrl, filenameBase, versionNumber }: SvgVect
             </div>
 
             <div className="flex flex-wrap gap-2">
+              {onSaveVersion && (
+                <Button data-testid="svg-save-version" type="button" onClick={saveEditedVersion} disabled={isSaving}>
+                  {isSaving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />} Save as version
+                </Button>
+              )}
               <Button data-testid="svg-download-edited" type="button" variant="secondary" onClick={downloadEditedSvg}><Download className="mr-2 h-4 w-4" /> Download edited SVG</Button>
               <Button data-testid="svg-reset-local" type="button" variant="outline" onClick={resetSvg}><RefreshCw className="mr-2 h-4 w-4" /> Reset local edits</Button>
             </div>

@@ -6,7 +6,7 @@ import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import {
   getFigure, getDataset, getPlotTypes, getStyles, getPalettes, rerenderFigure, reviewVersion,
-  improveVersion, applyImprovement, updateFigure, generateLegend, downloadExport, enhancePrompt,
+  improveVersion, applyImprovement, updateFigure, generateLegend, downloadExport, enhancePrompt, saveSvgEditVersion,
 } from '@/lib/api';
 import type { FigureVersion, Review, Improvement, PlotTypeDef, ColumnProfile } from '@/lib/types';
 import { formatStylePreset } from '@/lib/style-presets';
@@ -62,6 +62,21 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
     onSuccess: (v) => { toast.success(`Re-rendered (v${v.version_number})`); setSelectedVid(v.id); setReview(null); setImprovements(null); qc.invalidateQueries({ queryKey: ['figure', id] }); qc.invalidateQueries({ queryKey: ['figures'] }); },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Render failed'),
   });
+  const saveSvgEdit = useMutation({
+    mutationFn: (svg: string) => {
+      if (!effectiveSelectedVid) throw new Error('No figure version selected');
+      return saveSvgEditVersion(id, effectiveSelectedVid, { svg, change_note: 'Manual SVG edit' });
+    },
+    onSuccess: (v) => {
+      toast.success(`Saved SVG edit (v${v.version_number})`);
+      setSelectedVid(v.id);
+      setReview(null);
+      setImprovements(null);
+      qc.invalidateQueries({ queryKey: ['figure', id] });
+      qc.invalidateQueries({ queryKey: ['figures'] });
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'SVG save failed'),
+  });
   const runReview = useMutation({
     mutationFn: () => reviewVersion(id, effectiveSelectedVid!),
     onSuccess: (r) => { setReview(r); toast.success('Review complete'); },
@@ -102,6 +117,17 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
     catch { toast.error('Export failed'); }
   }
 
+  const isManualSvgEdit = Boolean(effectiveOptions.manual_svg_edit);
+  const previewUrl = (isManualSvgEdit ? version?.svg_url : version?.png_url) ?? version?.svg_url;
+  const previewIsSvg = Boolean(previewUrl && previewUrl === version?.svg_url);
+  const exportFormats = [
+    { fmt: 'png', label: 'PNG', available: Boolean(version?.png_url) },
+    { fmt: 'svg', label: 'SVG', available: Boolean(version?.svg_url) },
+    { fmt: 'tiff', label: 'TIFF', available: Boolean(version?.tiff_url) },
+    { fmt: 'pdf', label: 'PDF', available: Boolean(version?.pdf_url) },
+    { fmt: 'r', label: 'R script', available: Boolean(version?.r_url) },
+  ].filter((item) => item.available);
+
   function selectPlotType(pt: string) {
     setPlotType(pt);
     const def = plotTypes.find((p) => p.type === pt);
@@ -134,16 +160,24 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
           {/* left: image + paper-writing */}
           <div className="space-y-4 lg:col-span-2">
             <Card><CardContent className="p-4">
-              {version?.png_url ? <img src={version.png_url} alt={fig.name} decoding="async" className="mx-auto max-h-[58vh] w-auto rounded bg-white object-contain" />
+              {previewUrl ? <img src={previewUrl} alt={fig.name} decoding="async" className="mx-auto max-h-[58vh] w-auto rounded bg-white object-contain" />
                 : <div className="py-20 text-center text-muted-foreground">No image</div>}
+              {previewIsSvg && <p className="mt-2 text-center text-xs text-muted-foreground">SVG preview</p>}
             </CardContent></Card>
 
-            <SvgVectorEditor svgUrl={version?.svg_url} filenameBase={fig.name} versionNumber={version?.version_number} />
+            <SvgVectorEditor
+              svgUrl={version?.svg_url}
+              filenameBase={fig.name}
+              versionNumber={version?.version_number}
+              isSaving={saveSvgEdit.isPending}
+              onSaveVersion={(svg) => saveSvgEdit.mutate(svg)}
+            />
 
             <Card>
               <CardHeader className="pb-2"><CardTitle className="flex items-center gap-2 text-base"><Download className="h-4 w-4" /> Export {version && `(v${version.version_number})`}</CardTitle></CardHeader>
               <CardContent className="flex flex-wrap gap-2">
-                {['png', 'svg', 'tiff', 'pdf', 'r'].map((f) => <Button key={f} variant="outline" size="sm" onClick={() => doExport(f)}>{f === 'r' ? 'R script' : f.toUpperCase()}</Button>)}
+                {exportFormats.map((f) => <Button key={f.fmt} variant="outline" size="sm" onClick={() => doExport(f.fmt)}>{f.label}</Button>)}
+                {exportFormats.length === 0 && <p className="text-sm text-muted-foreground">No export files available for this version.</p>}
               </CardContent>
             </Card>
 

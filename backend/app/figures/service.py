@@ -4,6 +4,8 @@ import os
 import re
 import shutil
 import uuid
+import xml.etree.ElementTree as ET
+from types import SimpleNamespace
 from typing import Any
 
 from sqlalchemy import func
@@ -19,7 +21,7 @@ from app.figures.models import Figure, FigureCodeArtifact, FigureVersion, Improv
 from app.projects.models import Project
 from app.r_engine import renderer
 from app.r_engine.presets import PRESETS
-from app.r_engine.templates import PLOT_TYPES, PLOT_TYPE_KEYS
+from app.r_engine.templates import PLOT_TYPES, PLOT_TYPE_KEYS, rq
 
 _STATIC_ROOT = os.path.dirname(settings.figures_dir.rstrip("/"))
 _UNIVERSAL_OPTION_KEYS = {
@@ -40,6 +42,8 @@ _BOOL_OPTIONS = {
     "show_values", "hide_legend", "log_x", "log_y", "flip_coords",
 }
 _NUMBER_OPTIONS = {"fc_threshold", "p_threshold", "label_top", "font_scale", "dpi", "width_in", "height_in", "bins"}
+_MAX_SVG_BYTES = 5 * 1024 * 1024
+_BLOCKED_SVG_TAGS = {"script", "foreignobject", "iframe", "object", "embed", "link"}
 
 
 def _project_context(db: Session, project_id) -> str | None:
@@ -282,6 +286,59 @@ def _archive_code_artifact(db: Session, owner_id: uuid.UUID, ds: Dataset, fig: F
     db.add(row)
 
 
+def _sanitize_svg(svg: str) -> str:
+    raw = (svg or "").strip()
+    if not raw:
+        raise BadRequestError("Edited SVG is empty", error_code="EMPTY_SVG")
+    if len(raw.encode("utf-8")) > _MAX_SVG_BYTES:
+        raise BadRequestError("Edited SVG must be 5 MB or smaller", error_code="SVG_TOO_LARGE")
+    lowered = raw.lower()
+    if "<!doctype" in lowered or "<!entity" in lowered:
+        raise BadRequestError("Edited SVG contains unsupported XML declarations", error_code="BAD_SVG")
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError:
+        raise BadRequestError("Edited SVG is not valid XML", error_code="BAD_SVG")
+    svg_ns = root.tag.startswith("{http://www.w3.org/2000/svg}")
+    if root.tag.split("}")[-1].lower() != "svg":
+        raise BadRequestError("Edited content must be an SVG document", error_code="BAD_SVG")
+
+    for el in root.iter():
+        tag = el.tag.split("}")[-1].lower()
+        if tag in _BLOCKED_SVG_TAGS:
+            raise BadRequestError("Edited SVG contains unsupported embedded content", error_code="BAD_SVG")
+        for attr, value in list(el.attrib.items()):
+            attr_name = attr.split("}")[-1].lower()
+            attr_value = (value or "").strip().lower()
+            if attr_name.startswith("on") or attr_value.startswith("javascript:"):
+                del el.attrib[attr]
+            if attr_name in {"href", "xlink:href"} and attr_value.startswith(("data:", "file:")):
+                del el.attrib[attr]
+            if attr_name.startswith("data-labplot-"):
+                del el.attrib[attr]
+
+    root.attrib.pop("data-labplot-svg-editor-root", None)
+    if svg_ns:
+        ET.register_namespace("", "http://www.w3.org/2000/svg")
+    elif "xmlns" not in root.attrib:
+        root.set("xmlns", "http://www.w3.org/2000/svg")
+    return ET.tostring(root, encoding="unicode")
+
+
+def _svg_replay_r(svg: str) -> str:
+    lines = svg.splitlines() or [svg]
+    quoted = ",\n  ".join(rq(line) for line in lines)
+    return (
+        "# LabPlot AI - manually edited SVG version\n"
+        "# This script recreates the edited SVG export produced in the vector editor.\n"
+        ".svg <- c(\n"
+        f"  {quoted}\n"
+        ")\n"
+        "writeLines(.svg, \"figure.svg\", useBytes = TRUE)\n"
+        "message(\"Wrote edited SVG to figure.svg\")\n"
+    )
+
+
 def create_figure(db: Session, owner_id: uuid.UUID, data) -> dict:
     ds = ds_service.get_dataset(db, data.dataset_id, owner_id)
     preset = data.style_preset if data.style_preset in PRESETS else "nature"
@@ -308,6 +365,7 @@ def create_figure(db: Session, owner_id: uuid.UUID, data) -> dict:
         r_path=res.outputs.get("r"), render_log=res.log,
     )
     db.add(version)
+    db.flush()
     _archive_code_artifact(db, owner_id, ds, fig, version, res)
     db.commit()
     return figure_detail(db, figure_id, owner_id)
@@ -344,7 +402,47 @@ def rerender(db: Session, figure_id: uuid.UUID, owner_id: uuid.UUID, req) -> dic
     fig.style_preset = preset
     fig.plot_type = plot_type
     fig.status = "ready"
+    db.flush()
     _archive_code_artifact(db, owner_id, ds, fig, version, res)
+    db.commit()
+    return version_response(version)
+
+
+def save_svg_edit(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, owner_id: uuid.UUID,
+                  svg: str, change_note: str | None = None) -> dict:
+    fig = get_figure(db, figure_id, owner_id)
+    base = get_version(fig, version_id)
+    clean_svg = _sanitize_svg(svg)
+    ds = ds_service.get_dataset(db, fig.dataset_id, owner_id)
+    next_num = (db.query(func.max(FigureVersion.version_number))
+                .filter(FigureVersion.figure_id == figure_id).scalar() or 0) + 1
+    new_version_id = uuid.uuid4()
+    out_dir = os.path.join(settings.figures_dir, str(figure_id), str(new_version_id))
+    os.makedirs(out_dir, exist_ok=True)
+    svg_path = os.path.join(out_dir, "figure.svg")
+    r_path = os.path.join(out_dir, "figure.R")
+    r_code = _svg_replay_r(clean_svg)
+    with open(svg_path, "w", encoding="utf-8") as f:
+        f.write(clean_svg)
+    with open(r_path, "w", encoding="utf-8") as f:
+        f.write(r_code)
+
+    options = {**(base.options or {}), "manual_svg_edit": True, "source_version_id": str(base.id)}
+    version = FigureVersion(
+        id=new_version_id, figure_id=figure_id, version_number=next_num,
+        mapping=base.mapping or {}, options=options, style_preset=base.style_preset,
+        r_code=r_code, change_note=(change_note or "Manual SVG edit"),
+        png_path=None, svg_path=svg_path, tiff_path=None, pdf_path=None,
+        r_path=r_path, render_log="Manual SVG edit saved from vector editor.",
+    )
+    db.add(version)
+    fig.current_version_id = new_version_id
+    fig.status = "ready"
+    db.flush()
+    _archive_code_artifact(
+        db, owner_id, ds, fig, version,
+        SimpleNamespace(r_code=r_code, log="Manual SVG edit saved from vector editor.")
+    )
     db.commit()
     return version_response(version)
 
