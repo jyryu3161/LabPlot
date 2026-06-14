@@ -48,9 +48,9 @@ export function LandingGalleryStrip() {
   const activeCapture = CAPTURES[active];
 
   return (
-    <section className="border-b bg-background py-12 sm:py-16">
+    <section className="border-b bg-background py-10 sm:py-12">
       <div className="mx-auto max-w-6xl px-4">
-        <div className="mx-auto mb-7 max-w-3xl text-center">
+        <div className="mx-auto mb-6 max-w-3xl text-center">
           <p className="text-xs font-semibold uppercase tracking-[0.18em] text-primary">Workflow</p>
           <h2 className="mt-3 text-2xl font-bold tracking-tight text-slate-950 sm:text-3xl">
             Move from examples to final figure without leaving the workspace.
@@ -107,7 +107,7 @@ export function LandingGalleryStrip() {
         </div>
 
         {figures.length > 0 && (
-          <div className="mt-10">
+          <div className="mt-8">
             <div className="mb-4 flex items-center justify-between gap-3">
               <h3 className="text-sm font-semibold text-slate-900">Recent gallery figures</h3>
               <Link href="/gallery">

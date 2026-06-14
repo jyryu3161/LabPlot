@@ -42,8 +42,8 @@ export default function LandingPage() {
       <LandingGalleryStrip />
 
       {/* features */}
-      <section className="mx-auto max-w-6xl px-4 py-10 md:py-20">
-        <div className="mx-auto mb-12 max-w-2xl text-center">
+      <section className="mx-auto max-w-6xl px-4 py-10 md:py-14">
+        <div className="mx-auto mb-8 max-w-2xl text-center">
           <h2 className="text-3xl font-bold tracking-tight">Everything you need for a figure</h2>
           <p className="mt-3 text-muted-foreground">No R expertise required — yet every result is fully reproducible in R.</p>
         </div>
@@ -64,9 +64,9 @@ export default function LandingPage() {
       </section>
 
       {/* trust */}
-      <section className="border-y bg-muted/30 py-20">
+      <section className="border-y bg-muted/30 py-14">
         <div className="mx-auto max-w-6xl px-4">
-          <div className="mx-auto mb-12 max-w-2xl text-center">
+          <div className="mx-auto mb-8 max-w-2xl text-center">
             <h2 className="text-3xl font-bold tracking-tight">Built to be trusted in research</h2>
             <p className="mt-3 text-muted-foreground">Transparent, reproducible, and under your control — the way research tooling should be.</p>
           </div>
@@ -86,8 +86,8 @@ export default function LandingPage() {
       </section>
 
       {/* how it works */}
-      <section className="mx-auto max-w-6xl px-4 py-20">
-        <div className="mx-auto mb-12 max-w-2xl text-center">
+      <section className="mx-auto max-w-6xl px-4 py-14">
+        <div className="mx-auto mb-8 max-w-2xl text-center">
           <h2 className="text-3xl font-bold tracking-tight">How it works</h2>
           <p className="mt-3 text-muted-foreground">From raw data to a submission-ready figure in five steps.</p>
         </div>
@@ -110,7 +110,7 @@ export default function LandingPage() {
 
       {/* final CTA */}
       <section className="border-t bg-muted/30">
-        <div className="mx-auto max-w-3xl px-4 py-20 text-center">
+        <div className="mx-auto max-w-3xl px-4 py-14 text-center">
           <h2 className="text-3xl font-bold tracking-tight">Make your first figure today</h2>
           <p className="mt-3 text-muted-foreground">Create an account, upload your data, and get a publication-ready figure in under a minute.</p>
           <div className="mt-7 flex flex-wrap justify-center gap-3">

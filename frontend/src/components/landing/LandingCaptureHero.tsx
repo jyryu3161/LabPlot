@@ -15,14 +15,14 @@ export function LandingCaptureHero() {
       <div className="absolute inset-0 bg-[linear-gradient(135deg,#09090b_0%,#111827_52%,#064e3b_100%)]" />
       <div className="absolute inset-x-0 bottom-0 h-28 bg-gradient-to-t from-zinc-950 to-transparent" />
 
-      <div className="relative mx-auto flex min-h-[72vh] max-w-6xl flex-col items-center justify-center px-4 py-16 text-center sm:py-20 lg:py-24">
+      <div className="relative mx-auto flex min-h-[62vh] max-w-6xl flex-col items-center justify-center px-4 py-12 text-center sm:py-14 lg:py-16">
         <div className="mb-5 inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/10 px-3 py-1 text-xs font-medium text-white/78 backdrop-blur">
           <Sparkles className="h-3.5 w-3.5 text-teal-200" />
           AI-powered publication figure copilot
         </div>
 
         <h1 className="mx-auto max-w-4xl text-balance text-4xl font-bold leading-tight tracking-tight sm:text-5xl lg:text-6xl">
-          Publication-ready figures, powered by AI and reproducible in R.
+          Publication-quality figures from your data, reproducible in R.
         </h1>
         <p className="mx-auto mt-5 max-w-2xl text-base leading-relaxed text-white/72 sm:text-lg">
           Upload your data, compare ranked plot recommendations, refine the figure visually, and keep the exact R code behind every result.
