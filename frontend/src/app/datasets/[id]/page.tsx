@@ -216,8 +216,8 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
     return field.multi ? !Array.isArray(value) || value.length === 0 : !value;
   }), [currentDef?.required, mapping]);
   const formatCopyFigures = useMemo(() => (formatFigures ?? [])
-    .filter((figure) => figure.status === 'ready' && figure.dataset_id !== id)
-    .slice(0, 80), [formatFigures, id]);
+    .filter((figure) => figure.status === 'ready')
+    .slice(0, 80), [formatFigures]);
 
   const applyFigureFormat = useMutation({
     mutationFn: (figureId: string) => getFigure(figureId),
