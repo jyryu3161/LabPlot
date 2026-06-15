@@ -20,9 +20,14 @@ function FigureCard({ f }: { f: PublicFigure }) {
   return (
     <div className="overflow-hidden rounded-xl border bg-white shadow-sm transition hover:shadow-md">
       <img src={f.thumb_url} alt={f.name} loading="lazy" decoding="async" className="aspect-[4/3] w-full object-contain" />
-      <div className="flex items-center justify-between border-t px-3 py-2">
-        <span className="truncate text-sm font-medium">{f.name}</span>
-        <Badge variant="secondary" className="capitalize">{f.plot_type.replace(/_/g, ' ')}</Badge>
+      <div className="space-y-3 border-t px-3 py-3">
+        <div className="flex items-center justify-between gap-2">
+          <span className="truncate text-sm font-medium">{f.name}</span>
+          <Badge variant="secondary" className="capitalize">{f.plot_type.replace(/_/g, ' ')}</Badge>
+        </div>
+        <Link href={`/gallery/template/${f.id}`}>
+          <Button size="sm" variant="outline" className="w-full">Use as template</Button>
+        </Link>
       </div>
     </div>
   );
@@ -73,7 +78,7 @@ export default function GalleryPage() {
                   <Badge variant="outline">{groups.get(dom)!.length}</Badge>
                 </div>
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                  {groups.get(dom)!.map((f, i) => <FigureCard key={i} f={f} />)}
+                  {groups.get(dom)!.map((f) => <FigureCard key={f.id} f={f} />)}
                 </div>
               </section>
             ))}

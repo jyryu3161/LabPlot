@@ -8,7 +8,7 @@ import xml.etree.ElementTree as ET
 from types import SimpleNamespace
 from typing import Any
 
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, joinedload
 
 from app.ai import client as ai_client
@@ -151,15 +151,19 @@ def version_response(v: FigureVersion) -> dict:
 
 
 # ---------------------------------------------------------------- retrieval
-def get_figure(db: Session, figure_id: uuid.UUID, owner_id: uuid.UUID) -> Figure:
+def get_figure(db: Session, figure_id: uuid.UUID, owner_id: uuid.UUID, write: bool = False) -> Figure:
+    from app.projects import service as project_service
+
     fig = (
         db.query(Figure)
         .options(joinedload(Figure.versions), joinedload(Figure.dataset))
-        .filter(Figure.id == figure_id, Figure.owner_id == owner_id)
+        .filter(Figure.id == figure_id)
         .first()
     )
-    if not fig:
+    if not fig or (fig.owner_id != owner_id and not project_service.can_access_project(db, fig.project_id, owner_id)):
         raise NotFoundError("Figure", str(figure_id))
+    if write and fig.owner_id != owner_id:
+        project_service.require_project_write(db, fig.project_id, owner_id)
     return fig
 
 
@@ -171,13 +175,18 @@ def get_version(fig: Figure, version_id: uuid.UUID) -> FigureVersion:
 
 
 def list_figures(db: Session, owner_id: uuid.UUID, project_id: uuid.UUID | None = None) -> list[dict]:
+    from app.projects import service as project_service
+
     q = (
         db.query(Figure, FigureVersion.png_path)
         .outerjoin(FigureVersion, Figure.current_version_id == FigureVersion.id)
-        .filter(Figure.owner_id == owner_id)
     )
     if project_id is not None:
+        project_service.get_project_model(db, project_id, owner_id)
         q = q.filter(Figure.project_id == project_id)
+    else:
+        ids = project_service.accessible_project_ids(db, owner_id)
+        q = q.filter(or_(Figure.owner_id == owner_id, Figure.project_id.in_(ids)))
     rows = q.order_by(Figure.updated_at.desc()).all()
     out = []
     for f, png_path in rows:
@@ -243,7 +252,7 @@ def figure_detail(db: Session, figure_id: uuid.UUID, owner_id: uuid.UUID) -> dic
 
 
 def update_figure(db: Session, figure_id: uuid.UUID, owner_id: uuid.UUID, data: dict) -> dict:
-    fig = get_figure(db, figure_id, owner_id)
+    fig = get_figure(db, figure_id, owner_id, write=True)
     for k in ("name", "description", "legend"):
         if k in data and data[k] is not None:
             setattr(fig, k, data[k])
@@ -252,7 +261,7 @@ def update_figure(db: Session, figure_id: uuid.UUID, owner_id: uuid.UUID, data: 
 
 
 def generate_legend(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, owner_id: uuid.UUID, style: str = "nature") -> dict:
-    fig = get_figure(db, figure_id, owner_id)
+    fig = get_figure(db, figure_id, owner_id, write=True)
     v = get_version(fig, version_id)
     ds = ds_service.get_dataset(db, fig.dataset_id, owner_id)
     dataset_summary = {
@@ -380,10 +389,14 @@ def _svg_replay_r(svg: str) -> str:
 
 
 def create_figure(db: Session, owner_id: uuid.UUID, data) -> dict:
+    from app.projects import service as project_service
+
     owner = db.query(User).filter(User.id == owner_id).first()
     if owner:
         enforce_render_quota(db, owner)
     ds = ds_service.get_dataset(db, data.dataset_id, owner_id)
+    if ds.project_id is not None:
+        project_service.require_project_write(db, ds.project_id, owner_id)
     preset = data.style_preset if data.style_preset in PRESETS else "nature"
     validate_mapping(data.plot_type, data.mapping)
     options = sanitize_options(data.plot_type, data.options)
@@ -419,7 +432,7 @@ def rerender(db: Session, figure_id: uuid.UUID, owner_id: uuid.UUID, req) -> dic
     owner = db.query(User).filter(User.id == owner_id).first()
     if owner:
         enforce_render_quota(db, owner)
-    fig = get_figure(db, figure_id, owner_id)
+    fig = get_figure(db, figure_id, owner_id, write=True)
     base = get_version(fig, fig.current_version_id) if fig.current_version_id else fig.versions[-1]
     mapping = req.mapping if req.mapping is not None else base.mapping
     options = req.options if req.options is not None else base.options
@@ -461,7 +474,7 @@ def save_svg_edit(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, owne
     owner = db.query(User).filter(User.id == owner_id).first()
     if owner:
         enforce_render_quota(db, owner)
-    fig = get_figure(db, figure_id, owner_id)
+    fig = get_figure(db, figure_id, owner_id, write=True)
     base = get_version(fig, version_id)
     clean_svg = _sanitize_svg(svg)
     ds = ds_service.get_dataset(db, fig.dataset_id, owner_id)
@@ -512,7 +525,7 @@ def save_svg_edit(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, owne
 
 
 def delete_figure(db: Session, figure_id: uuid.UUID, owner_id: uuid.UUID) -> None:
-    fig = get_figure(db, figure_id, owner_id)
+    fig = get_figure(db, figure_id, owner_id, write=True)
     shutil.rmtree(os.path.join(settings.figures_dir, str(figure_id)), ignore_errors=True)
     if storage.object_storage_enabled():
         storage.delete_prefix(f"figures/{figure_id}")
@@ -521,7 +534,7 @@ def delete_figure(db: Session, figure_id: uuid.UUID, owner_id: uuid.UUID) -> Non
 
 
 def delete_figure_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, owner_id: uuid.UUID) -> dict:
-    fig = get_figure(db, figure_id, owner_id)
+    fig = get_figure(db, figure_id, owner_id, write=True)
     version = get_version(fig, version_id)
     remaining = [v for v in fig.versions if v.id != version_id]
     if not remaining:
@@ -556,7 +569,7 @@ def delete_figure_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UU
 
 # ---------------------------------------------------------------- AI: review / improve / apply
 def review_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, owner_id: uuid.UUID) -> Review:
-    fig = get_figure(db, figure_id, owner_id)
+    fig = get_figure(db, figure_id, owner_id, write=True)
     v = get_version(fig, version_id)
     if not v.png_path or not storage.exists(v.png_path):
         raise BadRequestError("Rendered image not available for review", error_code="NO_IMAGE")
@@ -577,7 +590,7 @@ def review_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, own
 
 
 def improve_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, owner_id: uuid.UUID) -> list[Improvement]:
-    fig = get_figure(db, figure_id, owner_id)
+    fig = get_figure(db, figure_id, owner_id, write=True)
     v = get_version(fig, version_id)
     last_review = (db.query(Review).filter(Review.figure_version_id == version_id)
                    .order_by(Review.created_at.desc()).first())
@@ -629,7 +642,7 @@ def list_improvements(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, 
 
 
 def apply_improvement(db: Session, figure_id: uuid.UUID, improvement_id: uuid.UUID, owner_id: uuid.UUID) -> dict:
-    fig = get_figure(db, figure_id, owner_id)
+    fig = get_figure(db, figure_id, owner_id, write=True)
     version_ids = {v.id for v in fig.versions}
     imp = db.query(Improvement).filter(Improvement.id == improvement_id).first()
     if not imp or imp.figure_version_id not in version_ids:

@@ -3,11 +3,14 @@
 Showcase = the root/admin account's ready figures (intentionally public).
 Rendered images are already served by the public /static mount.
 """
+import uuid
+
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.auth.models import User
 from app.common.deps import get_db
+from app.common.exceptions import NotFoundError
 from app.config import settings
 from app.figures.models import Figure, FigureVersion
 from app.figures.service import _url
@@ -45,12 +48,47 @@ def public_gallery(limit: int = 12, db: Session = Depends(get_db)):
         seen_types.add(f.plot_type)
         thumb = _url(v.png_path)
         dom = PLOT_DOMAINS.get(f.plot_type, "basic")
-        item = {"name": f.name, "plot_type": f.plot_type, "style_preset": f.style_preset, "thumb_url": thumb,
+        item = {"id": f.id, "current_version_id": f.current_version_id, "name": f.name,
+                "plot_type": f.plot_type, "style_preset": f.style_preset, "thumb_url": thumb,
                 "domain": dom, "domain_label": DOMAIN_LABELS.get(dom, dom)}
         figures.append(item)
         if len(figures) >= limit:
             break
     return {"figures": figures}
+
+
+@router.get("/gallery/{figure_id}/template")
+def public_gallery_template(figure_id: uuid.UUID, db: Session = Depends(get_db)):
+    root = db.query(User).filter(User.email == settings.ROOT_EMAIL).first()
+    if not root:
+        raise NotFoundError("Gallery figure", str(figure_id))
+    row = (
+        db.query(Figure, FigureVersion)
+        .join(FigureVersion, Figure.current_version_id == FigureVersion.id)
+        .filter(
+            Figure.id == figure_id,
+            Figure.owner_id == root.id,
+            Figure.status == "ready",
+            FigureVersion.png_path.isnot(None),
+        )
+        .first()
+    )
+    if not row:
+        raise NotFoundError("Gallery figure", str(figure_id))
+    figure, version = row
+    dom = PLOT_DOMAINS.get(figure.plot_type, "basic")
+    options = {k: v for k, v in (version.options or {}).items() if k not in {"title", "subtitle"}}
+    return {
+        "id": figure.id,
+        "name": figure.name,
+        "plot_type": figure.plot_type,
+        "style_preset": version.style_preset or figure.style_preset,
+        "thumb_url": _url(version.png_path),
+        "domain": dom,
+        "domain_label": DOMAIN_LABELS.get(dom, dom),
+        "source_mapping": version.mapping or {},
+        "options": options,
+    }
 
 
 @router.get("/stats")

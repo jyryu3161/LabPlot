@@ -5,7 +5,9 @@ import Link from 'next/link';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { listProjects, createProject, deleteProject } from '@/lib/api';
+import type { ProjectUserSearchItem } from '@/lib/types';
 import { AppHeader } from '@/components/layout/AppHeader';
+import { ProjectCollaboratorPicker } from '@/components/projects/ProjectCollaboratorPicker';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -19,10 +21,18 @@ export default function ProjectsPage() {
   const [name, setName] = useState('');
   const [desc, setDesc] = useState('');
   const [open, setOpen] = useState(false);
+  const [collaborators, setCollaborators] = useState<ProjectUserSearchItem[]>([]);
 
   const create = useMutation({
-    mutationFn: () => createProject({ name, description: desc || undefined }),
-    onSuccess: () => { toast.success('Project created'); setName(''); setDesc(''); setOpen(false); qc.invalidateQueries({ queryKey: ['projects'] }); },
+    mutationFn: () => createProject({ name, description: desc || undefined, collaborator_ids: collaborators.map((user) => user.id) }),
+    onSuccess: () => {
+      toast.success('Project created');
+      setName('');
+      setDesc('');
+      setCollaborators([]);
+      setOpen(false);
+      qc.invalidateQueries({ queryKey: ['projects'] });
+    },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Create failed'),
   });
   const del = useMutation({
@@ -45,12 +55,15 @@ export default function ProjectsPage() {
 
         {open && (
           <Card className="mb-6">
-            <CardContent className="grid items-end gap-3 pt-6 md:grid-cols-4">
-              <div className="space-y-1"><Label>Name</Label><Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Tumor RNA-seq 2026" /></div>
-              <div className="space-y-1 md:col-span-2"><Label>Description</Label><Input value={desc} onChange={(e) => setDesc(e.target.value)} placeholder="Optional" /></div>
-              <Button onClick={() => create.mutate()} disabled={create.isPending || !name}>
-                {create.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Create'}
-              </Button>
+            <CardContent className="space-y-4 pt-6">
+              <div className="grid items-end gap-3 md:grid-cols-4">
+                <div className="space-y-1"><Label>Name</Label><Input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Tumor RNA-seq 2026" /></div>
+                <div className="space-y-1 md:col-span-2"><Label>Description</Label><Input value={desc} onChange={(e) => setDesc(e.target.value)} placeholder="Optional" /></div>
+                <Button onClick={() => create.mutate()} disabled={create.isPending || !name}>
+                  {create.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Create'}
+                </Button>
+              </div>
+              <ProjectCollaboratorPicker selected={collaborators} onChange={setCollaborators} />
             </CardContent>
           </Card>
         )}
@@ -81,6 +94,8 @@ export default function ProjectsPage() {
                   <div className="mb-3 flex gap-2">
                     <Badge variant="secondary"><Database className="mr-1 h-3 w-3" />{p.dataset_count}</Badge>
                     <Badge variant="secondary"><Images className="mr-1 h-3 w-3" />{p.figure_count}</Badge>
+                    {p.collaborator_count > 0 && <Badge variant="outline">{p.collaborator_count} collaborator{p.collaborator_count > 1 ? 's' : ''}</Badge>}
+                    {p.role !== 'owner' && <Badge variant="default">Shared</Badge>}
                   </div>
                   <Link href={`/projects/${p.id}`}><Button size="sm" className="w-full">Open project</Button></Link>
                 </CardContent>

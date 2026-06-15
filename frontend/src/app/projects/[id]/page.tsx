@@ -5,16 +5,18 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { getProject, updateProject, listDatasets, listFigures, deleteDataset, deleteFigure, downloadProjectPack, enhancePrompt } from '@/lib/api';
+import { addProjectCollaborator, getProject, updateProject, listDatasets, listFigures, deleteDataset, deleteFigure, downloadProjectPack, enhancePrompt, removeProjectCollaborator } from '@/lib/api';
+import type { ProjectUserSearchItem } from '@/lib/types';
 import { AppHeader } from '@/components/layout/AppHeader';
 import { DatasetUploadWizard } from '@/components/datasets/DatasetUploadWizard';
+import { ProjectCollaboratorPicker } from '@/components/projects/ProjectCollaboratorPicker';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Loader2, FileSpreadsheet, Trash2, Images, Database, Package, FlaskConical, Sparkles } from 'lucide-react';
+import { Loader2, FileSpreadsheet, Trash2, Images, Database, Package, FlaskConical, Sparkles, Users } from 'lucide-react';
 import { formatStylePreset } from '@/lib/style-presets';
 
 export default function ProjectWorkspace({ params }: { params: Promise<{ id: string }> }) {
@@ -25,9 +27,31 @@ export default function ProjectWorkspace({ params }: { params: Promise<{ id: str
   const { data: datasets, isLoading: dsLoading } = useQuery({ queryKey: ['datasets', id], queryFn: () => listDatasets(id) });
   const { data: figures } = useQuery({ queryKey: ['figures', id], queryFn: () => listFigures(id) });
   const [uploadDesc, setUploadDesc] = useState('');
+  const [newCollaborators, setNewCollaborators] = useState<ProjectUserSearchItem[]>([]);
 
   const delDs = useMutation({ mutationFn: deleteDataset, onSuccess: () => { toast.success('Dataset deleted'); qc.invalidateQueries({ queryKey: ['datasets', id] }); } });
   const delFig = useMutation({ mutationFn: deleteFigure, onSuccess: () => { toast.success('Figure deleted'); qc.invalidateQueries({ queryKey: ['figures', id] }); } });
+  const addCollaborators = useMutation({
+    mutationFn: async () => {
+      for (const user of newCollaborators) await addProjectCollaborator(id, user.id, 'editor');
+    },
+    onSuccess: () => {
+      toast.success('Collaborators updated');
+      setNewCollaborators([]);
+      qc.invalidateQueries({ queryKey: ['project', id] });
+      qc.invalidateQueries({ queryKey: ['projects'] });
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Update failed'),
+  });
+  const removeCollaborator = useMutation({
+    mutationFn: (collaboratorId: string) => removeProjectCollaborator(id, collaboratorId),
+    onSuccess: () => {
+      toast.success('Collaborator removed');
+      qc.invalidateQueries({ queryKey: ['project', id] });
+      qc.invalidateQueries({ queryKey: ['projects'] });
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Remove failed'),
+  });
 
   const [descDraft, setDescDraft] = useState<string | null>(null);
   const desc = descDraft ?? project?.description ?? '';
@@ -74,6 +98,48 @@ export default function ProjectWorkspace({ params }: { params: Promise<{ id: str
               <Button size="sm" variant="secondary" onClick={() => saveDesc.mutate()} disabled={saveDesc.isPending}>
                 {saveDesc.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Save description'}
               </Button>
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card className="mb-6">
+          <CardHeader className="pb-2">
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Users className="h-4 w-4 text-primary" /> Collaborators
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {project?.role === 'owner' ? (
+              <>
+                <ProjectCollaboratorPicker
+                  selected={newCollaborators}
+                  onChange={setNewCollaborators}
+                  helper="Add approved users who should be able to view, upload data, and edit figures in this project."
+                />
+                <Button size="sm" onClick={() => addCollaborators.mutate()} disabled={!newCollaborators.length || addCollaborators.isPending}>
+                  {addCollaborators.isPending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
+                  Add collaborator{newCollaborators.length > 1 ? 's' : ''}
+                </Button>
+              </>
+            ) : (
+              <p className="text-sm text-muted-foreground">This project is shared with you as an {project?.role ?? 'editor'}.</p>
+            )}
+            <div className="space-y-2">
+              {(project?.collaborators ?? []).length === 0 ? (
+                <p className="text-sm text-muted-foreground">No collaborators yet.</p>
+              ) : (project?.collaborators ?? []).map((member) => (
+                <div key={member.id} className="flex items-center justify-between gap-3 rounded-lg border bg-background px-3 py-2 text-sm">
+                  <div className="min-w-0">
+                    <p className="truncate font-medium">{member.display_name}</p>
+                    <p className="truncate text-xs text-muted-foreground">{member.email} · {member.role}</p>
+                  </div>
+                  {project?.role === 'owner' && (
+                    <Button variant="ghost" size="icon-sm" onClick={() => removeCollaborator.mutate(member.id)} aria-label={`Remove ${member.display_name}`}>
+                      <Trash2 className="h-4 w-4 text-muted-foreground" />
+                    </Button>
+                  )}
+                </div>
+              ))}
             </div>
           </CardContent>
         </Card>

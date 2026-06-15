@@ -112,8 +112,32 @@ export interface Comparison {
 }
 export interface DatasetStatistics { descriptive: DescriptiveStat[]; comparisons: Comparison[]; }
 
-export interface Project { id: string; name: string; description?: string; created_at: string; updated_at: string; }
-export interface ProjectListItem extends Project { dataset_count: number; figure_count: number; }
+export interface ProjectCollaborator {
+  id: string;
+  user_id: string;
+  email: string;
+  display_name: string;
+  role: 'editor' | 'viewer';
+  created_at: string;
+}
+
+export interface ProjectUserSearchItem {
+  id: string;
+  email: string;
+  display_name: string;
+}
+
+export interface Project {
+  id: string;
+  owner_id: string;
+  name: string;
+  description?: string;
+  created_at: string;
+  updated_at: string;
+  role: 'owner' | 'editor' | 'viewer';
+  collaborators?: ProjectCollaborator[];
+}
+export interface ProjectListItem extends Project { dataset_count: number; figure_count: number; collaborator_count: number; }
 
 export interface DatasetDetail extends DatasetListItem {
   column_profile: ColumnProfile[];
@@ -169,7 +193,28 @@ export interface PlotTypeDef {
 }
 export interface StyleDef { key: string; label: string; }
 export interface PaletteDef { key: string; label: string; colorblind_safe: boolean; hex: string[]; }
-export interface PublicFigure { name: string; plot_type: string; style_preset: string; thumb_url: string; domain?: string; domain_label?: string; }
+export interface PublicFigure {
+  id: string;
+  current_version_id?: string;
+  name: string;
+  plot_type: string;
+  style_preset: string;
+  thumb_url: string;
+  domain?: string;
+  domain_label?: string;
+}
+
+export interface GalleryTemplate {
+  id: string;
+  name: string;
+  plot_type: string;
+  style_preset: string;
+  thumb_url: string;
+  domain?: string;
+  domain_label?: string;
+  source_mapping: Record<string, unknown>;
+  options: Record<string, unknown>;
+}
 
 export interface FigureVersion {
   id: string;

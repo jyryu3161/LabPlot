@@ -48,6 +48,13 @@ class BadRequestError(AppError):
         )
 
 
+class ForbiddenError(AppError):
+    error_code = "FORBIDDEN"
+
+    def __init__(self, detail: str = "Permission denied"):
+        super().__init__(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+
+
 class ConflictError(AppError):
     error_code = "CONFLICT"
 

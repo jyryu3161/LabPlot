@@ -4,6 +4,7 @@ import type {
   FigureListItem, FigureDetail, FigureVersion, Review, Improvement, AdminUser, AIConfig, GalleryFigureItem, AuditLogItem,
   ClientErrorItem, Project, ProjectListItem, EmailDeliveryStatus,
   MembershipItem, MyOrganizationItem, OrganizationAIConfig, OrganizationItem, OrganizationSearchItem, OrganizationUsageSummary, OrganizationUserSearchItem,
+  ProjectCollaborator, ProjectUserSearchItem, GalleryTemplate,
 } from './types';
 
 // Same-origin by default; Caddy proxies /api and /static to the backend.
@@ -162,13 +163,25 @@ export async function getOrganizationUsage(id: string): Promise<OrganizationUsag
 // ── projects ──
 export async function listProjects(): Promise<ProjectListItem[]> { return fetcher('/api/projects'); }
 export async function getProject(id: string): Promise<Project> { return fetcher(`/api/projects/${id}`); }
-export async function createProject(data: { name: string; description?: string }): Promise<Project> {
+export async function createProject(data: { name: string; description?: string; collaborator_ids?: string[] }): Promise<Project> {
   return fetcher('/api/projects', { method: 'POST', body: JSON.stringify(data) });
 }
 export async function updateProject(id: string, data: { name?: string; description?: string }): Promise<Project> {
   return fetcher(`/api/projects/${id}`, { method: 'PATCH', body: JSON.stringify(data) });
 }
 export async function deleteProject(id: string): Promise<void> { return fetcher(`/api/projects/${id}`, { method: 'DELETE' }); }
+export async function searchProjectUsers(q: string): Promise<ProjectUserSearchItem[]> {
+  return fetcher(`/api/projects/collaborators/search?q=${encodeURIComponent(q)}`);
+}
+export async function listProjectCollaborators(projectId: string): Promise<ProjectCollaborator[]> {
+  return fetcher(`/api/projects/${projectId}/collaborators`);
+}
+export async function addProjectCollaborator(projectId: string, userId: string, role: 'editor' | 'viewer' = 'editor'): Promise<ProjectCollaborator> {
+  return fetcher(`/api/projects/${projectId}/collaborators`, { method: 'POST', body: JSON.stringify({ user_id: userId, role }) });
+}
+export async function removeProjectCollaborator(projectId: string, collaboratorId: string): Promise<void> {
+  return fetcher(`/api/projects/${projectId}/collaborators/${collaboratorId}`, { method: 'DELETE' });
+}
 export async function downloadProjectPack(projectId: string, name: string): Promise<void> {
   const headers: Record<string, string> = {};
   const token = getAccessToken();
@@ -193,6 +206,9 @@ export async function updateDataset(id: string, data: { name?: string; descripti
 }
 export async function getPublicGallery(limit = 12): Promise<{ figures: import('./types').PublicFigure[] }> {
   return fetcher(`/api/public/gallery?limit=${limit}`);
+}
+export async function getPublicGalleryTemplate(figureId: string): Promise<GalleryTemplate> {
+  return fetcher(`/api/public/gallery/${figureId}/template`);
 }
 export async function enhancePrompt(draft: string, kind: string, context?: string): Promise<{ enhanced: string }> {
   return fetcher('/api/ai/enhance-prompt', { method: 'POST', body: JSON.stringify({ draft, kind, context }) });

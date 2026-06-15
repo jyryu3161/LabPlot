@@ -7,7 +7,15 @@ from sqlalchemy.orm import Session
 from app.auth.models import User
 from app.common.deps import get_current_user, get_db
 from app.projects import service
-from app.projects.schemas import ProjectCreate, ProjectListItem, ProjectResponse, ProjectUpdate
+from app.projects.schemas import (
+    ProjectCollaboratorCreate,
+    ProjectCollaboratorItem,
+    ProjectCreate,
+    ProjectListItem,
+    ProjectResponse,
+    ProjectUpdate,
+    ProjectUserSearchItem,
+)
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
@@ -20,12 +28,32 @@ def list_projects(db: Session = Depends(get_db), current_user: User = Depends(ge
 
 @router.post("", response_model=ProjectResponse, status_code=201)
 def create_project(data: ProjectCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    return service.create_project(db, current_user.id, data.name, data.description)
+    return service.create_project(db, current_user.id, data.name, data.description, data.collaborator_ids)
+
+
+@router.get("/collaborators/search", response_model=list[ProjectUserSearchItem])
+def search_project_collaborators(q: str, limit: int = 8, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    return service.search_users(db, current_user.id, q, limit=limit)
 
 
 @router.get("/{project_id}", response_model=ProjectResponse)
 def get_project(project_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     return service.get_project(db, project_id, current_user.id)
+
+
+@router.get("/{project_id}/collaborators", response_model=list[ProjectCollaboratorItem])
+def list_project_collaborators(project_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    return service.list_collaborators(db, project_id, current_user.id)
+
+
+@router.post("/{project_id}/collaborators", response_model=ProjectCollaboratorItem, status_code=201)
+def add_project_collaborator(project_id: uuid.UUID, data: ProjectCollaboratorCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    return service.add_collaborator(db, project_id, current_user.id, data.user_id, data.role)
+
+
+@router.delete("/{project_id}/collaborators/{collaborator_id}", status_code=204)
+def remove_project_collaborator(project_id: uuid.UUID, collaborator_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    service.remove_collaborator(db, project_id, current_user.id, collaborator_id)
 
 
 @router.patch("/{project_id}", response_model=ProjectResponse)

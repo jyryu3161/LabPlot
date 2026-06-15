@@ -109,7 +109,7 @@ async def upload_dataset(
     if project_id is None:
         project_id = project_service.ensure_default_project(db, current_user.id).id
     else:
-        project_service.get_project(db, project_id, current_user.id)  # ownership check
+        project_service.require_project_write(db, project_id, current_user.id)
     content = await _read_upload_limited(file)
     enforce_storage_quota(db, current_user, len(content))
     options = _ingest_options_from_form(sheet_name, header_row, data_start_row, end_row, start_col, end_col)

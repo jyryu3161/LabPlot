@@ -5,6 +5,7 @@ from numbers import Integral, Real
 from typing import Any
 
 import pandas as pd
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.common import storage
@@ -307,25 +308,36 @@ def create_dataset(db: Session, owner_id: uuid.UUID, filename: str, content: byt
 
 
 def list_datasets(db: Session, owner_id: uuid.UUID, project_id: uuid.UUID | None = None) -> list[Dataset]:
-    q = db.query(Dataset).filter(Dataset.owner_id == owner_id)
+    from app.projects import service as project_service
+
     if project_id is not None:
-        q = q.filter(Dataset.project_id == project_id)
+        project_service.get_project_model(db, project_id, owner_id)
+        q = db.query(Dataset).filter(Dataset.project_id == project_id)
+    else:
+        ids = project_service.accessible_project_ids(db, owner_id)
+        q = db.query(Dataset).filter(or_(Dataset.owner_id == owner_id, Dataset.project_id.in_(ids)))
     return q.order_by(Dataset.created_at.desc()).all()
 
 
 def get_dataset(db: Session, dataset_id: uuid.UUID, owner_id: uuid.UUID) -> Dataset:
+    from app.projects import service as project_service
+
     ds = (
         db.query(Dataset)
-        .filter(Dataset.id == dataset_id, Dataset.owner_id == owner_id)
+        .filter(Dataset.id == dataset_id)
         .first()
     )
-    if not ds:
+    if not ds or (ds.owner_id != owner_id and not project_service.can_access_project(db, ds.project_id, owner_id)):
         raise NotFoundError("Dataset", str(dataset_id))
     return ds
 
 
 def update_dataset(db: Session, dataset_id: uuid.UUID, owner_id: uuid.UUID, data: dict) -> Dataset:
+    from app.projects import service as project_service
+
     ds = get_dataset(db, dataset_id, owner_id)
+    if ds.owner_id != owner_id:
+        project_service.require_project_write(db, ds.project_id, owner_id)
     for k in ("name", "description"):
         if k in data and data[k] is not None:
             setattr(ds, k, data[k])
@@ -341,7 +353,11 @@ def load_dataframe(dataset: Dataset) -> pd.DataFrame:
 
 
 def delete_dataset(db: Session, dataset_id: uuid.UUID, owner_id: uuid.UUID) -> None:
+    from app.projects import service as project_service
+
     ds = get_dataset(db, dataset_id, owner_id)
+    if ds.owner_id != owner_id:
+        project_service.require_project_write(db, ds.project_id, owner_id)
     storage.delete_file(ds.file_path)
     db.delete(ds)
     db.commit()
