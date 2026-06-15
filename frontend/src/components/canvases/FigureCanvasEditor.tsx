@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { Download, FileText, Grid2X2, ImagePlus, Loader2, Palette, Save, Sparkles, Type, ZoomIn, ZoomOut } from 'lucide-react';
 import { Stage, Layer, Image as KonvaImage, Rect, Text, Transformer, Group } from 'react-konva';
@@ -14,6 +14,8 @@ import { Textarea } from '@/components/ui/textarea';
 
 const LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
 const DEFAULT_PALETTE = ['#0072B2', '#D55E00', '#009E73', '#CC79A7', '#56B4E9', '#E69F00'];
+const MIN_ZOOM = 0.35;
+const MAX_ZOOM = 1.6;
 
 interface FigureCanvasEditorProps {
   canvas: FigureCanvas;
@@ -65,6 +67,23 @@ function escapeXml(value: string): string {
     .replaceAll('"', '&quot;');
 }
 
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function parseSvgLengthToPx(value: string | null, fallback: number): number {
+  if (!value) return fallback;
+  const match = value.trim().match(/^([+-]?\d*\.?\d+)\s*([a-z%]*)$/i);
+  const n = match ? Number.parseFloat(match[1]) : Number.parseFloat(value);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  const unit = (match?.[2] || '').toLowerCase();
+  if (unit === 'pt') return n * (96 / 72);
+  if (unit === 'in') return n * 96;
+  if (unit === 'cm') return n * (96 / 2.54);
+  if (unit === 'mm') return n * (96 / 25.4);
+  return n;
+}
+
 function useCanvasImage(src?: string) {
   const [loaded, setLoaded] = useState<{ src: string; image: HTMLImageElement } | null>(null);
   useEffect(() => {
@@ -78,6 +97,26 @@ function useCanvasImage(src?: string) {
   }, [src]);
   if (!loaded || loaded.src !== src) return null;
   return loaded.image;
+}
+
+function usePanelImage(item: CanvasItem, fontSizePt: number) {
+  const [remoteSvg, setRemoteSvg] = useState<{ url: string; svg: string } | null>(null);
+  useEffect(() => {
+    if (item.editedSvg || !item.svgUrl) return;
+    let cancelled = false;
+    fetch(item.svgUrl, { credentials: 'same-origin' })
+      .then((res) => (res.ok ? res.text() : null))
+      .then((svg) => { if (!cancelled && svg) setRemoteSvg({ url: item.svgUrl!, svg }); })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [item.editedSvg, item.svgUrl]);
+
+  const remoteSvgForItem = remoteSvg && remoteSvg.url === item.svgUrl ? remoteSvg.svg : null;
+  const rawSvg = item.editedSvg || remoteSvgForItem;
+  const src = rawSvg
+    ? svgToDataUrl(compensateSvgForPanel(rawSvg, item, fontSizePt))
+    : item.pngUrl;
+  return useCanvasImage(src);
 }
 
 function sanitizeSvg(raw: string): SVGSVGElement {
@@ -102,23 +141,36 @@ function isNeutralColor(value: string): boolean {
   return !v || v === 'none' || v === 'transparent' || v === '#fff' || v === '#ffffff' || v === 'white' || v === '#000' || v === '#000000' || v === 'black';
 }
 
-function applySvgStyle(raw: string, palette: string[], fontSize: number): string {
+function svgIntrinsicSize(raw: string): { width: number; height: number } {
   const svg = sanitizeSvg(raw);
-  const colors = palette.length ? palette : DEFAULT_PALETTE;
-  const colorMap = new Map<string, string>();
-  let cursor = 0;
-  svg.querySelectorAll('*').forEach((el) => {
-    for (const attrName of ['fill', 'stroke']) {
-      const current = el.getAttribute(attrName);
-      if (!current || isNeutralColor(current) || current.startsWith('url(')) continue;
-      const key = current.trim().toLowerCase();
-      if (!colorMap.has(key)) {
-        colorMap.set(key, colors[cursor % colors.length]);
-        cursor += 1;
+  const viewBox = svg.getAttribute('viewBox')?.split(/\s+/).map(Number);
+  const fallbackW = viewBox && viewBox.length === 4 && Number.isFinite(viewBox[2]) ? viewBox[2] : 504;
+  const fallbackH = viewBox && viewBox.length === 4 && Number.isFinite(viewBox[3]) ? viewBox[3] : 302.4;
+  return {
+    width: parseSvgLengthToPx(svg.getAttribute('width'), fallbackW),
+    height: parseSvgLengthToPx(svg.getAttribute('height'), fallbackH),
+  };
+}
+
+function applySvgStyle(raw: string, palette: string[] | null, fontSize: number): string {
+  const svg = sanitizeSvg(raw);
+  const colors = palette?.length ? palette : null;
+  if (colors) {
+    const colorMap = new Map<string, string>();
+    let cursor = 0;
+    svg.querySelectorAll('*').forEach((el) => {
+      for (const attrName of ['fill', 'stroke']) {
+        const current = el.getAttribute(attrName);
+        if (!current || isNeutralColor(current) || current.startsWith('url(')) continue;
+        const key = current.trim().toLowerCase();
+        if (!colorMap.has(key)) {
+          colorMap.set(key, colors[cursor % colors.length]);
+          cursor += 1;
+        }
+        el.setAttribute(attrName, colorMap.get(key)!);
       }
-      el.setAttribute(attrName, colorMap.get(key)!);
-    }
-  });
+    });
+  }
   svg.querySelectorAll('text,tspan').forEach((el) => {
     el.setAttribute('font-size', `${fontSize}pt`);
     el.setAttribute('font-family', 'Arial');
@@ -128,9 +180,11 @@ function applySvgStyle(raw: string, palette: string[], fontSize: number): string
   return new XMLSerializer().serializeToString(svg);
 }
 
-function canvasItemSource(item: CanvasItem): string | undefined {
-  if (item.editedSvg) return svgToDataUrl(item.editedSvg);
-  return item.svgUrl || item.pngUrl;
+function compensateSvgForPanel(raw: string, item: CanvasItem, fontSizePt: number): string {
+  const intrinsic = svgIntrinsicSize(raw);
+  const scale = Math.min(item.width / intrinsic.width, item.height / intrinsic.height);
+  const compensatedFont = clamp(fontSizePt / Math.max(0.05, scale), 3, 72);
+  return applySvgStyle(raw, null, compensatedFont);
 }
 
 function fitInside(boxW: number, boxH: number, image?: HTMLImageElement | null) {
@@ -145,6 +199,10 @@ function fitInside(boxW: number, boxH: number, image?: HTMLImageElement | null) 
     width,
     height,
   };
+}
+
+function intersects(a: { x: number; y: number; width: number; height: number }, b: { x: number; y: number; width: number; height: number }) {
+  return a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
 }
 
 function arrangeCanvasItems(state: CanvasState, layout: CanvasStyleSuggestion['layout'] = 'grid'): CanvasItem[] {
@@ -184,24 +242,20 @@ function FigurePanelNode({
   onChange,
   labelMode,
   labelFontSize,
+  graphFontSize,
+  registerNode,
 }: {
   item: CanvasItem;
   selected: boolean;
-  onSelect: () => void;
+  onSelect: (additive: boolean) => void;
   onChange: (next: CanvasItem) => void;
   labelMode: CanvasState['panelLabelMode'];
   labelFontSize: number;
+  graphFontSize: number;
+  registerNode: (id: string, node: Konva.Group | null) => void;
 }) {
-  const image = useCanvasImage(canvasItemSource(item));
-  const groupRef = useRef<Konva.Group | null>(null);
-  const transformerRef = useRef<Konva.Transformer | null>(null);
+  const image = usePanelImage(item, graphFontSize);
   const fitted = fitInside(item.width, item.height, image);
-
-  useEffect(() => {
-    if (!selected || !groupRef.current || !transformerRef.current) return;
-    transformerRef.current.nodes([groupRef.current]);
-    transformerRef.current.getLayer()?.batchDraw();
-  }, [selected]);
 
   const label = labelMode === 'hidden' ? '' : item.label;
 
@@ -216,30 +270,20 @@ function FigurePanelNode({
         listening={false}
       />
       <Group
-        ref={groupRef}
+        ref={(node) => registerNode(item.id, node)}
         x={item.x}
         y={item.y}
         rotation={item.rotation || 0}
         draggable
-        onClick={onSelect}
-        onTap={onSelect}
-        onDragEnd={(e) => onChange({ ...item, x: Math.round(e.target.x()), y: Math.round(e.target.y()) })}
-        onTransformEnd={() => {
-          const node = groupRef.current;
-          if (!node) return;
-          const scaleX = node.scaleX();
-          const scaleY = node.scaleY();
-          node.scaleX(1);
-          node.scaleY(1);
-          onChange({
-            ...item,
-            x: Math.round(node.x()),
-            y: Math.round(node.y()),
-            width: Math.max(36, Math.round(item.width * scaleX)),
-            height: Math.max(36, Math.round(item.height * scaleY)),
-            rotation: Math.round(node.rotation() || 0),
-          });
+        onMouseDown={(e) => {
+          e.cancelBubble = true;
+          onSelect(e.evt.shiftKey || e.evt.metaKey || e.evt.ctrlKey);
         }}
+        onTap={(e) => {
+          e.cancelBubble = true;
+          onSelect(false);
+        }}
+        onDragEnd={(e) => onChange({ ...item, x: Math.round(e.target.x()), y: Math.round(e.target.y()) })}
       >
         <Rect
           x={-1}
@@ -247,8 +291,8 @@ function FigurePanelNode({
           width={item.width + 2}
           height={item.height + 2}
           fill="white"
-          stroke={selected ? '#2563eb' : '#d4d4d8'}
-          strokeWidth={selected ? 1.2 : 0.5}
+          stroke={selected ? '#94a3b8' : '#d4d4d8'}
+          strokeWidth={0.5}
         />
         <KonvaImage
           image={image || undefined}
@@ -271,25 +315,6 @@ function FigurePanelNode({
           listening={false}
         />
       )}
-      {item.hasUnsavedSvgEdit && (
-        <Text
-          x={item.x + item.width - 54}
-          y={item.y + item.height + 5}
-          text="draft"
-          fontSize={10}
-          fill="#b45309"
-          listening={false}
-        />
-      )}
-      {selected && (
-        <Transformer
-          ref={transformerRef}
-          rotateEnabled={false}
-          keepRatio={false}
-          enabledAnchors={['top-left', 'top-center', 'top-right', 'middle-left', 'middle-right', 'bottom-left', 'bottom-center', 'bottom-right']}
-          boundBoxFunc={(oldBox, newBox) => (newBox.width < 36 || newBox.height < 36 ? oldBox : newBox)}
-        />
-      )}
     </>
   );
 }
@@ -297,29 +322,88 @@ function FigurePanelNode({
 export function FigureCanvasEditor({ canvas, figures, palettes, onLoadFigure, onSaveCanvas, onSaveFigureVersion, onSuggestStyle, onGenerateLegend, project }: FigureCanvasEditorProps) {
   const [name, setName] = useState(canvas.name);
   const [state, setState] = useState<CanvasState>(() => normalizeState(canvas));
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [paletteKey, setPaletteKey] = useState('okabe_ito');
   const [busy, setBusy] = useState<string | null>(null);
   const [zoom, setZoom] = useState(0.72);
   const [legend, setLegend] = useState(() => normalizeState(canvas).legend || '');
+  const [selectionBox, setSelectionBox] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
   const stageRef = useRef<Konva.Stage | null>(null);
+  const transformerRef = useRef<Konva.Transformer | null>(null);
+  const nodeRefs = useRef(new Map<string, Konva.Group>());
+  const selectionStartRef = useRef<{ x: number; y: number } | null>(null);
+  const selectionBoxRef = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
 
   useEffect(() => {
     const normalized = normalizeState(canvas);
     setName(canvas.name);
     setState(normalized);
     setLegend(normalized.legend || '');
-    setSelectedId(null);
+    setSelectedIds([]);
   }, [canvas]);
 
-  const selectedItem = state.items.find((item) => item.id === selectedId) || null;
+  const selectedItem = selectedIds.length === 1 ? state.items.find((item) => item.id === selectedIds[0]) || null : null;
   const figuresOnCanvas = useMemo(() => new Set(state.items.map((item) => item.figureId)), [state.items]);
   const selectedPalette = palettes.find((p) => p.key === paletteKey);
   const palette = selectedPalette?.hex?.length ? selectedPalette.hex : DEFAULT_PALETTE;
   const labelFontSize = 8;
 
+  const registerNode = useCallback((id: string, node: Konva.Group | null) => {
+    if (node) nodeRefs.current.set(id, node);
+    else nodeRefs.current.delete(id);
+  }, []);
+
+  useEffect(() => {
+    const nodes = selectedIds
+      .map((id) => nodeRefs.current.get(id))
+      .filter((node): node is Konva.Group => Boolean(node));
+    transformerRef.current?.nodes(nodes);
+    transformerRef.current?.getLayer()?.batchDraw();
+  }, [selectedIds, state.items]);
+
   function updateItem(id: string, next: CanvasItem) {
     setState((prev) => ({ ...prev, items: prev.items.map((item) => (item.id === id ? next : item)) }));
+  }
+
+  function selectItem(id: string, additive: boolean) {
+    setSelectedIds((prev) => {
+      if (!additive && prev.includes(id) && prev.length > 1) return prev;
+      if (!additive) return [id];
+      return prev.includes(id) ? prev.filter((selectedId) => selectedId !== id) : [...prev, id];
+    });
+  }
+
+  function stagePoint(stage: Konva.Stage): { x: number; y: number } | null {
+    const pointer = stage.getPointerPosition();
+    if (!pointer) return null;
+    return { x: pointer.x / zoom, y: pointer.y / zoom };
+  }
+
+  function zoomBy(step: number) {
+    setZoom((z) => Number(clamp(z + step, MIN_ZOOM, MAX_ZOOM).toFixed(2)));
+  }
+
+  function commitSelectedTransforms() {
+    setState((prev) => ({
+      ...prev,
+      items: prev.items.map((item) => {
+        if (!selectedIds.includes(item.id)) return item;
+        const node = nodeRefs.current.get(item.id);
+        if (!node) return item;
+        const scaleX = node.scaleX();
+        const scaleY = node.scaleY();
+        node.scaleX(1);
+        node.scaleY(1);
+        return {
+          ...item,
+          x: Math.round(node.x()),
+          y: Math.round(node.y()),
+          width: Math.max(36, Math.round(item.width * scaleX)),
+          height: Math.max(36, Math.round(item.height * scaleY)),
+          rotation: Math.round(node.rotation() || 0),
+        };
+      }),
+    }));
   }
 
   async function addFigure(figureId: string) {
@@ -332,13 +416,11 @@ export function FigureCanvasEditor({ canvas, figures, palettes, onLoadFigure, on
       const w = Math.round(state.widthPx * 0.40);
       const h = Math.round(state.heightPx * 0.23);
       let editedSvg: string | undefined;
-      let hasUnsavedSvgEdit = false;
       if (version.svg_url) {
         try {
           const res = await fetch(version.svg_url, { credentials: 'same-origin' });
           if (res.ok) {
             editedSvg = applySvgStyle(await res.text(), palette, state.unifiedFontSize);
-            hasUnsavedSvgEdit = true;
           }
         } catch {
           editedSvg = undefined;
@@ -357,10 +439,10 @@ export function FigureCanvasEditor({ canvas, figures, palettes, onLoadFigure, on
         svgUrl: version.svg_url,
         pngUrl: version.png_url,
         editedSvg,
-        hasUnsavedSvgEdit,
+        hasUnsavedSvgEdit: false,
       };
       setState((prev) => ({ ...prev, items: [...prev.items, item] }));
-      setSelectedId(item.id);
+      setSelectedIds([item.id]);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'Could not add figure');
     } finally {
@@ -369,9 +451,9 @@ export function FigureCanvasEditor({ canvas, figures, palettes, onLoadFigure, on
   }
 
   function removeSelected() {
-    if (!selectedId) return;
-    setState((prev) => ({ ...prev, items: prev.items.filter((item) => item.id !== selectedId) }));
-    setSelectedId(null);
+    if (!selectedIds.length) return;
+    setState((prev) => ({ ...prev, items: prev.items.filter((item) => !selectedIds.includes(item.id)) }));
+    setSelectedIds([]);
   }
 
   function autoArrange() {
@@ -501,10 +583,14 @@ export function FigureCanvasEditor({ canvas, figures, palettes, onLoadFigure, on
   }
 
   async function sourceAsDataUrl(item: CanvasItem): Promise<string | null> {
-    if (item.editedSvg) return svgToDataUrl(item.editedSvg);
-    const src = item.svgUrl || item.pngUrl;
-    if (!src) return null;
-    const res = await fetch(src, { credentials: 'same-origin' });
+    if (item.editedSvg) return svgToDataUrl(compensateSvgForPanel(item.editedSvg, item, state.unifiedFontSize));
+    if (item.svgUrl) {
+      const res = await fetch(item.svgUrl, { credentials: 'same-origin' });
+      if (!res.ok) return null;
+      return svgToDataUrl(compensateSvgForPanel(await res.text(), item, state.unifiedFontSize));
+    }
+    if (!item.pngUrl) return null;
+    const res = await fetch(item.pngUrl, { credentials: 'same-origin' });
     if (!res.ok) return null;
     const blob = await res.blob();
     return new Promise((resolve) => {
@@ -557,6 +643,54 @@ export function FigureCanvasEditor({ canvas, figures, palettes, onLoadFigure, on
     } finally {
       setBusy(null);
     }
+  }
+
+  function handleStageMouseDown(e: Konva.KonvaEventObject<MouseEvent>) {
+    const stage = e.target.getStage();
+    if (!stage) return;
+    const isBackground = e.target === stage || e.target.name() === 'canvas-background';
+    if (!isBackground) return;
+    const point = stagePoint(stage);
+    if (!point) return;
+    selectionStartRef.current = point;
+    const nextBox = { x: point.x, y: point.y, width: 0, height: 0 };
+    selectionBoxRef.current = nextBox;
+    setSelectionBox(nextBox);
+    setSelectedIds([]);
+  }
+
+  function handleStageMouseMove() {
+    const start = selectionStartRef.current;
+    const stage = stageRef.current;
+    if (!start || !stage) return;
+    const point = stagePoint(stage);
+    if (!point) return;
+    const nextBox = {
+      x: Math.min(start.x, point.x),
+      y: Math.min(start.y, point.y),
+      width: Math.abs(point.x - start.x),
+      height: Math.abs(point.y - start.y),
+    };
+    selectionBoxRef.current = nextBox;
+    setSelectionBox(nextBox);
+  }
+
+  function handleStageMouseUp() {
+    const box = selectionBoxRef.current;
+    selectionStartRef.current = null;
+    selectionBoxRef.current = null;
+    setSelectionBox(null);
+    if (!box) return;
+    if (box.width < 4 && box.height < 4) {
+      setSelectedIds([]);
+      return;
+    }
+    setSelectedIds(state.items.filter((item) => intersects(item, box)).map((item) => item.id));
+  }
+
+  function handleStageWheel(e: Konva.KonvaEventObject<WheelEvent>) {
+    e.evt.preventDefault();
+    zoomBy(e.evt.deltaY > 0 ? -0.08 : 0.08);
   }
 
   return (
@@ -622,8 +756,8 @@ export function FigureCanvasEditor({ canvas, figures, palettes, onLoadFigure, on
           <Button size="sm" variant="outline" onClick={() => setState((prev) => ({ ...prev, panelLabelMode: prev.panelLabelMode === 'hidden' ? 'letters' : 'hidden' }))}>
             <Type className="mr-2 h-3.5 w-3.5" /> Labels {state.panelLabelMode === 'hidden' ? 'off' : 'on'}
           </Button>
-          <Button size="sm" variant="outline" onClick={() => setZoom((z) => Math.max(0.35, Number((z - 0.1).toFixed(2))))}><ZoomOut className="mr-2 h-3.5 w-3.5" /> Zoom</Button>
-          <Button size="sm" variant="outline" onClick={() => setZoom((z) => Math.min(1.4, Number((z + 0.1).toFixed(2))))}><ZoomIn className="mr-2 h-3.5 w-3.5" /> {Math.round(zoom * 100)}%</Button>
+          <Button size="sm" variant="outline" onClick={() => zoomBy(-0.1)}><ZoomOut className="mr-2 h-3.5 w-3.5" /> Zoom</Button>
+          <Button size="sm" variant="outline" onClick={() => zoomBy(0.1)}><ZoomIn className="mr-2 h-3.5 w-3.5" /> {Math.round(zoom * 100)}%</Button>
           <span className="text-xs text-muted-foreground">Canvas: {state.widthPx} x {state.heightPx} logical px, {state.widthIn} x {state.heightIn} in export</span>
         </div>
         <div className="inline-block bg-white shadow-sm" style={{ width: state.widthPx * zoom, height: state.heightPx * zoom }}>
@@ -633,23 +767,52 @@ export function FigureCanvasEditor({ canvas, figures, palettes, onLoadFigure, on
             height={state.heightPx * zoom}
             scaleX={zoom}
             scaleY={zoom}
-            onMouseDown={(e) => {
-              if (e.target === e.target.getStage()) setSelectedId(null);
-            }}
+            onMouseDown={handleStageMouseDown}
+            onMouseMove={handleStageMouseMove}
+            onMouseUp={handleStageMouseUp}
+            onWheel={handleStageWheel}
           >
             <Layer>
-              <Rect x={0} y={0} width={state.widthPx} height={state.heightPx} fill="white" />
+              <Rect name="canvas-background" x={0} y={0} width={state.widthPx} height={state.heightPx} fill="white" />
               {state.items.map((item) => (
                 <FigurePanelNode
                   key={item.id}
                   item={item}
-                  selected={item.id === selectedId}
-                  onSelect={() => setSelectedId(item.id)}
+                  selected={selectedIds.includes(item.id)}
+                  onSelect={(additive) => selectItem(item.id, additive)}
                   onChange={(next) => updateItem(item.id, next)}
                   labelMode={state.panelLabelMode}
                   labelFontSize={labelFontSize}
+                  graphFontSize={state.unifiedFontSize}
+                  registerNode={registerNode}
                 />
               ))}
+              {selectionBox && (
+                <Rect
+                  x={selectionBox.x}
+                  y={selectionBox.y}
+                  width={selectionBox.width}
+                  height={selectionBox.height}
+                  fill="rgba(37, 99, 235, 0.08)"
+                  stroke="#2563eb"
+                  strokeWidth={1}
+                  dash={[4, 4]}
+                  listening={false}
+                />
+              )}
+              <Transformer
+                ref={transformerRef}
+                rotateEnabled={false}
+                keepRatio={false}
+                enabledAnchors={['top-left', 'top-center', 'top-right', 'middle-left', 'middle-right', 'bottom-left', 'bottom-center', 'bottom-right']}
+                borderStroke="#2563eb"
+                borderStrokeWidth={1}
+                anchorFill="#ffffff"
+                anchorStroke="#2563eb"
+                anchorSize={7}
+                boundBoxFunc={(oldBox, newBox) => (newBox.width < 36 || newBox.height < 36 ? oldBox : newBox)}
+                onTransformEnd={commitSelectedTransforms}
+              />
             </Layer>
           </Stage>
         </div>
@@ -660,6 +823,8 @@ export function FigureCanvasEditor({ canvas, figures, palettes, onLoadFigure, on
           <h2 className="text-sm font-semibold">Selected panel</h2>
           {selectedItem ? (
             <p className="mt-1 truncate text-xs text-muted-foreground">{selectedItem.label}. {selectedItem.name}</p>
+          ) : selectedIds.length > 1 ? (
+            <p className="mt-1 text-xs text-muted-foreground">{selectedIds.length} panels selected.</p>
           ) : (
             <p className="mt-1 text-xs text-muted-foreground">Select a figure on the canvas.</p>
           )}
@@ -696,7 +861,7 @@ export function FigureCanvasEditor({ canvas, figures, palettes, onLoadFigure, on
           <Button className="w-full" size="sm" disabled={!selectedItem?.editedSvg || busy === 'save-version'} onClick={saveSelectedAsVersion}>
             {busy === 'save-version' ? <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> : <Save className="mr-2 h-3.5 w-3.5" />} Save panel as figure version
           </Button>
-          <Button className="w-full" size="sm" variant="destructive" disabled={!selectedItem} onClick={removeSelected}>Remove from canvas</Button>
+          <Button className="w-full" size="sm" variant="destructive" disabled={!selectedIds.length} onClick={removeSelected}>Remove selected</Button>
         </div>
         <div className="space-y-2 border-t pt-3">
           <Button className="w-full" size="sm" variant="outline" disabled={!state.items.length || busy === 'legend'} onClick={generateLegend}>
