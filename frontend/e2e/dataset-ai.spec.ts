@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 import fs from 'node:fs/promises';
 
-test('dataset upload saves purpose and asks AI after column selection', async ({ page }, testInfo) => {
+test('dataset upload saves purpose, auto-loads AI once, and refreshes with prompt', async ({ page }, testInfo) => {
   const email = process.env.E2E_EMAIL;
   const password = process.env.E2E_PASSWORD;
   test.skip(!email || !password, 'Set E2E_EMAIL and E2E_PASSWORD to run authenticated flow');
@@ -51,6 +51,7 @@ test('dataset upload saves purpose and asks AI after column selection', async ({
   let datasetId: string | null = null;
   let sourceDatasetId: string | null = null;
   let sourceFigureId: string | null = null;
+  let improveBody: unknown = null;
 
   try {
     const source = await page.evaluate(async ({ headers, jsonHeaders, suffix }) => {
@@ -79,10 +80,40 @@ test('dataset upload saves purpose and asks AI after column selection', async ({
       });
       if (!figureRes.ok) throw new Error(await figureRes.text());
       const figure = await figureRes.json() as { id: string; name: string };
+      const favoriteRes = await fetch(`/api/figures/${figure.id}`, {
+        method: 'PATCH',
+        headers: jsonHeaders,
+        body: JSON.stringify({ is_favorite: true }),
+      });
+      if (!favoriteRes.ok) throw new Error(await favoriteRes.text());
       return { datasetId: dataset.id, figureId: figure.id, figureName: figure.name };
     }, { headers, jsonHeaders, suffix });
     sourceDatasetId = source.datasetId;
     sourceFigureId = source.figureId;
+
+    await page.route('**/api/figures/*/versions/*/improve', async (route) => {
+      if (route.request().method() !== 'POST') {
+        await route.continue();
+        return;
+      }
+      try {
+        improveBody = route.request().postDataJSON();
+      } catch {
+        improveBody = null;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify([]),
+      });
+    });
+
+    await page.goto(`/figures/${source.figureId}`);
+    await page.getByLabel('Optional edit request').fill('Make the palette colorblind-safe and simplify the legend.');
+    await page.getByRole('button', { name: /Ask AI to improve/ }).click();
+    await expect.poll(() => improveBody, { timeout: 10_000 }).toEqual({
+      prompt: 'Make the palette colorblind-safe and simplify the legend.',
+    });
 
     await page.goto('/datasets');
     const csvPath = testInfo.outputPath('ai-purpose-data.csv');
@@ -97,24 +128,26 @@ test('dataset upload saves purpose and asks AI after column selection', async ({
     datasetId = page.url().match(/\/datasets\/([0-9a-f-]+)/i)?.[1] ?? null;
     expect(datasetId).toBeTruthy();
 
-    await expect(page.getByText('1. Choose columns').first()).toBeVisible();
-    await page.waitForTimeout(1000);
-    expect(recommendCalled).toBeFalsy();
-    await page.getByRole('button', { name: 'Suggested' }).click();
-    await page.getByRole('button', { name: /Continue to AI recommendations/ }).click();
-    await expect(page.getByRole('button', { name: /Ask AI for charts/ })).toBeVisible();
-    await page.getByLabel('Optional chart direction').fill('Prefer a scatter plot for dose and response.');
-    await page.getByRole('button', { name: /Ask AI for charts/ }).click();
+    await expect(page.getByRole('button', { name: /Refresh AI recommendations|Ask AI for charts/ })).toBeVisible();
     await expect.poll(() => recommendBodies.length, { timeout: 10_000 }).toBe(1);
-    expect(recommendBodies).toContainEqual({
+    expect(recommendCalled).toBeTruthy();
+    expect(recommendBodies[0]).toBeNull();
+    await expect(page.getByText('AI dose response scatter')).toBeVisible();
+    await page.getByLabel('Optional chart direction').fill('Prefer a scatter plot for dose and response.');
+    await page.getByRole('button', { name: /Refresh AI recommendations|Ask AI for charts/ }).click();
+    await expect.poll(() => recommendBodies.length, { timeout: 10_000 }).toBe(2);
+    expect(recommendBodies[1]).toEqual({
       refresh: true,
       prompt: 'Prefer a scatter plot for dose and response.',
     });
     await expect(page.getByText('AI dose response scatter')).toBeVisible();
-    await expect(page.getByText('Templates that fit this data')).toHaveCount(0);
     await page.getByRole('button', { name: /Use this/ }).first().click();
 
-    await page.getByRole('button', { name: `Use figure format ${source.figureName}` }).click();
+    await expect(page.locator('[data-testid="chart-type-select"] option[value="scatter"]')).toHaveJSProperty('disabled', false);
+    await expect(page.locator('[data-testid="chart-type-select"] option[value="line"]')).toHaveJSProperty('disabled', false);
+    const sourceTemplate = page.getByRole('button', { name: `Use figure format ${source.figureName}` });
+    await expect(sourceTemplate.getByText('Favorite')).toBeVisible();
+    await sourceTemplate.click();
     await expect(page.locator('[data-testid="in-plot-title"]')).toHaveValue('Copied template title');
     await expect(page.locator('[data-testid="chart-type-select"]')).toHaveValue('scatter');
 

@@ -18,6 +18,7 @@ from app.figures.schemas import (
     FigureListItem,
     FigureUpdate,
     GalleryFigureItem,
+    ImprovementRequest,
     ImprovementResponse,
     LegendResponse,
     RecommendationCacheResponse,
@@ -208,8 +209,10 @@ def review(figure_id: uuid.UUID, version_id: uuid.UUID, db: Session = Depends(ge
 
 @router.post("/{figure_id}/versions/{version_id}/improve", response_model=list[ImprovementResponse],
              dependencies=[Depends(rate_limit("ai_improve", 60, 3600))])
-def improve(figure_id: uuid.UUID, version_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    return service.improve_version(db, figure_id, version_id, current_user.id)
+def improve(figure_id: uuid.UUID, version_id: uuid.UUID, data: ImprovementRequest | None = None,
+            db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    req = data or ImprovementRequest()
+    return service.improve_version(db, figure_id, version_id, current_user.id, prompt=req.prompt)
 
 
 @router.get("/{figure_id}/versions/{version_id}/improvements", response_model=list[ImprovementResponse])

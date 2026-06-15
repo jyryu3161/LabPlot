@@ -187,13 +187,15 @@ def list_figures(db: Session, owner_id: uuid.UUID, project_id: uuid.UUID | None 
     else:
         ids = project_service.accessible_project_ids(db, owner_id)
         q = q.filter(or_(Figure.owner_id == owner_id, Figure.project_id.in_(ids)))
-    rows = q.order_by(Figure.updated_at.desc()).all()
+    rows = q.order_by(Figure.is_favorite.desc(), Figure.updated_at.desc()).all()
     out = []
     for f, png_path in rows:
         out.append({
             "id": f.id, "name": f.name, "plot_type": f.plot_type, "style_preset": f.style_preset,
             "status": f.status, "dataset_id": f.dataset_id, "project_id": f.project_id,
-            "created_at": f.created_at, "updated_at": f.updated_at, "thumb_url": _url(png_path),
+            "created_at": f.created_at, "updated_at": f.updated_at,
+            "is_favorite": bool(f.is_favorite),
+            "thumb_url": _url(png_path),
         })
     return out
 
@@ -229,6 +231,7 @@ def list_gallery_figures(db: Session, limit: int = 200) -> list[dict]:
             "current_version_id": f.current_version_id,
             "created_at": f.created_at,
             "updated_at": f.updated_at,
+            "is_favorite": bool(f.is_favorite),
             "thumb_url": _url(current.png_path),
             "r_url": (
                 f"/api/figures/gallery/{f.id}/versions/{current.id}/export?format=r"
@@ -247,13 +250,14 @@ def figure_detail(db: Session, figure_id: uuid.UUID, owner_id: uuid.UUID) -> dic
         "description": fig.description, "legend": fig.legend,
         "current_version_id": fig.current_version_id,
         "created_at": fig.created_at, "updated_at": fig.updated_at,
+        "is_favorite": bool(fig.is_favorite),
         "versions": [version_response(v) for v in sorted(fig.versions, key=lambda x: x.version_number)],
     }
 
 
 def update_figure(db: Session, figure_id: uuid.UUID, owner_id: uuid.UUID, data: dict) -> dict:
     fig = get_figure(db, figure_id, owner_id, write=True)
-    for k in ("name", "description", "legend"):
+    for k in ("name", "description", "legend", "is_favorite"):
         if k in data and data[k] is not None:
             setattr(fig, k, data[k])
     db.commit()
@@ -589,7 +593,8 @@ def review_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, own
     return rev
 
 
-def improve_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, owner_id: uuid.UUID) -> list[Improvement]:
+def improve_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, owner_id: uuid.UUID,
+                    prompt: str | None = None) -> list[Improvement]:
     fig = get_figure(db, figure_id, owner_id, write=True)
     v = get_version(fig, version_id)
     last_review = (db.query(Review).filter(Review.figure_version_id == version_id)
@@ -601,6 +606,7 @@ def improve_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, ow
         db, fig.plot_type, v.mapping or {}, v.options or {}, fig.style_preset,
         last_review.payload if last_review else None, [available],
         project_context=_project_context(db, fig.project_id), user_id=owner_id,
+        user_request=(prompt or "").strip() or None,
     )
     rows = []
     for s in suggestions:
@@ -843,7 +849,8 @@ def ai_recommend(db: Session, dataset_id: uuid.UUID, owner_id: uuid.UUID,
     if ds.focus_columns:
         ctx = ((ctx + " ") if ctx else "") + "Prioritize these user-selected columns: " + ", ".join(ds.focus_columns)
     suggestions = ai_client.recommend_charts(
-        db, column_profile, project_context=ctx, user_id=owner_id, chart_prompt=clean_prompt or None
+        db, column_profile, project_context=ctx, user_id=owner_id, chart_prompt=clean_prompt or None,
+        dataset_preview=(ds.preview or [])[:10],
     )
     _save_recommendations(db, dataset_id, suggestions)
     return suggestions
@@ -863,7 +870,8 @@ def ai_recommend_from_reference_image(db: Session, dataset_id: uuid.UUID, owner_
     if ds.focus_columns:
         ctx = ((ctx + " ") if ctx else "") + "Prioritize these user-selected columns: " + ", ".join(ds.focus_columns)
     return ai_client.recommend_from_reference_image(
-        db, column_profile, image_bytes, mime, project_context=ctx, user_id=owner_id
+        db, column_profile, image_bytes, mime, project_context=ctx, user_id=owner_id,
+        dataset_preview=(ds.preview or [])[:10],
     )
 
 

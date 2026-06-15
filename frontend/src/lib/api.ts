@@ -310,7 +310,7 @@ export async function deleteFigure(id: string): Promise<void> { return fetcher(`
 export async function deleteFigureVersion(figureId: string, versionId: string): Promise<FigureDetail> {
   return fetcher(`/api/figures/${figureId}/versions/${versionId}`, { method: 'DELETE' });
 }
-export async function updateFigure(id: string, data: { name?: string; description?: string; legend?: string }): Promise<FigureDetail> {
+export async function updateFigure(id: string, data: { name?: string; description?: string; legend?: string; is_favorite?: boolean }): Promise<FigureDetail> {
   return fetcher(`/api/figures/${id}`, { method: 'PATCH', body: JSON.stringify(data) });
 }
 export async function generateLegend(figureId: string, versionId: string): Promise<{ legend: string }> {
@@ -325,8 +325,9 @@ export async function saveSvgEditVersion(figureId: string, versionId: string, bo
 export async function reviewVersion(figureId: string, versionId: string): Promise<Review> {
   return fetcher(`/api/figures/${figureId}/versions/${versionId}/review`, { method: 'POST' });
 }
-export async function improveVersion(figureId: string, versionId: string): Promise<Improvement[]> {
-  return fetcher(`/api/figures/${figureId}/versions/${versionId}/improve`, { method: 'POST' });
+export async function improveVersion(figureId: string, versionId: string, prompt?: string): Promise<Improvement[]> {
+  const body = prompt?.trim() ? JSON.stringify({ prompt: prompt.trim() }) : undefined;
+  return fetcher(`/api/figures/${figureId}/versions/${versionId}/improve`, { method: 'POST', body });
 }
 export async function listImprovements(figureId: string, versionId: string): Promise<Improvement[]> {
   return fetcher(`/api/figures/${figureId}/versions/${versionId}/improvements`);

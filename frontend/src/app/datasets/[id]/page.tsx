@@ -1,6 +1,6 @@
 'use client';
 
-import { use, useEffect, useMemo, useState } from 'react';
+import { use, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
@@ -20,7 +20,7 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { CheckCircle2, Clipboard, Columns3, ImageIcon, Loader2, Sparkles, Wand2, ArrowRight, X } from 'lucide-react';
+import { CheckCircle2, Clipboard, Columns3, ImageIcon, Loader2, Sparkles, Star, Wand2, ArrowRight, X } from 'lucide-react';
 
 const ROLE_COLORS: Record<string, string> = {
   numeric: 'bg-blue-100 text-blue-700', group: 'bg-green-100 text-green-700',
@@ -102,7 +102,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
   const qc = useQueryClient();
 
   const { data: ds, isLoading } = useQuery({ queryKey: ['dataset', id], queryFn: () => getDataset(id) });
-  const { data: savedAiSug } = useQuery({
+  const { data: savedAiSug, isFetched: savedAiSugFetched } = useQuery({
     queryKey: ['ai-recommendations', id],
     queryFn: () => getSavedChartRecommendations(id),
     enabled: !!ds,
@@ -129,6 +129,8 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
   const [recommendPrompt, setRecommendPrompt] = useState('');
   const [referenceFile, setReferenceFile] = useState<File | null>(null);
   const [visualizeStep, setVisualizeStep] = useState<'columns' | 'recommend' | 'build'>('columns');
+  const autoEnteredDatasetIdRef = useRef<string | null>(null);
+  const autoRecommendationKeyRef = useRef<string | null>(null);
   const aiRecommend = useMutation<ChartSuggestion[], Error, { silent?: boolean; refresh?: boolean; prompt?: string } | undefined>({
     mutationFn: (variables) => {
       const prompt = variables?.prompt?.trim();
@@ -186,7 +188,8 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
     const picked = columns.filter((column) => focus.has(column.name));
     return picked;
   }, [columns, focusColumns]);
-  const compatiblePlotTypes = useMemo(() => plotTypes.filter((plot) => plotFitsColumns(plot, focusedColumns)), [focusedColumns, plotTypes]);
+  const compatibilityColumns = focusedColumns.length ? focusedColumns : columns;
+  const compatiblePlotTypes = useMemo(() => plotTypes.filter((plot) => plotFitsColumns(plot, compatibilityColumns)), [compatibilityColumns, plotTypes]);
   const compatiblePlotTypeSet = useMemo(() => new Set(compatiblePlotTypes.map((plot) => plot.type)), [compatiblePlotTypes]);
   const suggestedFocusColumns = useMemo(() => {
     const preferred = columns.filter((c) => c.role !== 'text').map((c) => c.name);
@@ -201,11 +204,47 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
       .sort((a, b) => ((b.suggestion.score ?? 0) - (a.suggestion.score ?? 0)) || (a.index - b.index))
       .slice(0, 5)
   ), [suggestions]);
-  const suggestionLabel = activeAiSuggestions ? 'Top AI matches' : 'No AI recommendations yet';
+  const suggestionLabel = activeAiSuggestions
+    ? savedAiSug?.cached && !aiSug ? 'Saved AI matches' : 'Top AI matches'
+    : 'No AI recommendations yet';
   const referencePreviewUrl = useMemo(
     () => (referenceFile ? URL.createObjectURL(referenceFile) : null),
     [referenceFile],
   );
+  const recommendationScopeKey = useMemo(
+    () => `${id}:${savedFocusColumns.join('\u0001')}:${ds?.description ?? ''}`,
+    [id, savedFocusColumns, ds?.description],
+  );
+
+  useEffect(() => {
+    autoRecommendationKeyRef.current = null;
+  }, [recommendationScopeKey]);
+
+  useEffect(() => {
+    if (!ds || autoEnteredDatasetIdRef.current === id) return;
+    autoEnteredDatasetIdRef.current = id;
+    if (savedFocusColumns.length > 0) {
+      window.setTimeout(() => {
+        setVisualizeStep((current) => (current === 'columns' ? 'recommend' : current));
+      }, 0);
+    }
+  }, [ds, id, savedFocusColumns.length]);
+
+  useEffect(() => {
+    if (!ds || visualizeStep !== 'recommend' || !hasSelectedColumns || !savedAiSugFetched) return;
+    if (savedAiSug?.cached || aiSug || aiRecommend.isPending || autoRecommendationKeyRef.current === recommendationScopeKey) return;
+    autoRecommendationKeyRef.current = recommendationScopeKey;
+    aiRecommend.mutate({ silent: true });
+  }, [
+    aiRecommend,
+    aiSug,
+    ds,
+    hasSelectedColumns,
+    recommendationScopeKey,
+    savedAiSug?.cached,
+    savedAiSugFetched,
+    visualizeStep,
+  ]);
 
   useEffect(() => {
     return () => {
@@ -244,6 +283,11 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
   }), [currentDef?.required, mapping]);
   const formatCopyFigures = useMemo(() => (formatFigures ?? [])
     .filter((figure) => figure.status === 'ready')
+    .sort((a, b) => {
+      const favoriteDelta = Number(b.is_favorite) - Number(a.is_favorite);
+      if (favoriteDelta) return favoriteDelta;
+      return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
+    })
     .slice(0, 80), [formatFigures]);
 
   const applyFigureFormat = useMutation({
@@ -524,7 +568,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                   </div>
                   <Button size="lg" className="h-11 px-5 text-sm font-semibold shadow-sm" onClick={() => aiRecommend.mutate({ silent: false, refresh: true, prompt: recommendPrompt })} disabled={aiRecommend.isPending || !hasSelectedColumns}>
                     {aiRecommend.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Wand2 className="mr-2 h-4 w-4" />}
-                    Ask AI for charts {activeAiSuggestions ? '(refresh)' : ''}
+                    {activeAiSuggestions ? 'Refresh AI recommendations' : 'Ask AI for charts'}
                   </Button>
                 </CardHeader>
                 <CardContent className="space-y-4">
@@ -674,7 +718,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                             type="button"
                             data-testid="figure-format-card"
                             aria-label={`Use figure format ${figure.name}`}
-                            disabled={!compatible || applyFigureFormat.isPending}
+                            disabled={applyFigureFormat.isPending}
                             onClick={() => applyFigureFormat.mutate(figure.id)}
                             className={`overflow-hidden rounded-lg border bg-background text-left transition ${selected ? 'border-primary ring-2 ring-primary/20' : 'hover:border-primary hover:shadow-sm'} disabled:cursor-not-allowed disabled:opacity-55`}
                           >
@@ -690,7 +734,8 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                               <div className="flex flex-wrap gap-1">
                                 <Badge variant="secondary">{figure.plot_type.replace(/_/g, ' ')}</Badge>
                                 <Badge variant="outline">{formatStylePreset(figure.style_preset)}</Badge>
-                                {!compatible && <Badge variant="outline">needs different data</Badge>}
+                                {figure.is_favorite && <Badge variant="default"><Star className="mr-1 h-3 w-3 fill-current" />Favorite</Badge>}
+                                {!compatible && <Badge variant="outline">check mappings</Badge>}
                               </div>
                             </div>
                           </button>
@@ -704,12 +749,11 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                     <Label>Chart type</Label>
                     <select data-testid="chart-type-select" className="w-full rounded-md border px-3 py-2 text-sm" value={plotType} onChange={(e) => selectPlotType(e.target.value)}>
                       <option value="">Select a chart type…</option>
-                      {plotTypes.map((p) => {
-                        const compatible = compatiblePlotTypeSet.has(p.type);
-                        return <option key={p.type} value={p.type} disabled={!compatible}>{p.label}{compatible ? '' : ' (needs different data)'}</option>;
-                      })}
+                      {plotTypes.map((p) => (
+                        <option key={p.type} value={p.type}>{p.label}</option>
+                      ))}
                     </select>
-                    <p className="text-xs text-muted-foreground">{compatiblePlotTypes.length} chart types match the detected columns.</p>
+                    <p className="text-xs text-muted-foreground">{compatiblePlotTypes.length} chart types match the detected columns. Other chart types remain selectable if you want to map columns manually.</p>
                   </div>
                   <div className="space-y-1">
                     <Label>Figure name</Label>

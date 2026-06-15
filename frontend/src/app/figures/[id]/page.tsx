@@ -44,6 +44,7 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
   const [style, setStyle] = useState<string | null>(null);
   const [description, setDescription] = useState<string | null>(null);
   const [legend, setLegend] = useState<string | null>(null);
+  const [improvePrompt, setImprovePrompt] = useState('');
 
   const plotTypes = plotTypesData?.plot_types ?? [];
   const styles = stylesData?.styles ?? [];
@@ -87,7 +88,7 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Review failed'),
   });
   const runImprove = useMutation({
-    mutationFn: () => improveVersion(id, effectiveSelectedVid!),
+    mutationFn: () => improveVersion(id, effectiveSelectedVid!, improvePrompt),
     onSuccess: (l) => { setImprovements(l); toast.success(`${l.length} suggestions`); },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Improve failed'),
   });
@@ -128,6 +129,16 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
       }
     },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Version delete failed'),
+  });
+  const toggleFavorite = useMutation({
+    mutationFn: () => updateFigure(id, { is_favorite: !fig?.is_favorite }),
+    onSuccess: (updated) => {
+      toast.success(updated.is_favorite ? 'Added to favorites' : 'Removed from favorites');
+      qc.setQueryData(['figure', id], updated);
+      qc.invalidateQueries({ queryKey: ['figure', id] });
+      qc.invalidateQueries({ queryKey: ['figures'] });
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Favorite update failed'),
   });
 
   async function doExport(fmt: string) {
@@ -174,6 +185,19 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
           <Badge variant="secondary">{fig.plot_type}</Badge>
           <Badge variant="outline">{formatStylePreset(fig.style_preset)}</Badge>
           {isViewerOnly && <Badge variant="outline">viewer</Badge>}
+          {canEditFigure && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => toggleFavorite.mutate()}
+              disabled={toggleFavorite.isPending}
+              aria-label={fig.is_favorite ? 'Remove from favorites' : 'Add to favorites'}
+            >
+              <Star className={`h-4 w-4 ${fig.is_favorite ? 'fill-amber-400 text-amber-500' : 'text-muted-foreground'}`} />
+              {fig.is_favorite ? 'Favorited' : 'Favorite'}
+            </Button>
+          )}
         </div>
 
         <div className="grid gap-6 lg:grid-cols-3">
@@ -449,9 +473,22 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
               <CardHeader className="pb-2"><CardTitle className="flex items-center gap-2 text-base"><Wand2 className="h-4 w-4 text-primary" /> AI Improve</CardTitle></CardHeader>
               <CardContent className="space-y-3">
                 {canEditFigure ? (
-                  <Button size="sm" variant="outline" className="w-full" onClick={() => runImprove.mutate()} disabled={runImprove.isPending || !effectiveSelectedVid}>
-                    {runImprove.isPending ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Thinking…</> : 'Suggest improvements'}
-                  </Button>
+                  <>
+                    <div className="space-y-1">
+                      <Label htmlFor="ai-improve-request" className="text-xs">Optional edit request</Label>
+                      <Textarea
+                        id="ai-improve-request"
+                        value={improvePrompt}
+                        onChange={(e) => setImprovePrompt(e.target.value)}
+                        rows={3}
+                        maxLength={1500}
+                        placeholder="Example: make the colors colorblind-safe, simplify the legend, and use clearer axis labels."
+                      />
+                    </div>
+                    <Button size="sm" variant="outline" className="w-full" onClick={() => runImprove.mutate()} disabled={runImprove.isPending || !effectiveSelectedVid}>
+                      {runImprove.isPending ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Thinking…</> : improvePrompt.trim() ? 'Ask AI to improve' : 'Suggest improvements'}
+                    </Button>
+                  </>
                 ) : (
                   <p className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">Editor access is required to create improvement suggestions.</p>
                 )}

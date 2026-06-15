@@ -263,6 +263,7 @@ export interface FigureListItem {
   project_id?: string;
   created_at: string;
   updated_at: string;
+  is_favorite: boolean;
   thumb_url?: string;
 }
 
@@ -289,6 +290,7 @@ export interface FigureDetail {
   current_version_id?: string;
   created_at: string;
   updated_at: string;
+  is_favorite: boolean;
   versions: FigureVersion[];
 }
 

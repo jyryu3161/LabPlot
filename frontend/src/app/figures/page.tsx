@@ -3,12 +3,12 @@
 import Link from 'next/link';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { listFigures, deleteFigure } from '@/lib/api';
+import { listFigures, deleteFigure, updateFigure } from '@/lib/api';
 import { AppHeader } from '@/components/layout/AppHeader';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { Loader2, Images, Trash2 } from 'lucide-react';
+import { Loader2, Images, Star, Trash2 } from 'lucide-react';
 import { formatStylePreset } from '@/lib/style-presets';
 
 export default function FiguresPage() {
@@ -18,6 +18,13 @@ export default function FiguresPage() {
     mutationFn: deleteFigure,
     onSuccess: () => { toast.success('Figure deleted'); qc.invalidateQueries({ queryKey: ['figures'] }); },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Delete failed'),
+  });
+  const favorite = useMutation({
+    mutationFn: ({ id, next }: { id: string; next: boolean }) => updateFigure(id, { is_favorite: next }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['figures'] });
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Favorite update failed'),
   });
 
   return (
@@ -46,6 +53,15 @@ export default function FiguresPage() {
                       <p className="truncate text-sm font-medium">{f.name}</p>
                       <p className="text-xs text-muted-foreground">{f.plot_type}</p>
                     </Link>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      aria-label={f.is_favorite ? `Remove ${f.name} from favorites` : `Favorite ${f.name}`}
+                      onClick={() => favorite.mutate({ id: f.id, next: !f.is_favorite })}
+                      disabled={favorite.isPending}
+                    >
+                      <Star className={`h-4 w-4 ${f.is_favorite ? 'fill-amber-400 text-amber-500' : 'text-muted-foreground'}`} />
+                    </Button>
                     <Button variant="ghost" size="sm" onClick={() => { if (confirm(`Delete ${f.name}?`)) del.mutate(f.id); }}>
                       <Trash2 className="h-4 w-4 text-muted-foreground" />
                     </Button>

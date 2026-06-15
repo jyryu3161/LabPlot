@@ -31,6 +31,7 @@ class FigureUpdate(BaseModel):
     name: str | None = None
     description: str | None = None
     legend: str | None = None
+    is_favorite: bool | None = None
 
 
 class LegendResponse(BaseModel):
@@ -49,6 +50,10 @@ class EnhancePromptResponse(BaseModel):
 
 class RecommendationRequest(BaseModel):
     refresh: bool = False
+    prompt: str | None = Field(default=None, max_length=1500)
+
+
+class ImprovementRequest(BaseModel):
     prompt: str | None = Field(default=None, max_length=1500)
 
 
@@ -77,6 +82,7 @@ class FigureListItem(BaseModel):
     project_id: uuid.UUID | None = None
     created_at: datetime
     updated_at: datetime
+    is_favorite: bool = False
     thumb_url: str | None = None
 
 
@@ -95,6 +101,7 @@ class GalleryFigureItem(BaseModel):
     current_version_id: uuid.UUID | None = None
     created_at: datetime
     updated_at: datetime
+    is_favorite: bool = False
     thumb_url: str | None = None
     r_url: str | None = None
 
@@ -113,6 +120,7 @@ class FigureDetail(BaseModel):
     current_version_id: uuid.UUID | None = None
     created_at: datetime
     updated_at: datetime
+    is_favorite: bool = False
     versions: list[VersionResponse] = Field(default_factory=list)
 
 
