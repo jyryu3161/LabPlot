@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 import fs from 'node:fs/promises';
 
-test('dataset upload saves purpose and auto-runs Ask AI recommendations', async ({ page }, testInfo) => {
+test('dataset upload saves purpose and asks AI after column selection', async ({ page }, testInfo) => {
   const email = process.env.E2E_EMAIL;
   const password = process.env.E2E_PASSWORD;
   test.skip(!email || !password, 'Set E2E_EMAIL and E2E_PASSWORD to run authenticated flow');
@@ -97,18 +97,22 @@ test('dataset upload saves purpose and auto-runs Ask AI recommendations', async 
     datasetId = page.url().match(/\/datasets\/([0-9a-f-]+)/i)?.[1] ?? null;
     expect(datasetId).toBeTruthy();
 
-    await expect.poll(() => recommendCalled, { timeout: 10_000 }).toBeTruthy();
-    await expect(page.getByText('AI dose response scatter')).toBeVisible();
-    await expect(page.getByText('Templates that fit this data')).toHaveCount(0);
+    await expect(page.getByText('1. Choose columns').first()).toBeVisible();
+    await page.waitForTimeout(1000);
+    expect(recommendCalled).toBeFalsy();
+    await page.getByRole('button', { name: 'Suggested' }).click();
+    await page.getByRole('button', { name: /Continue to AI recommendations/ }).click();
     await expect(page.getByRole('button', { name: /Ask AI for charts/ })).toBeVisible();
-    await expect(page.getByText('Columns to use')).toBeVisible();
     await page.getByLabel('Optional chart direction').fill('Prefer a scatter plot for dose and response.');
     await page.getByRole('button', { name: /Ask AI for charts/ }).click();
-    await expect.poll(() => recommendBodies.length, { timeout: 10_000 }).toBeGreaterThan(1);
+    await expect.poll(() => recommendBodies.length, { timeout: 10_000 }).toBe(1);
     expect(recommendBodies).toContainEqual({
       refresh: true,
       prompt: 'Prefer a scatter plot for dose and response.',
     });
+    await expect(page.getByText('AI dose response scatter')).toBeVisible();
+    await expect(page.getByText('Templates that fit this data')).toHaveCount(0);
+    await page.getByRole('button', { name: /Use this/ }).first().click();
 
     await page.getByRole('button', { name: `Use figure format ${source.figureName}` }).click();
     await expect(page.locator('[data-testid="in-plot-title"]')).toHaveValue('Copied template title');

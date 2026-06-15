@@ -1,12 +1,12 @@
 'use client';
 
-import { use, useEffect, useMemo, useRef, useState } from 'react';
+import { use, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import {
-  getDataset, getChartSuggestions, getSavedChartRecommendations, recommendCharts, getPlotTypes, getStyles,
+  getDataset, getSavedChartRecommendations, recommendCharts, getPlotTypes, getStyles,
   createFigure, getFigure, getProject, listFigures, updateDataset, recommendChartsFromImage,
 } from '@/lib/api';
 import { Textarea } from '@/components/ui/textarea';
@@ -102,8 +102,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
   const qc = useQueryClient();
 
   const { data: ds, isLoading } = useQuery({ queryKey: ['dataset', id], queryFn: () => getDataset(id) });
-  const { data: ruleSug } = useQuery({ queryKey: ['suggest', id], queryFn: () => getChartSuggestions(id) });
-  const { data: savedAiSug, isFetched: savedAiSugFetched } = useQuery({
+  const { data: savedAiSug } = useQuery({
     queryKey: ['ai-recommendations', id],
     queryFn: () => getSavedChartRecommendations(id),
     enabled: !!ds,
@@ -129,7 +128,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
   const [aiSug, setAiSug] = useState<ChartSuggestion[] | null>(null);
   const [recommendPrompt, setRecommendPrompt] = useState('');
   const [referenceFile, setReferenceFile] = useState<File | null>(null);
-  const autoRecommendDatasetId = useRef<string | null>(null);
+  const [visualizeStep, setVisualizeStep] = useState<'columns' | 'recommend' | 'build'>('columns');
   const aiRecommend = useMutation<ChartSuggestion[], Error, { silent?: boolean; refresh?: boolean; prompt?: string } | undefined>({
     mutationFn: (variables) => {
       const prompt = variables?.prompt?.trim();
@@ -153,10 +152,6 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
   });
 
   const [dsDesc, setDsDesc] = useState<string | null>(null);
-  const [showColumnGuide, setShowColumnGuide] = useState(() => {
-    if (typeof window === 'undefined') return false;
-    return new URLSearchParams(window.location.search).get('setup') === '1';
-  });
   const [focusColumnsDraft, setFocusColumnsDraft] = useState<string[] | null>(null);
   const dsDescValue = dsDesc ?? ds?.description ?? '';
   const saveDsDesc = useMutation({
@@ -167,7 +162,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
       setAiSug(null);
       qc.invalidateQueries({ queryKey: ['ai-recommendations', id] });
       qc.invalidateQueries({ queryKey: ['dataset', id] });
-      aiRecommend.mutate({ silent: true, refresh: true, prompt: recommendPrompt });
+      setVisualizeStep('recommend');
     },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Save failed'),
   });
@@ -180,11 +175,16 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
   const focusColumns = focusColumnsDraft ?? savedFocusColumns;
   const savedFocusSet = useMemo(() => new Set(savedFocusColumns), [savedFocusColumns]);
   const focusDraftSet = useMemo(() => new Set(focusColumns), [focusColumns]);
+  const hasSelectedColumns = focusColumns.length > 0;
+  const focusChanged = useMemo(() => (
+    focusColumns.length !== savedFocusColumns.length
+    || focusColumns.some((name, index) => name !== savedFocusColumns[index])
+  ), [focusColumns, savedFocusColumns]);
   const focusedColumns = useMemo(() => {
-    if (!focusColumns.length) return columns;
+    if (!focusColumns.length) return [];
     const focus = new Set(focusColumns);
     const picked = columns.filter((column) => focus.has(column.name));
-    return picked.length ? picked : columns;
+    return picked;
   }, [columns, focusColumns]);
   const compatiblePlotTypes = useMemo(() => plotTypes.filter((plot) => plotFitsColumns(plot, focusedColumns)), [focusedColumns, plotTypes]);
   const compatiblePlotTypeSet = useMemo(() => new Set(compatiblePlotTypes.map((plot) => plot.type)), [compatiblePlotTypes]);
@@ -194,14 +194,14 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
   }, [columns]);
   const cachedAiSuggestions = savedAiSug?.cached ? savedAiSug.suggestions : null;
   const activeAiSuggestions = aiSug ?? cachedAiSuggestions;
-  const suggestions = useMemo(() => activeAiSuggestions ?? ruleSug?.suggestions ?? [], [activeAiSuggestions, ruleSug?.suggestions]);
+  const suggestions = useMemo(() => activeAiSuggestions ?? [], [activeAiSuggestions]);
   const displayedSuggestions = useMemo(() => (
     suggestions
       .map((suggestion, index) => ({ suggestion, index }))
       .sort((a, b) => ((b.suggestion.score ?? 0) - (a.suggestion.score ?? 0)) || (a.index - b.index))
       .slice(0, 5)
   ), [suggestions]);
-  const suggestionLabel = activeAiSuggestions ? 'Top AI matches' : 'Top dataset matches';
+  const suggestionLabel = activeAiSuggestions ? 'Top AI matches' : 'No AI recommendations yet';
   const referencePreviewUrl = useMemo(
     () => (referenceFile ? URL.createObjectURL(referenceFile) : null),
     [referenceFile],
@@ -213,25 +213,16 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
     };
   }, [referencePreviewUrl]);
 
-  useEffect(() => {
-    if (!ds || !savedAiSugFetched || autoRecommendDatasetId.current === ds.id) return;
-    autoRecommendDatasetId.current = ds.id;
-    if (savedAiSug?.cached) return;
-    aiRecommend.mutate({ silent: true });
-  }, [aiRecommend, ds, savedAiSug?.cached, savedAiSugFetched]);
-
   const saveFocusColumns = useMutation({
     mutationFn: () => updateDataset(id, { focus_columns: focusColumns }),
     onSuccess: () => {
       toast.success('Column focus saved');
       setAiSug(null);
-      setShowColumnGuide(false);
       qc.setQueryData(['dataset', id], (old: typeof ds | undefined) => old ? { ...old, focus_columns: focusColumns } : old);
       setFocusColumnsDraft(null);
       qc.invalidateQueries({ queryKey: ['dataset', id] });
-      qc.invalidateQueries({ queryKey: ['suggest', id] });
       qc.invalidateQueries({ queryKey: ['ai-recommendations', id] });
-      aiRecommend.mutate({ silent: true, refresh: true, prompt: recommendPrompt });
+      setVisualizeStep('recommend');
       router.replace(`/datasets/${id}`);
     },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Save failed'),
@@ -270,6 +261,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
       setStyle(version.style_preset);
       setName(`${ds?.name ?? 'figure'} - ${source.name} format`);
       setFormatFigureId(source.id);
+      setVisualizeStep('build');
       toast.success('Figure format copied');
       document.getElementById('builder')?.scrollIntoView({ behavior: 'smooth' });
     },
@@ -282,11 +274,24 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
     setMapping(presetMapping ? { ...presetMapping } : {});
     setOptions(defaultOptions(def));
     if (!name) setName(`${ds?.name ?? 'figure'} - ${def?.label ?? pt}`);
+    setVisualizeStep('build');
     document.getElementById('builder')?.scrollIntoView({ behavior: 'smooth' });
   }
 
   function applySuggestion(s: ChartSuggestion) {
     selectPlotType(s.plot_type, (s.suggested_mapping as Record<string, unknown>) || {});
+  }
+
+  function continueFromColumns() {
+    if (!hasSelectedColumns) {
+      toast.error('Choose at least one column first');
+      return;
+    }
+    if (canEditDataset && focusChanged) {
+      saveFocusColumns.mutate();
+      return;
+    }
+    setVisualizeStep('recommend');
   }
 
   function chooseReferenceFile(file: File | null) {
@@ -435,189 +440,221 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
 
           {/* ── Visualize ── */}
           <TabsContent value="visualize" className="space-y-6">
-            <Card className={showColumnGuide ? 'border-primary/30 shadow-sm' : ''}>
-              <CardHeader className="flex flex-row items-start justify-between gap-3">
-                <div>
+            <div className="grid gap-2 md:grid-cols-3">
+              {[
+                { key: 'columns', label: '1. Choose columns', done: hasSelectedColumns },
+                { key: 'recommend', label: '2. Ask AI', done: Boolean(activeAiSuggestions?.length) },
+                { key: 'build', label: '3. Build figure', done: Boolean(plotType) },
+              ].map((step) => {
+                const active = visualizeStep === step.key;
+                const blocked = step.key !== 'columns' && !hasSelectedColumns;
+                return (
+                  <button
+                    key={step.key}
+                    type="button"
+                    disabled={blocked}
+                    onClick={() => setVisualizeStep(step.key as 'columns' | 'recommend' | 'build')}
+                    className={`flex items-center justify-between rounded-lg border px-3 py-2 text-left text-sm transition ${active ? 'border-primary bg-primary/5 text-primary' : 'bg-background hover:border-primary'} disabled:cursor-not-allowed disabled:opacity-50`}
+                  >
+                    <span className="font-medium">{step.label}</span>
+                    {step.done && <CheckCircle2 className="h-4 w-4" />}
+                  </button>
+                );
+              })}
+            </div>
+
+            {visualizeStep === 'columns' && (
+              <Card>
+                <CardHeader>
                   <CardTitle className="flex items-center gap-2 text-base">
-                    <Columns3 className="h-4 w-4 text-primary" /> Columns to use
+                    <Columns3 className="h-4 w-4 text-primary" /> 1. Choose columns
                   </CardTitle>
                   <p className="mt-1 text-sm text-muted-foreground">
-                    {savedFocusColumns.length
-                      ? `Recommendations and chart checks are using ${savedFocusColumns.length} selected column(s).`
-                      : 'Recommendations and chart checks currently use all detected columns.'}
+                    Select the columns you want this figure workflow to use before asking AI for chart ideas.
                   </p>
-                </div>
-                <Button size="sm" variant={showColumnGuide ? 'secondary' : 'outline'} onClick={() => setShowColumnGuide((v) => !v)}>
-                  {showColumnGuide ? 'Hide' : 'Choose columns'}
-                </Button>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                {!showColumnGuide ? (
-                  <div className="flex flex-wrap gap-2">
-                    {(savedFocusColumns.length ? savedFocusColumns : columns.map((c) => c.name).slice(0, 10)).map((name) => (
-                      <Badge key={name} variant={savedFocusSet.has(name) ? 'default' : 'secondary'}>{name}</Badge>
-                    ))}
-                    {!savedFocusColumns.length && columns.length > 10 && <Badge variant="outline">+{columns.length - 10} more</Badge>}
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
+                    <CheckCircle2 className="mr-2 inline h-4 w-4 text-green-600" />
+                    Start with measurement, group, time, or value columns. ID-only text columns can stay unchecked unless they should appear in the plot.
                   </div>
-                ) : (
-                  <>
-                    <div className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
-                      <CheckCircle2 className="mr-2 inline h-4 w-4 text-green-600" />
-                      Select the columns you want the next chart to use. ID-only text columns can stay unchecked unless they should appear in the plot.
-                    </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Button type="button" variant="outline" size="sm" onClick={() => setFocusColumnsDraft(suggestedFocusColumns)}>Suggested</Button>
+                    <Button type="button" variant="outline" size="sm" onClick={() => setFocusColumnsDraft(columns.map((c) => c.name))}>All</Button>
+                    <Button type="button" variant="ghost" size="sm" onClick={() => setFocusColumnsDraft([])}>Clear</Button>
+                    {focusChanged && <Badge variant="outline">unsaved selection</Badge>}
+                  </div>
+                  <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                    {columns.map((column) => {
+                      const checked = focusDraftSet.has(column.name);
+                      return (
+                        <label key={column.name} className="flex cursor-pointer items-center gap-2 rounded-lg border bg-background p-2 text-sm">
+                          <Checkbox checked={checked} onCheckedChange={(next) => toggleFocusColumn(column.name, Boolean(next))} />
+                          <span className="min-w-0 flex-1 truncate">{column.name}</span>
+                          <Badge variant="secondary" className="shrink-0">{column.role}</Badge>
+                        </label>
+                      );
+                    })}
+                  </div>
+                  {hasSelectedColumns ? (
                     <div className="flex flex-wrap gap-2">
-                      <Button type="button" variant="outline" size="sm" onClick={() => setFocusColumnsDraft(suggestedFocusColumns)}>Suggested</Button>
-                      <Button type="button" variant="outline" size="sm" onClick={() => setFocusColumnsDraft(columns.map((c) => c.name))}>All</Button>
-                      <Button type="button" variant="ghost" size="sm" onClick={() => setFocusColumnsDraft([])}>Clear</Button>
+                      {focusColumns.map((name) => <Badge key={name} variant={savedFocusSet.has(name) ? 'default' : 'secondary'}>{name}</Badge>)}
                     </div>
-                    <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                      {columns.map((column) => {
-                        const checked = focusDraftSet.has(column.name);
-                        return (
-                          <label key={column.name} className="flex cursor-pointer items-center gap-2 rounded-lg border bg-background p-2 text-sm">
-                            <Checkbox checked={checked} onCheckedChange={(next) => toggleFocusColumn(column.name, Boolean(next))} />
-                            <span className="min-w-0 flex-1 truncate">{column.name}</span>
-                            <Badge variant="secondary" className="shrink-0">{column.role}</Badge>
-                          </label>
-                        );
-                      })}
+                  ) : (
+                    <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                      Choose at least one column to continue.
                     </div>
-                    <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
-                      <Button variant="outline" onClick={() => setFocusColumnsDraft(null)}>Reset</Button>
-                      <Button onClick={() => saveFocusColumns.mutate()} disabled={saveFocusColumns.isPending || !canEditDataset}>
-                        {saveFocusColumns.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-                        Save columns
-                      </Button>
-                    </div>
-                  </>
-                )}
-              </CardContent>
-            </Card>
+                  )}
+                  <div className="flex justify-end">
+                    <Button onClick={continueFromColumns} disabled={!hasSelectedColumns || saveFocusColumns.isPending}>
+                      {saveFocusColumns.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                      Continue to AI recommendations
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
 
-            <Card>
+            {visualizeStep === 'recommend' && (
+              <Card>
+                <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <CardTitle className="text-base flex items-center gap-2"><Sparkles className="h-4 w-4 text-primary" /> 2. Ask AI for charts</CardTitle>
+                    <p className="mt-1 text-sm text-muted-foreground">Recommendations are saved after the first run and reused when you reopen this dataset.</p>
+                  </div>
+                  <Button size="lg" className="h-11 px-5 text-sm font-semibold shadow-sm" onClick={() => aiRecommend.mutate({ silent: false, refresh: true, prompt: recommendPrompt })} disabled={aiRecommend.isPending || !hasSelectedColumns}>
+                    {aiRecommend.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Wand2 className="mr-2 h-4 w-4" />}
+                    Ask AI for charts {activeAiSuggestions ? '(refresh)' : ''}
+                  </Button>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  {aiRecommend.isPending && !activeAiSuggestions && (
+                    <div className="flex items-center rounded-lg border bg-primary/5 px-3 py-2 text-sm text-primary">
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      AI is reading the selected columns and dataset purpose.
+                    </div>
+                  )}
+                  <div className="flex flex-wrap gap-2">
+                    {focusColumns.map((name) => <Badge key={name} variant="secondary">{name}</Badge>)}
+                  </div>
+                  <div className="space-y-1 rounded-lg border bg-muted/30 p-3">
+                    <Label htmlFor="chart-request">Optional chart direction</Label>
+                    <Textarea
+                      id="chart-request"
+                      value={recommendPrompt}
+                      onChange={(e) => setRecommendPrompt(e.target.value)}
+                      placeholder="Example: show x and y as a scatter plot, or compare response by group."
+                      className="min-h-20 bg-background"
+                      maxLength={1500}
+                    />
+                    <p className="text-xs text-muted-foreground">Used when you refresh AI recommendations. Leave blank to let LabPlot choose from the selected columns.</p>
+                  </div>
+                  <div className="grid gap-3 rounded-lg border bg-muted/30 p-3 lg:grid-cols-[1fr_auto] lg:items-end">
+                    <div className="grid min-w-0 gap-3 md:grid-cols-[1fr_1.2fr]">
+                      <div className="space-y-1">
+                        <Label>Reference figure image</Label>
+                        <p className="text-xs text-muted-foreground">Optional screenshot of a figure style you want to imitate. This is not a data upload.</p>
+                        <Input
+                          type="file"
+                          accept="image/png,image/jpeg,image/webp"
+                          onChange={(e) => chooseReferenceFile(e.target.files?.[0] ?? null)}
+                        />
+                      </div>
+                      <div
+                        tabIndex={0}
+                        aria-label="Paste reference figure image"
+                        onPaste={handleReferencePaste}
+                        className="flex min-h-24 items-center gap-3 rounded-lg border border-dashed bg-background px-4 py-3 text-left outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20"
+                      >
+                        {referencePreviewUrl ? (
+                          <>
+                            <img src={referencePreviewUrl} alt="Reference preview" className="h-16 w-20 rounded border bg-white object-contain" />
+                            <div className="min-w-0 flex-1">
+                              <p className="truncate text-sm font-medium">{referenceFile?.name}</p>
+                              <p className="text-xs text-muted-foreground">Ready for reference matching</p>
+                            </div>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              onClick={(e) => { e.stopPropagation(); setReferenceFile(null); }}
+                              aria-label="Clear reference image"
+                            >
+                              <X className="h-4 w-4" />
+                            </Button>
+                          </>
+                        ) : (
+                          <>
+                            <Clipboard className="h-5 w-5 text-primary" />
+                            <div>
+                              <p className="text-sm font-medium">Paste screenshot here</p>
+                              <p className="text-xs text-muted-foreground">Paste a copied graph screenshot; LabPlot will suggest similar chart types for your data.</p>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      onClick={() => referenceRecommend.mutate()}
+                      disabled={!referenceFile || referenceRecommend.isPending}
+                    >
+                      {referenceRecommend.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Wand2 className="mr-2 h-4 w-4" />}
+                      Match reference
+                    </Button>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-medium">{suggestionLabel}</p>
+                      <p className="text-xs text-muted-foreground">Choose one recommendation to prefill the builder, or continue and build manually.</p>
+                    </div>
+                    <Badge variant="secondary">{displayedSuggestions.length} shown</Badge>
+                  </div>
+                  {displayedSuggestions.length > 0 ? (
+                    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                      {displayedSuggestions.map(({ suggestion: s }, i) => (
+                        <button key={`${s.plot_type}-${i}`} onClick={() => applySuggestion(s)}
+                          className="rounded-lg border p-3 text-left transition hover:border-primary hover:shadow-sm">
+                          <div className="flex items-start justify-between gap-2">
+                            <span className="font-medium">{s.title ?? s.plot_type}</span>
+                            <div className="flex shrink-0 items-center gap-1">
+                              <Badge variant="secondary">#{s.rank ?? i + 1}</Badge>
+                              <Badge variant={s.source === 'rule' ? 'outline' : 'default'}>{s.source === 'rule' ? 'rule' : 'AI'}</Badge>
+                            </div>
+                          </div>
+                          <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                            {typeof s.score === 'number' && <span>{Math.round(s.score * 100)}% fit</span>}
+                            {s.fit && <span className="capitalize">{s.fit}</span>}
+                          </div>
+                          {s.rationale && <p className="mt-1 line-clamp-3 text-xs text-muted-foreground">{s.rationale}</p>}
+                          <span className="mt-2 inline-flex items-center text-xs text-primary">Use this <ArrowRight className="ml-1 h-3 w-3" /></span>
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
+                      <ImageIcon className="mx-auto mb-2 h-5 w-5" />
+                      Click Ask AI for charts after selecting columns.
+                    </div>
+                  )}
+                  <div className="flex flex-col gap-2 sm:flex-row sm:justify-between">
+                    <Button variant="outline" onClick={() => setVisualizeStep('columns')}>Back to columns</Button>
+                    <Button variant="secondary" onClick={() => setVisualizeStep('build')}>Build manually</Button>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
+            {visualizeStep === 'build' && (
+            <Card id="builder">
               <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div>
-                  <CardTitle className="text-base flex items-center gap-2"><Sparkles className="h-4 w-4 text-primary" /> Recommended charts</CardTitle>
-                  <p className="mt-1 text-sm text-muted-foreground">AI recommendations are saved after the first run and reused when you reopen this dataset.</p>
+                  <CardTitle className="text-base">3. Build figure</CardTitle>
+                  <p className="mt-1 text-sm text-muted-foreground">Start from a saved figure template, an AI recommendation, or a chart type.</p>
                 </div>
-                <Button size="lg" className="h-11 px-5 text-sm font-semibold shadow-sm" onClick={() => aiRecommend.mutate({ silent: false, refresh: true, prompt: recommendPrompt })} disabled={aiRecommend.isPending}>
-                  {aiRecommend.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Wand2 className="mr-2 h-4 w-4" />}
-                  Ask AI for charts {activeAiSuggestions ? '(refresh)' : ''}
-                </Button>
+                <Button variant="outline" onClick={() => setVisualizeStep('recommend')}>Back to recommendations</Button>
               </CardHeader>
-              <CardContent className="space-y-4">
-                {aiRecommend.isPending && !activeAiSuggestions && (
-                  <div className="flex items-center rounded-lg border bg-primary/5 px-3 py-2 text-sm text-primary">
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    AI is reading the dataset profile and purpose.
-                  </div>
-                )}
-                <div className="space-y-1 rounded-lg border bg-muted/30 p-3">
-                  <Label htmlFor="chart-request">Optional chart direction</Label>
-                  <Textarea
-                    id="chart-request"
-                    value={recommendPrompt}
-                    onChange={(e) => setRecommendPrompt(e.target.value)}
-                    placeholder="Example: show x and y as a scatter plot, or compare response by group."
-                    className="min-h-20 bg-background"
-                    maxLength={1500}
-                  />
-                  <p className="text-xs text-muted-foreground">Used when you refresh AI recommendations. Saved recommendations load automatically without calling AI again.</p>
-                </div>
-                <div className="grid gap-3 rounded-lg border bg-muted/30 p-3 lg:grid-cols-[1fr_auto] lg:items-end">
-                  <div className="grid min-w-0 gap-3 md:grid-cols-[1fr_1.2fr]">
-                    <div className="space-y-1">
-                      <Label>Reference figure image</Label>
-                      <p className="text-xs text-muted-foreground">Optional screenshot of a figure style you want to imitate. This is not a data upload.</p>
-                      <Input
-                        type="file"
-                        accept="image/png,image/jpeg,image/webp"
-                        onChange={(e) => chooseReferenceFile(e.target.files?.[0] ?? null)}
-                      />
-                    </div>
-                    <div
-                      tabIndex={0}
-                      aria-label="Paste reference figure image"
-                      onPaste={handleReferencePaste}
-                      className="flex min-h-24 items-center gap-3 rounded-lg border border-dashed bg-background px-4 py-3 text-left outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/20"
-                    >
-                      {referencePreviewUrl ? (
-                        <>
-                          <img src={referencePreviewUrl} alt="Reference preview" className="h-16 w-20 rounded border bg-white object-contain" />
-                          <div className="min-w-0 flex-1">
-                            <p className="truncate text-sm font-medium">{referenceFile?.name}</p>
-                            <p className="text-xs text-muted-foreground">Ready for reference matching</p>
-                          </div>
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="icon"
-                            onClick={(e) => { e.stopPropagation(); setReferenceFile(null); }}
-                            aria-label="Clear reference image"
-                          >
-                            <X className="h-4 w-4" />
-                          </Button>
-                        </>
-                      ) : (
-                        <>
-                          <Clipboard className="h-5 w-5 text-primary" />
-                          <div>
-                            <p className="text-sm font-medium">Paste screenshot here</p>
-                            <p className="text-xs text-muted-foreground">Paste a copied graph screenshot; LabPlot will suggest similar chart types for your data.</p>
-                          </div>
-                        </>
-                      )}
-                    </div>
-                  </div>
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    onClick={() => referenceRecommend.mutate()}
-                    disabled={!referenceFile || referenceRecommend.isPending}
-                  >
-                    {referenceRecommend.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Wand2 className="mr-2 h-4 w-4" />}
-                    Match reference
-                  </Button>
-                </div>
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <p className="text-sm font-medium">{suggestionLabel}</p>
-                    <p className="text-xs text-muted-foreground">Ranked by data-shape fit; unsupported chart structures are filtered out.</p>
-                  </div>
-                  <Badge variant="secondary">{displayedSuggestions.length} shown</Badge>
-                </div>
-                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                  {displayedSuggestions.map(({ suggestion: s }, i) => (
-                    <button key={`${s.plot_type}-${i}`} onClick={() => applySuggestion(s)}
-                      className="rounded-lg border p-3 text-left transition hover:border-primary hover:shadow-sm">
-                      <div className="flex items-start justify-between gap-2">
-                        <span className="font-medium">{s.title ?? s.plot_type}</span>
-                        <div className="flex shrink-0 items-center gap-1">
-                          <Badge variant="secondary">#{s.rank ?? i + 1}</Badge>
-                          <Badge variant={s.source === 'rule' ? 'outline' : 'default'}>{s.source === 'rule' ? 'rule' : 'AI'}</Badge>
-                        </div>
-                      </div>
-                      <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                        {typeof s.score === 'number' && <span>{Math.round(s.score * 100)}% fit</span>}
-                        {s.fit && <span className="capitalize">{s.fit}</span>}
-                      </div>
-                      {s.rationale && <p className="mt-1 line-clamp-3 text-xs text-muted-foreground">{s.rationale}</p>}
-                      <span className="mt-2 inline-flex items-center text-xs text-primary">Use this <ArrowRight className="ml-1 h-3 w-3" /></span>
-                    </button>
-                  ))}
-                </div>
-                {displayedSuggestions.length === 0 && (
-                  <div className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
-                    <ImageIcon className="mx-auto mb-2 h-5 w-5" />
-                    No compatible chart recommendations for this dataset profile yet.
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-
-            {/* ── Builder ── */}
-            <Card id="builder">
-              <CardHeader><CardTitle className="text-base">Chart builder</CardTitle></CardHeader>
               <CardContent className="space-y-4">
                 <div className="space-y-3 rounded-lg border bg-muted/20 p-3">
                   <div>
@@ -627,7 +664,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                   {formatCopyFigures.length === 0 ? (
                     <div className="rounded-lg border border-dashed bg-background p-4 text-sm text-muted-foreground">No saved figures available yet.</div>
                   ) : (
-                    <div className="grid max-h-[28rem] gap-3 overflow-y-auto pr-1 sm:grid-cols-2 lg:grid-cols-3">
+                    <div className="grid max-h-64 gap-2 overflow-y-auto pr-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
                       {formatCopyFigures.map((figure) => {
                         const compatible = compatiblePlotTypeSet.has(figure.plot_type);
                         const selected = formatFigureId === figure.id;
@@ -642,14 +679,14 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                             className={`overflow-hidden rounded-lg border bg-background text-left transition ${selected ? 'border-primary ring-2 ring-primary/20' : 'hover:border-primary hover:shadow-sm'} disabled:cursor-not-allowed disabled:opacity-55`}
                           >
                             {figure.thumb_url ? (
-                              <img src={figure.thumb_url} alt={figure.name} className="aspect-[4/3] w-full bg-white object-contain" loading="lazy" decoding="async" />
+                              <img src={figure.thumb_url} alt={figure.name} className="h-20 w-full bg-white object-contain" loading="lazy" decoding="async" />
                             ) : (
-                              <div className="flex aspect-[4/3] w-full items-center justify-center bg-white text-muted-foreground">
-                                <ImageIcon className="h-8 w-8" />
+                              <div className="flex h-20 w-full items-center justify-center bg-white text-muted-foreground">
+                                <ImageIcon className="h-5 w-5" />
                               </div>
                             )}
-                            <div className="space-y-1 p-3">
-                              <p className="truncate text-sm font-medium">{figure.name}</p>
+                            <div className="space-y-1 p-2">
+                              <p className="truncate text-xs font-medium">{figure.name}</p>
                               <div className="flex flex-wrap gap-1">
                                 <Badge variant="secondary">{figure.plot_type.replace(/_/g, ' ')}</Badge>
                                 <Badge variant="outline">{formatStylePreset(figure.style_preset)}</Badge>
@@ -763,6 +800,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                 )}
               </CardContent>
             </Card>
+            )}
           </TabsContent>
 
           {/* ── Figures ── */}
