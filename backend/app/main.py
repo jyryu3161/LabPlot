@@ -14,7 +14,6 @@ from sqlalchemy import text
 
 from app.auth import models as _auth_models  # noqa: F401
 from app.account.router import router as account_router
-from app.canvases import models as _canvas_models  # noqa: F401
 from app.organizations import models as _org_models  # noqa: F401
 from app.projects import models as _proj_models  # noqa: F401
 from app.datasets import models as _ds_models  # noqa: F401
@@ -27,7 +26,6 @@ from app.database import engine
 from app.auth.router import router as auth_router
 from app.admin.router import router as admin_router
 from app.assets.router import router as assets_router
-from app.canvases.router import router as canvases_router
 from app.client_errors.router import router as client_errors_router
 from app.organizations.router import router as organizations_router
 from app.projects.router import router as projects_router
@@ -74,7 +72,6 @@ app.include_router(auth_router)
 app.include_router(account_router)
 app.include_router(admin_router)
 app.include_router(assets_router)
-app.include_router(canvases_router)
 app.include_router(client_errors_router)
 app.include_router(organizations_router)
 app.include_router(projects_router)

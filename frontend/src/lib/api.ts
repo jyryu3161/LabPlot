@@ -2,7 +2,7 @@ import type {
   User, TokenResponse, LoginRequest, RegisterRequest,
   DatasetListItem, DatasetDetail, ChartSuggestion, PlotTypeDef, StyleDef,
   FigureListItem, FigureDetail, FigureVersion, Review, Improvement, AdminUser, AIConfig, GalleryFigureItem, AuditLogItem,
-  ClientErrorItem, Project, ProjectListItem, FigureCanvas, FigureCanvasListItem, CanvasState, CanvasStyleSuggestion, EmailDeliveryStatus,
+  ClientErrorItem, Project, ProjectListItem, EmailDeliveryStatus,
   MembershipItem, MyOrganizationItem, OrganizationAIConfig, OrganizationItem, OrganizationSearchItem, OrganizationUsageSummary,
 } from './types';
 
@@ -295,45 +295,6 @@ export async function downloadGalleryExport(figureId: string, versionId: string,
   const a = document.createElement('a');
   a.href = url; a.download = filename; document.body.appendChild(a); a.click();
   a.remove(); URL.revokeObjectURL(url);
-}
-
-// ── canvases ──
-export async function listCanvases(projectId?: string): Promise<FigureCanvasListItem[]> {
-  return fetcher(`/api/canvases${projectId ? `?project_id=${projectId}` : ''}`);
-}
-export async function createCanvas(data: {
-  name: string;
-  description?: string;
-  project_id?: string;
-  preset?: string;
-  width_px?: number;
-  height_px?: number;
-  state?: Partial<CanvasState>;
-}): Promise<FigureCanvas> {
-  return fetcher('/api/canvases', { method: 'POST', body: JSON.stringify(data) });
-}
-export async function getCanvas(id: string): Promise<FigureCanvas> {
-  return fetcher(`/api/canvases/${id}`);
-}
-export async function updateCanvas(id: string, data: {
-  name?: string;
-  description?: string | null;
-  project_id?: string | null;
-  preset?: string;
-  width_px?: number;
-  height_px?: number;
-  state?: CanvasState;
-}): Promise<FigureCanvas> {
-  return fetcher(`/api/canvases/${id}`, { method: 'PATCH', body: JSON.stringify(data) });
-}
-export async function deleteCanvas(id: string): Promise<void> {
-  return fetcher(`/api/canvases/${id}`, { method: 'DELETE' });
-}
-export async function suggestCanvasStyle(id: string, data?: { selected_item_id?: string; instruction?: string }): Promise<CanvasStyleSuggestion> {
-  return fetcher(`/api/canvases/${id}/suggest-style`, { method: 'POST', body: JSON.stringify(data ?? {}) });
-}
-export async function generateCanvasLegend(id: string): Promise<{ legend: string }> {
-  return fetcher(`/api/canvases/${id}/legend`, { method: 'POST' });
 }
 
 // ── account ──

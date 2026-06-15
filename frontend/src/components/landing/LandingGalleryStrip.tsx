@@ -6,7 +6,7 @@ import Image from 'next/image';
 import { useQuery } from '@tanstack/react-query';
 import { getPublicGallery } from '@/lib/api';
 import { Button } from '@/components/ui/button';
-import { GalleryHorizontal, Layers3, PencilRuler, Sparkles } from 'lucide-react';
+import { GalleryHorizontal, PencilRuler, Sparkles } from 'lucide-react';
 
 const CAPTURES = [
   {
@@ -39,16 +39,6 @@ const CAPTURES = [
     origin: 'center top',
     icon: PencilRuler,
   },
-  {
-    label: 'Canvas',
-    src: '/landing/capture-canvas.png',
-    detail: 'Compose multi-panel figures and harmonize SVG panels together.',
-    fit: 'contain',
-    position: 'center top',
-    zoom: 1,
-    origin: 'center top',
-    icon: Layers3,
-  },
 ] as const;
 
 export function LandingGalleryStrip() {
@@ -66,12 +56,12 @@ export function LandingGalleryStrip() {
             Move from examples to final figure without leaving the workspace.
           </h2>
           <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
-            The main flow stays focused: choose a visual direction, generate from data, edit the vector output, then compose panels.
+            The main flow stays focused: choose a visual direction, generate from data, then edit and export the vector output.
           </p>
         </div>
 
         <div className="mb-5 flex justify-center">
-          <div className="grid w-full max-w-2xl grid-cols-2 rounded-lg border bg-muted p-1 sm:grid-cols-4">
+          <div className="grid w-full max-w-xl grid-cols-3 rounded-lg border bg-muted p-1">
             {CAPTURES.map((capture, index) => {
               const Icon = capture.icon;
               const selected = index === active;
