@@ -5,7 +5,9 @@ import dynamic from 'next/dynamic';
 import { useState, type ReactNode } from 'react';
 import { AuthProvider } from '@/components/auth/AuthProvider';
 
-const ReactQueryDevtools = process.env.NODE_ENV === 'development'
+const enableQueryDevtools = process.env.NODE_ENV === 'development' && process.env.NEXT_PUBLIC_ENABLE_QUERY_DEVTOOLS === '1';
+
+const ReactQueryDevtools = enableQueryDevtools
   ? dynamic(
       () => import('@tanstack/react-query-devtools').then((mod) => mod.ReactQueryDevtools),
       { ssr: false }
@@ -31,7 +33,7 @@ export function Providers({ children }: { children: ReactNode }) {
       <AuthProvider>
         {children}
       </AuthProvider>
-      {process.env.NODE_ENV === 'development' && <ReactQueryDevtools initialIsOpen={false} />}
+      {enableQueryDevtools && <ReactQueryDevtools initialIsOpen={false} />}
     </QueryClientProvider>
   );
 }

@@ -456,8 +456,11 @@ export function FigureCanvasEditor({ canvas, figures, palettes, onLoadFigure, on
                 <button
                   key={fig.id}
                   type="button"
-                  onClick={() => addFigure(fig.id)}
-                  className="flex w-full items-center gap-2 rounded-md border bg-background p-2 text-left text-xs hover:bg-muted/60"
+                  onClick={() => {
+                    if (!onCanvas) addFigure(fig.id);
+                  }}
+                  disabled={onCanvas || busy === `add-${fig.id}`}
+                  className="flex w-full items-center gap-2 rounded-md border bg-background p-2 text-left text-xs hover:bg-muted/60 disabled:cursor-default disabled:opacity-80 disabled:hover:bg-background"
                 >
                   {fig.thumb_url ? <img src={fig.thumb_url} alt="" className="h-10 w-12 rounded border bg-white object-contain" /> : <div className="h-10 w-12 rounded border bg-muted" />}
                   <span className="min-w-0 flex-1">

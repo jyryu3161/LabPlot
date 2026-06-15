@@ -9,6 +9,27 @@ import type {
 // Same-origin by default; Caddy proxies /api and /static to the backend.
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? '';
 
+function normalizeAssetUrl(url: string): string {
+  if (!BASE_URL || !url.startsWith('/')) return url;
+  if (!url.startsWith('/static/') && !url.startsWith('/api/assets/')) return url;
+  return `${BASE_URL}${url}`;
+}
+
+function normalizeResponseUrls<T>(value: T): T {
+  if (!BASE_URL || value == null) return value;
+  if (Array.isArray(value)) return value.map((item) => normalizeResponseUrls(item)) as T;
+  if (typeof value !== 'object') return value;
+  const normalized: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof item === 'string' && key.toLowerCase().endsWith('url')) {
+      normalized[key] = normalizeAssetUrl(item);
+    } else {
+      normalized[key] = normalizeResponseUrls(item);
+    }
+  }
+  return normalized as T;
+}
+
 export class ApiError extends Error {
   status: number;
   constructor(message: string, status: number) {
@@ -70,7 +91,8 @@ async function fetcher<T>(path: string, options?: RequestInit, retried = false):
     throw new ApiError(parseErrorMessage(body, res.statusText), res.status);
   }
   if (res.status === 204) return undefined as T;
-  return res.json() as Promise<T>;
+  const json = await res.json();
+  return normalizeResponseUrls(json) as T;
 }
 
 // ── auth ──
