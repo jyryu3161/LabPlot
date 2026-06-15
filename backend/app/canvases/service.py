@@ -15,6 +15,7 @@ from app.r_engine.presets import list_palettes
 
 _MAX_CANVAS_STATE_BYTES = 750_000
 _PRESETS = {
+    "a4_portrait": (794, 1123),
     "double_column": (720, 500),
     "double_column_tall": (720, 900),
     "single_column": (360, 500),
@@ -26,16 +27,23 @@ def _state_size(state: dict[str, Any]) -> int:
 
 
 def _default_state(preset: str, width_px: int, height_px: int) -> dict[str, Any]:
+    if preset == "a4_portrait":
+        width_in = 8.27
+        height_in = 11.69
+    else:
+        width_in = 7.2 if preset.startswith("double_column") else 3.5
+        height_in = 5.0 if preset == "double_column" else 9.0 if preset == "double_column_tall" else 5.0
     return {
         "version": 1,
         "preset": preset,
         "widthPx": width_px,
         "heightPx": height_px,
-        "widthIn": 7.2 if preset.startswith("double_column") else 3.5,
-        "heightIn": 5.0 if preset == "double_column" else 9.0 if preset == "double_column_tall" else 5.0,
+        "widthIn": width_in,
+        "heightIn": height_in,
         "exportDpi": 300,
         "panelLabelMode": "letters",
-        "unifiedFontSize": 9,
+        "unifiedFontSize": 7,
+        "legend": "",
         "items": [],
     }
 
@@ -226,3 +234,36 @@ def suggest_canvas_style(
     }
     palettes = list_palettes()
     return ai_client.suggest_canvas_style(db, context, palettes, user_id=owner_id)
+
+
+def generate_canvas_legend(db: Session, canvas_id: uuid.UUID, owner_id: uuid.UUID) -> dict:
+    row = _canvas_or_404(db, canvas_id, owner_id)
+    project = project_service.get_project(db, row.project_id, owner_id) if row.project_id else None
+    state = row.state or {}
+    items = [item for item in (state.get("items") or []) if isinstance(item, dict)]
+    figure_ids = [_extract_uuid(item.get("figureId") or item.get("figure_id")) for item in items]
+    valid_figure_ids = [fid for fid in figure_ids if fid]
+    figures = {
+        str(fig.id): fig
+        for fig in db.query(Figure).filter(Figure.owner_id == owner_id, Figure.id.in_(valid_figure_ids)).all()
+    } if valid_figure_ids else {}
+    panels = []
+    for item in items:
+        fig = figures.get(str(item.get("figureId") or item.get("figure_id") or ""))
+        panels.append({
+            "label": str(item.get("label") or ""),
+            "name": str(item.get("name") or (fig.name if fig else "")),
+            "plot_type": fig.plot_type if fig else "",
+            "legend": fig.legend if fig else "",
+            "notes": fig.description if fig else "",
+        })
+    context = {
+        "canvas_name": row.name,
+        "project": {
+            "name": project.name if project else "",
+            "description": project.description if project else "",
+        },
+        "panel_count": len(panels),
+        "panels": panels,
+    }
+    return {"legend": ai_client.generate_canvas_legend(db, context, user_id=owner_id)}

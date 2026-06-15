@@ -219,6 +219,7 @@ export interface CanvasState {
   exportDpi: number;
   panelLabelMode: 'letters' | 'numbers' | 'hidden';
   unifiedFontSize: number;
+  legend?: string;
   items: CanvasItem[];
 }
 

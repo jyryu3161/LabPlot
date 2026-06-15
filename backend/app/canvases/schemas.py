@@ -65,3 +65,7 @@ class CanvasStyleSuggestionResponse(BaseModel):
     font_size: int
     layout: str
     rationale: str
+
+
+class CanvasLegendResponse(BaseModel):
+    legend: str

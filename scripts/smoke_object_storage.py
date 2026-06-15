@@ -24,6 +24,7 @@ from app.audit import models as _audit_models  # noqa: F401
 from app.auth import models as _auth_models  # noqa: F401
 from app.auth.models import User
 from app.auth.service import _hash_password
+from app.organizations import models as _organization_models  # noqa: F401
 from app.common import storage
 from app.common.encryption import decrypt_private_bytes
 from app.database import SessionLocal

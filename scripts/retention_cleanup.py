@@ -19,6 +19,7 @@ from app.ai import models as _ai_models  # noqa: F401
 from app.audit.models import AuditLog
 from app.auth import models as _auth_models  # noqa: F401
 from app.auth.models import PasswordResetToken
+from app.organizations import models as _organization_models  # noqa: F401
 from app.client_errors.models import ClientErrorEvent
 from app.config import settings
 from app.database import SessionLocal

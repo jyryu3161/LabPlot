@@ -16,6 +16,7 @@ sys.path.insert(0, os.getcwd())
 from app.ai import models as _ai_models  # noqa: F401
 from app.audit import models as _audit_models  # noqa: F401
 from app.auth import models as _auth_models  # noqa: F401
+from app.organizations import models as _organization_models  # noqa: F401
 from app.projects import models as _project_models  # noqa: F401
 from app.common import storage
 from app.common.encryption import decrypt_private_bytes, encrypted_with_primary_key, encrypt_private_bytes

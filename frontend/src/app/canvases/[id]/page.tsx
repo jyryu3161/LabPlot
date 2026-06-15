@@ -7,7 +7,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { Loader2 } from 'lucide-react';
 import { AppHeader } from '@/components/layout/AppHeader';
-import { getCanvas, getFigure, getPalettes, listFigures, saveSvgEditVersion, suggestCanvasStyle, updateCanvas } from '@/lib/api';
+import { generateCanvasLegend, getCanvas, getFigure, getPalettes, getProject, listFigures, saveSvgEditVersion, suggestCanvasStyle, updateCanvas } from '@/lib/api';
 import type { CanvasItem, CanvasState } from '@/lib/types';
 
 const FigureCanvasEditor = dynamic(
@@ -19,6 +19,11 @@ export default function CanvasDetailPage({ params }: { params: Promise<{ id: str
   const { id } = use(params);
   const qc = useQueryClient();
   const { data: canvas, isLoading } = useQuery({ queryKey: ['canvas', id], queryFn: () => getCanvas(id) });
+  const { data: project } = useQuery({
+    queryKey: ['project', canvas?.project_id],
+    queryFn: () => getProject(canvas!.project_id!),
+    enabled: Boolean(canvas?.project_id),
+  });
   const { data: figures } = useQuery({
     queryKey: ['figures', canvas?.project_id ?? 'all'],
     queryFn: () => listFigures(canvas?.project_id),
@@ -66,16 +71,19 @@ export default function CanvasDetailPage({ params }: { params: Promise<{ id: str
       <main className="mx-auto max-w-[1600px] px-4 py-6">
         <div className="mb-4 flex items-center gap-2 text-sm text-muted-foreground">
           <Link href="/canvases" className="hover:underline">Canvases</Link>
+          {project && <> / <span>{project.name}</span></>}
           / {canvas.name}
         </div>
         <FigureCanvasEditor
           canvas={canvas}
           figures={figures ?? []}
           palettes={palettesData?.palettes ?? []}
+          project={project}
           onLoadFigure={getFigure}
           onSaveCanvas={async (state, name) => { await saveCanvas.mutateAsync({ state, name }); }}
           onSaveFigureVersion={saveFigureVersion}
           onSuggestStyle={(selectedItemId) => suggestCanvasStyle(id, { selected_item_id: selectedItemId })}
+          onGenerateLegend={() => generateCanvasLegend(id)}
         />
       </main>
     </div>

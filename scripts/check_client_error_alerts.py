@@ -16,6 +16,7 @@ sys.path.insert(0, os.getcwd())
 from app.ai import models as _ai_models  # noqa: F401
 from app.audit import models as _audit_models  # noqa: F401
 from app.auth import models as _auth_models  # noqa: F401
+from app.organizations import models as _organization_models  # noqa: F401
 from app.client_errors.models import ClientErrorEvent
 from app.database import SessionLocal
 from app.datasets import models as _dataset_models  # noqa: F401

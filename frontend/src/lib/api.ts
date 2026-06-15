@@ -332,6 +332,9 @@ export async function deleteCanvas(id: string): Promise<void> {
 export async function suggestCanvasStyle(id: string, data?: { selected_item_id?: string; instruction?: string }): Promise<CanvasStyleSuggestion> {
   return fetcher(`/api/canvases/${id}/suggest-style`, { method: 'POST', body: JSON.stringify(data ?? {}) });
 }
+export async function generateCanvasLegend(id: string): Promise<{ legend: string }> {
+  return fetcher(`/api/canvases/${id}/legend`, { method: 'POST' });
+}
 
 // ── account ──
 export async function downloadAccountExport(): Promise<void> {

@@ -1,5 +1,6 @@
 'use client';
 
+import { useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -9,15 +10,29 @@ import { AppHeader } from '@/components/layout/AppHeader';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { createCanvas, deleteCanvas, listCanvases } from '@/lib/api';
+import { createCanvas, deleteCanvas, listCanvases, listProjects } from '@/lib/api';
 
 export default function CanvasesPage() {
   const router = useRouter();
   const qc = useQueryClient();
-  const { data: canvases, isLoading } = useQuery({ queryKey: ['canvases'], queryFn: () => listCanvases() });
+  const { data: projects } = useQuery({ queryKey: ['projects'], queryFn: listProjects });
+  const [projectId, setProjectId] = useState<string>('');
+  const activeProjectId = projectId || projects?.[0]?.id || '';
+  const activeProject = projects?.find((p) => p.id === activeProjectId);
+  const { data: canvases, isLoading } = useQuery({
+    queryKey: ['canvases', activeProjectId],
+    queryFn: () => listCanvases(activeProjectId || undefined),
+    enabled: Boolean(activeProjectId),
+  });
 
   const create = useMutation({
-    mutationFn: () => createCanvas({ name: 'Figure 1 canvas', preset: 'double_column', width_px: 720, height_px: 500 }),
+    mutationFn: () => createCanvas({
+      name: `${activeProject?.name ?? 'Project'} Figure canvas`,
+      project_id: activeProjectId,
+      preset: 'a4_portrait',
+      width_px: 794,
+      height_px: 1123,
+    }),
     onSuccess: (canvas) => {
       toast.success('Canvas created');
       qc.invalidateQueries({ queryKey: ['canvases'] });
@@ -42,19 +57,36 @@ export default function CanvasesPage() {
         <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
           <div>
             <h1 className="flex items-center gap-2 text-2xl font-bold"><Layers3 className="h-6 w-6" /> Figure canvases</h1>
-            <p className="mt-1 text-sm text-muted-foreground">Compose multi-panel manuscript figures from existing LabPlot figures.</p>
+            <p className="mt-1 text-sm text-muted-foreground">Compose A4 portrait manuscript figures from figures in one project.</p>
           </div>
-          <Button onClick={() => create.mutate()} disabled={create.isPending}>
+          <div className="flex flex-wrap items-center gap-2">
+            <select
+              className="h-9 min-w-64 rounded-md border bg-background px-3 text-sm"
+              value={activeProjectId}
+              onChange={(e) => setProjectId(e.target.value)}
+            >
+              {projects?.map((project) => (
+                <option key={project.id} value={project.id}>
+                  {project.name} ({project.figure_count} figures)
+                </option>
+              ))}
+            </select>
+            <Button onClick={() => create.mutate()} disabled={create.isPending || !activeProjectId}>
             {create.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Plus className="mr-2 h-4 w-4" />} New canvas
-          </Button>
+            </Button>
+          </div>
         </div>
 
-        {isLoading ? (
+        {!activeProjectId ? (
+          <div className="rounded-lg border border-dashed bg-background p-12 text-center text-muted-foreground">
+            Create or open a project before making a canvas.
+          </div>
+        ) : isLoading ? (
           <div className="flex justify-center py-16"><Loader2 className="h-6 w-6 animate-spin" /></div>
         ) : !canvases?.length ? (
           <div className="rounded-lg border border-dashed bg-background p-12 text-center text-muted-foreground">
             <Layers3 className="mx-auto mb-2 h-8 w-8" />
-            No canvases yet.
+            No canvases yet for {activeProject?.name ?? 'this project'}.
           </div>
         ) : (
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
@@ -78,7 +110,7 @@ export default function CanvasesPage() {
                   </div>
                 </CardHeader>
                 <CardContent className="space-y-3">
-                  <div className="aspect-[7.2/5] rounded-md border bg-white p-3">
+                  <div className="aspect-[794/1123] max-h-72 rounded-md border bg-white p-3">
                     <div className="grid h-full grid-cols-2 gap-2">
                       {Array.from({ length: Math.max(1, Math.min(4, canvas.item_count || 1)) }).map((_, i) => (
                         <div key={i} className="rounded border bg-muted/30" />

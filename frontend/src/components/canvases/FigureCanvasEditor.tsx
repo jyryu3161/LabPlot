@@ -2,14 +2,15 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
-import { Download, Grid2X2, ImagePlus, Loader2, Palette, Save, Sparkles, Type } from 'lucide-react';
-import { Stage, Layer, Image as KonvaImage, Rect, Text, Transformer } from 'react-konva';
+import { Download, FileText, Grid2X2, ImagePlus, Loader2, Palette, Save, Sparkles, Type, ZoomIn, ZoomOut } from 'lucide-react';
+import { Stage, Layer, Image as KonvaImage, Rect, Text, Transformer, Group } from 'react-konva';
 import type Konva from 'konva';
-import type { FigureCanvas, CanvasItem, CanvasState, CanvasStyleSuggestion, FigureDetail, FigureListItem, FigureVersion, PaletteDef } from '@/lib/types';
+import type { FigureCanvas, CanvasItem, CanvasState, CanvasStyleSuggestion, FigureDetail, FigureListItem, FigureVersion, PaletteDef, Project } from '@/lib/types';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Textarea } from '@/components/ui/textarea';
 
 const LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
 const DEFAULT_PALETTE = ['#0072B2', '#D55E00', '#009E73', '#CC79A7', '#56B4E9', '#E69F00'];
@@ -22,6 +23,8 @@ interface FigureCanvasEditorProps {
   onSaveCanvas: (state: CanvasState, name: string) => Promise<void>;
   onSaveFigureVersion: (item: CanvasItem, svg: string) => Promise<FigureVersion>;
   onSuggestStyle: (selectedItemId?: string) => Promise<CanvasStyleSuggestion>;
+  onGenerateLegend: () => Promise<{ legend: string }>;
+  project?: Project;
 }
 
 function normalizeState(canvas: FigureCanvas): CanvasState {
@@ -35,7 +38,8 @@ function normalizeState(canvas: FigureCanvas): CanvasState {
     heightIn: Number(s.heightIn || 5),
     exportDpi: Number(s.exportDpi || 300),
     panelLabelMode: s.panelLabelMode || 'letters',
-    unifiedFontSize: Number(s.unifiedFontSize || 9),
+    unifiedFontSize: Number(s.unifiedFontSize || 7),
+    legend: typeof s.legend === 'string' ? s.legend : '',
     items: Array.isArray(s.items) ? s.items : [],
   };
 }
@@ -46,6 +50,19 @@ function nextLabel(index: number): string {
 
 function svgToDataUrl(svg: string): string {
   return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
+function safeFilename(name: string, ext: string): string {
+  const base = name.trim().replace(/[^A-Za-z0-9_.-]+/g, '_') || 'canvas';
+  return `${base}.${ext}`;
+}
+
+function escapeXml(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;');
 }
 
 function useCanvasImage(src?: string) {
@@ -103,8 +120,10 @@ function applySvgStyle(raw: string, palette: string[], fontSize: number): string
     }
   });
   svg.querySelectorAll('text,tspan').forEach((el) => {
-    el.setAttribute('font-size', String(fontSize));
-    (el as SVGElement).style.setProperty('font-size', `${fontSize}px`);
+    el.setAttribute('font-size', `${fontSize}pt`);
+    el.setAttribute('font-family', 'Arial');
+    (el as SVGElement).style.setProperty('font-size', `${fontSize}pt`);
+    (el as SVGElement).style.setProperty('font-family', 'Arial');
   });
   return new XMLSerializer().serializeToString(svg);
 }
@@ -112,6 +131,20 @@ function applySvgStyle(raw: string, palette: string[], fontSize: number): string
 function canvasItemSource(item: CanvasItem): string | undefined {
   if (item.editedSvg) return svgToDataUrl(item.editedSvg);
   return item.svgUrl || item.pngUrl;
+}
+
+function fitInside(boxW: number, boxH: number, image?: HTMLImageElement | null) {
+  const sourceW = image?.naturalWidth || image?.width || boxW;
+  const sourceH = image?.naturalHeight || image?.height || boxH;
+  const scale = Math.min(boxW / Math.max(1, sourceW), boxH / Math.max(1, sourceH));
+  const width = Math.max(1, sourceW * scale);
+  const height = Math.max(1, sourceH * scale);
+  return {
+    x: (boxW - width) / 2,
+    y: (boxH - height) / 2,
+    width,
+    height,
+  };
 }
 
 function arrangeCanvasItems(state: CanvasState, layout: CanvasStyleSuggestion['layout'] = 'grid'): CanvasItem[] {
@@ -160,12 +193,13 @@ function FigurePanelNode({
   labelFontSize: number;
 }) {
   const image = useCanvasImage(canvasItemSource(item));
-  const imageRef = useRef<Konva.Image | null>(null);
+  const groupRef = useRef<Konva.Group | null>(null);
   const transformerRef = useRef<Konva.Transformer | null>(null);
+  const fitted = fitInside(item.width, item.height, image);
 
   useEffect(() => {
-    if (!selected || !imageRef.current || !transformerRef.current) return;
-    transformerRef.current.nodes([imageRef.current]);
+    if (!selected || !groupRef.current || !transformerRef.current) return;
+    transformerRef.current.nodes([groupRef.current]);
     transformerRef.current.getLayer()?.batchDraw();
   }, [selected]);
 
@@ -174,29 +208,24 @@ function FigurePanelNode({
   return (
     <>
       <Rect
-        x={item.x - 1}
-        y={item.y - 1}
-        width={item.width + 2}
-        height={item.height + 2}
-        fill="white"
-        stroke={selected ? '#2563eb' : '#d4d4d8'}
-        strokeWidth={selected ? 1.5 : 0.5}
-        listening={false}
-      />
-      <KonvaImage
-        ref={imageRef}
-        image={image || undefined}
         x={item.x}
         y={item.y}
         width={item.width}
         height={item.height}
+        fill="transparent"
+        listening={false}
+      />
+      <Group
+        ref={groupRef}
+        x={item.x}
+        y={item.y}
         rotation={item.rotation || 0}
         draggable
         onClick={onSelect}
         onTap={onSelect}
         onDragEnd={(e) => onChange({ ...item, x: Math.round(e.target.x()), y: Math.round(e.target.y()) })}
         onTransformEnd={() => {
-          const node = imageRef.current;
+          const node = groupRef.current;
           if (!node) return;
           const scaleX = node.scaleX();
           const scaleY = node.scaleY();
@@ -211,11 +240,29 @@ function FigurePanelNode({
             rotation: Math.round(node.rotation() || 0),
           });
         }}
-      />
+      >
+        <Rect
+          x={-1}
+          y={-1}
+          width={item.width + 2}
+          height={item.height + 2}
+          fill="white"
+          stroke={selected ? '#2563eb' : '#d4d4d8'}
+          strokeWidth={selected ? 1.2 : 0.5}
+        />
+        <KonvaImage
+          image={image || undefined}
+          x={fitted.x}
+          y={fitted.y}
+          width={fitted.width}
+          height={fitted.height}
+          listening={false}
+        />
+      </Group>
       {label && (
         <Text
-          x={item.x - 18}
-          y={Math.max(0, item.y - labelFontSize - 8)}
+          x={item.x}
+          y={Math.max(0, item.y - labelFontSize - 5)}
           text={label}
           fontSize={labelFontSize}
           fontStyle="bold"
@@ -238,8 +285,8 @@ function FigurePanelNode({
         <Transformer
           ref={transformerRef}
           rotateEnabled={false}
-          keepRatio
-          enabledAnchors={['top-left', 'top-right', 'bottom-left', 'bottom-right']}
+          keepRatio={false}
+          enabledAnchors={['top-left', 'top-center', 'top-right', 'middle-left', 'middle-right', 'bottom-left', 'bottom-center', 'bottom-right']}
           boundBoxFunc={(oldBox, newBox) => (newBox.width < 36 || newBox.height < 36 ? oldBox : newBox)}
         />
       )}
@@ -247,17 +294,21 @@ function FigurePanelNode({
   );
 }
 
-export function FigureCanvasEditor({ canvas, figures, palettes, onLoadFigure, onSaveCanvas, onSaveFigureVersion, onSuggestStyle }: FigureCanvasEditorProps) {
+export function FigureCanvasEditor({ canvas, figures, palettes, onLoadFigure, onSaveCanvas, onSaveFigureVersion, onSuggestStyle, onGenerateLegend, project }: FigureCanvasEditorProps) {
   const [name, setName] = useState(canvas.name);
   const [state, setState] = useState<CanvasState>(() => normalizeState(canvas));
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [paletteKey, setPaletteKey] = useState('okabe_ito');
   const [busy, setBusy] = useState<string | null>(null);
+  const [zoom, setZoom] = useState(0.72);
+  const [legend, setLegend] = useState(() => normalizeState(canvas).legend || '');
   const stageRef = useRef<Konva.Stage | null>(null);
 
   useEffect(() => {
+    const normalized = normalizeState(canvas);
     setName(canvas.name);
-    setState(normalizeState(canvas));
+    setState(normalized);
+    setLegend(normalized.legend || '');
     setSelectedId(null);
   }, [canvas]);
 
@@ -265,7 +316,7 @@ export function FigureCanvasEditor({ canvas, figures, palettes, onLoadFigure, on
   const figuresOnCanvas = useMemo(() => new Set(state.items.map((item) => item.figureId)), [state.items]);
   const selectedPalette = palettes.find((p) => p.key === paletteKey);
   const palette = selectedPalette?.hex?.length ? selectedPalette.hex : DEFAULT_PALETTE;
-  const labelFontSize = Math.max(12, Math.round(state.unifiedFontSize * 2.1));
+  const labelFontSize = 8;
 
   function updateItem(id: string, next: CanvasItem) {
     setState((prev) => ({ ...prev, items: prev.items.map((item) => (item.id === id ? next : item)) }));
@@ -278,20 +329,35 @@ export function FigureCanvasEditor({ canvas, figures, palettes, onLoadFigure, on
       const version = fig.versions.find((v) => v.id === fig.current_version_id) || fig.versions[fig.versions.length - 1];
       if (!version) throw new Error('Figure has no version');
       const index = state.items.length;
-      const w = Math.round(state.widthPx * 0.42);
-      const h = Math.round(state.heightPx * 0.34);
+      const w = Math.round(state.widthPx * 0.40);
+      const h = Math.round(state.heightPx * 0.23);
+      let editedSvg: string | undefined;
+      let hasUnsavedSvgEdit = false;
+      if (version.svg_url) {
+        try {
+          const res = await fetch(version.svg_url, { credentials: 'same-origin' });
+          if (res.ok) {
+            editedSvg = applySvgStyle(await res.text(), palette, state.unifiedFontSize);
+            hasUnsavedSvgEdit = true;
+          }
+        } catch {
+          editedSvg = undefined;
+        }
+      }
       const item: CanvasItem = {
         id: crypto.randomUUID(),
         figureId: fig.id,
         versionId: version.id,
         name: fig.name,
         label: nextLabel(index),
-        x: 36 + (index % 2) * (w + 36),
-        y: 48 + Math.floor(index / 2) * (h + 48),
+        x: 56 + (index % 2) * (w + 44),
+        y: 72 + Math.floor(index / 2) * (h + 70),
         width: w,
         height: h,
         svgUrl: version.svg_url,
         pngUrl: version.png_url,
+        editedSvg,
+        hasUnsavedSvgEdit,
       };
       setState((prev) => ({ ...prev, items: [...prev.items, item] }));
       setSelectedId(item.id);
@@ -400,7 +466,7 @@ export function FigureCanvasEditor({ canvas, figures, palettes, onLoadFigure, on
   async function saveCanvas() {
     setBusy('save-canvas');
     try {
-      await onSaveCanvas(state, name);
+      await onSaveCanvas({ ...state, legend }, name);
       toast.success('Canvas saved');
     } finally {
       setBusy(null);
@@ -411,17 +477,90 @@ export function FigureCanvasEditor({ canvas, figures, palettes, onLoadFigure, on
     const stage = stageRef.current;
     if (!stage) return;
     const ratio = Math.max(1, Math.round((state.widthIn * state.exportDpi) / state.widthPx));
+    const previous = {
+      width: stage.width(),
+      height: stage.height(),
+      scaleX: stage.scaleX(),
+      scaleY: stage.scaleY(),
+    };
+    stage.width(state.widthPx);
+    stage.height(state.heightPx);
+    stage.scale({ x: 1, y: 1 });
+    stage.batchDraw();
     const url = stage.toDataURL({ pixelRatio: ratio, mimeType: 'image/png' });
+    stage.width(previous.width);
+    stage.height(previous.height);
+    stage.scale({ x: previous.scaleX, y: previous.scaleY });
+    stage.batchDraw();
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${name.trim().replace(/[^A-Za-z0-9_.-]+/g, '_') || 'canvas'}.png`;
+    a.download = safeFilename(name, 'png');
     document.body.appendChild(a);
     a.click();
     a.remove();
   }
 
+  async function sourceAsDataUrl(item: CanvasItem): Promise<string | null> {
+    if (item.editedSvg) return svgToDataUrl(item.editedSvg);
+    const src = item.svgUrl || item.pngUrl;
+    if (!src) return null;
+    const res = await fetch(src, { credentials: 'same-origin' });
+    if (!res.ok) return null;
+    const blob = await res.blob();
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onerror = () => resolve(null);
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  async function downloadSvg() {
+    setBusy('svg');
+    try {
+      const panels = await Promise.all(state.items.map(async (item) => {
+        const href = await sourceAsDataUrl(item);
+        return { item, href };
+      }));
+      const labelNodes = state.panelLabelMode === 'hidden' ? '' : state.items.map((item) => (
+        `<text x="${item.x}" y="${Math.max(0, item.y - labelFontSize - 5) + labelFontSize}" font-family="Arial" font-size="${labelFontSize}pt" font-weight="700" fill="#111827">${escapeXml(item.label)}</text>`
+      )).join('\n');
+      const imageNodes = panels.map(({ item, href }) => {
+        if (!href) return '';
+        return `<rect x="${item.x - 1}" y="${item.y - 1}" width="${item.width + 2}" height="${item.height + 2}" fill="#fff" stroke="#d4d4d8" stroke-width="0.5"/><image href="${href}" x="${item.x}" y="${item.y}" width="${item.width}" height="${item.height}" preserveAspectRatio="xMidYMid meet"/>`;
+      }).join('\n');
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${state.widthPx}" height="${state.heightPx}" viewBox="0 0 ${state.widthPx} ${state.heightPx}"><rect width="100%" height="100%" fill="#fff"/>\n${imageNodes}\n${labelNodes}\n</svg>`;
+      const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = safeFilename(name, 'svg');
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function generateLegend() {
+    setBusy('legend');
+    try {
+      await onSaveCanvas({ ...state, legend }, name);
+      const result = await onGenerateLegend();
+      setLegend(result.legend);
+      setState((prev) => ({ ...prev, legend: result.legend }));
+      toast.success('Canvas legend generated');
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Legend generation failed');
+    } finally {
+      setBusy(null);
+    }
+  }
+
   return (
-    <div className="grid gap-4 xl:grid-cols-[280px_minmax(0,1fr)_300px]">
+    <div className="grid gap-4 xl:grid-cols-[300px_minmax(0,1fr)_320px]">
       <aside className="space-y-3 rounded-lg border bg-background p-3">
         <div className="space-y-1">
           <Label className="text-xs">Canvas name</Label>
@@ -430,11 +569,11 @@ export function FigureCanvasEditor({ canvas, figures, palettes, onLoadFigure, on
         <div className="grid grid-cols-2 gap-2 text-xs">
           <div className="rounded-md border p-2">
             <div className="text-muted-foreground">Preset</div>
-            <div className="font-medium">Double column</div>
+            <div className="font-medium">{state.preset === 'a4_portrait' ? 'A4 portrait' : state.preset.replaceAll('_', ' ')}</div>
           </div>
           <div className="rounded-md border p-2">
             <div className="text-muted-foreground">Export</div>
-            <div className="font-medium">{state.widthIn} in @ {state.exportDpi} dpi</div>
+            <div className="font-medium">{state.widthIn} x {state.heightIn} in @ {state.exportDpi} dpi</div>
           </div>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -442,6 +581,7 @@ export function FigureCanvasEditor({ canvas, figures, palettes, onLoadFigure, on
             {busy === 'save-canvas' ? <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> : <Save className="mr-2 h-3.5 w-3.5" />} Save
           </Button>
           <Button size="sm" variant="outline" onClick={downloadPng}><Download className="mr-2 h-3.5 w-3.5" /> PNG</Button>
+          <Button size="sm" variant="outline" onClick={downloadSvg} disabled={busy === 'svg'}>{busy === 'svg' ? <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> : <Download className="mr-2 h-3.5 w-3.5" />} SVG</Button>
         </div>
 
         <div className="border-t pt-3">
@@ -449,6 +589,7 @@ export function FigureCanvasEditor({ canvas, figures, palettes, onLoadFigure, on
             <h2 className="text-sm font-semibold">Figures</h2>
             <Badge variant="secondary">{state.items.length} on canvas</Badge>
           </div>
+          {project && <p className="mb-2 text-xs text-muted-foreground">Project: {project.name}</p>}
           <div className="max-h-[55vh] space-y-1 overflow-auto pr-1">
             {figures.map((fig) => {
               const onCanvas = figuresOnCanvas.has(fig.id);
@@ -481,13 +622,17 @@ export function FigureCanvasEditor({ canvas, figures, palettes, onLoadFigure, on
           <Button size="sm" variant="outline" onClick={() => setState((prev) => ({ ...prev, panelLabelMode: prev.panelLabelMode === 'hidden' ? 'letters' : 'hidden' }))}>
             <Type className="mr-2 h-3.5 w-3.5" /> Labels {state.panelLabelMode === 'hidden' ? 'off' : 'on'}
           </Button>
-          <span className="text-xs text-muted-foreground">Canvas: {state.widthPx} x {state.heightPx} logical px, {state.widthIn} in double-column export</span>
+          <Button size="sm" variant="outline" onClick={() => setZoom((z) => Math.max(0.35, Number((z - 0.1).toFixed(2))))}><ZoomOut className="mr-2 h-3.5 w-3.5" /> Zoom</Button>
+          <Button size="sm" variant="outline" onClick={() => setZoom((z) => Math.min(1.4, Number((z + 0.1).toFixed(2))))}><ZoomIn className="mr-2 h-3.5 w-3.5" /> {Math.round(zoom * 100)}%</Button>
+          <span className="text-xs text-muted-foreground">Canvas: {state.widthPx} x {state.heightPx} logical px, {state.widthIn} x {state.heightIn} in export</span>
         </div>
-        <div className="inline-block bg-white shadow-sm">
+        <div className="inline-block bg-white shadow-sm" style={{ width: state.widthPx * zoom, height: state.heightPx * zoom }}>
           <Stage
             ref={stageRef}
-            width={state.widthPx}
-            height={state.heightPx}
+            width={state.widthPx * zoom}
+            height={state.heightPx * zoom}
+            scaleX={zoom}
+            scaleY={zoom}
             onMouseDown={(e) => {
               if (e.target === e.target.getStage()) setSelectedId(null);
             }}
@@ -525,8 +670,8 @@ export function FigureCanvasEditor({ canvas, figures, palettes, onLoadFigure, on
             <Input disabled={!selectedItem} value={selectedItem?.label ?? ''} onChange={(e) => selectedItem && updateItem(selectedItem.id, { ...selectedItem, label: e.target.value })} />
           </div>
           <div className="space-y-1">
-            <Label className="text-xs">Font size</Label>
-            <Input type="number" min="6" max="18" value={state.unifiedFontSize} onChange={(e) => setState((prev) => ({ ...prev, unifiedFontSize: Number(e.target.value || 9) }))} />
+            <Label className="text-xs">Graph font (pt)</Label>
+            <Input type="number" min="6" max="18" value={state.unifiedFontSize} onChange={(e) => setState((prev) => ({ ...prev, unifiedFontSize: Number(e.target.value || 7) }))} />
           </div>
         </div>
         <div className="space-y-1">
@@ -552,6 +697,21 @@ export function FigureCanvasEditor({ canvas, figures, palettes, onLoadFigure, on
             {busy === 'save-version' ? <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> : <Save className="mr-2 h-3.5 w-3.5" />} Save panel as figure version
           </Button>
           <Button className="w-full" size="sm" variant="destructive" disabled={!selectedItem} onClick={removeSelected}>Remove from canvas</Button>
+        </div>
+        <div className="space-y-2 border-t pt-3">
+          <Button className="w-full" size="sm" variant="outline" disabled={!state.items.length || busy === 'legend'} onClick={generateLegend}>
+            {busy === 'legend' ? <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> : <FileText className="mr-2 h-3.5 w-3.5" />} AI figure legend
+          </Button>
+          <Textarea
+            value={legend}
+            onChange={(e) => {
+              setLegend(e.target.value);
+              setState((prev) => ({ ...prev, legend: e.target.value }));
+            }}
+            rows={5}
+            placeholder="Generated canvas-level legend appears here."
+            className="min-h-28 text-xs"
+          />
         </div>
         {selectedItem?.hasUnsavedSvgEdit && (
           <div className="rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900">

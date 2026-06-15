@@ -442,6 +442,28 @@ def suggest_canvas_style(db: Session, canvas_context: dict, palettes: list[dict]
     }
 
 
+def generate_canvas_legend(db: Session, canvas_context: dict,
+                           user_id: uuid.UUID | None = None) -> str:
+    schema = {"type": "object", "properties": {"legend": {"type": "string"}}, "required": ["legend"]}
+    system = (
+        "You write concise publication legends for multi-panel scientific figures. "
+        "Use only the project context, panel names, existing panel legends, and panel notes provided. "
+        "Do not invent methods, results, sample sizes, p-values, or statistics. "
+        "Write one coherent legend with panel references such as (A), (B), and (C)."
+    )
+    out = _run_logged(
+        db,
+        user_id,
+        "canvas_legend",
+        system,
+        [{"kind": "text", "text": "Canvas context:\n" + json.dumps(canvas_context, ensure_ascii=False)}],
+        schema,
+        "canvas_legend",
+        1100,
+    )
+    return out.get("legend", "")
+
+
 # ----------------------------------------------------------------- figure legend
 def generate_legend(db: Session, plot_type: str, mapping: dict, options: dict,
                     dataset_summary: dict, author_notes: str | None, style: str = "nature",

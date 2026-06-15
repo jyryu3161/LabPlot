@@ -7,6 +7,7 @@ from app.auth.models import User
 from app.canvases import service
 from app.canvases.schemas import (
     CanvasCreate,
+    CanvasLegendResponse,
     CanvasListItem,
     CanvasResponse,
     CanvasStyleSuggestionRequest,
@@ -73,6 +74,16 @@ def suggest_style(
         selected_item_id=data.selected_item_id,
         instruction=data.instruction,
     )
+
+
+@router.post("/{canvas_id}/legend", response_model=CanvasLegendResponse,
+             dependencies=[Depends(rate_limit("ai_canvas_legend", 30, 3600))])
+def generate_legend(
+    canvas_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return service.generate_canvas_legend(db, canvas_id, current_user.id)
 
 
 @router.delete("/{canvas_id}", status_code=204)

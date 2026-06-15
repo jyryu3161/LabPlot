@@ -25,6 +25,7 @@ from app.audit import models as _audit_models  # noqa
 from app.client_errors import models as _client_error_models  # noqa
 from app.datasets import models as _dataset_models  # noqa
 from app.figures import models as _figure_models  # noqa
+from app.organizations import models as _organization_models  # noqa
 from app.projects import models as _project_models  # noqa
 from app.database import SessionLocal
 from app.auth.models import User
@@ -67,6 +68,7 @@ from app.audit import models as _audit_models  # noqa
 from app.client_errors import models as _client_error_models  # noqa
 from app.datasets import models as _dataset_models  # noqa
 from app.figures import models as _figure_models  # noqa
+from app.organizations import models as _organization_models  # noqa
 from app.projects import models as _project_models  # noqa
 from app.database import SessionLocal
 from app.auth.models import User
