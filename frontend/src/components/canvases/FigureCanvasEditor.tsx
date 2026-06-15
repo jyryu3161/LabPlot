@@ -16,6 +16,7 @@ const LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
 const DEFAULT_PALETTE = ['#0072B2', '#D55E00', '#009E73', '#CC79A7', '#56B4E9', '#E69F00'];
 const MIN_ZOOM = 0.35;
 const MAX_ZOOM = 1.6;
+const PANEL_CONTENT_SCALE = 0.82;
 
 interface FigureCanvasEditorProps {
   canvas: FigureCanvas;
@@ -182,15 +183,13 @@ function applySvgStyle(raw: string, palette: string[] | null, fontSize: number):
 
 function compensateSvgForPanel(raw: string, item: CanvasItem, fontSizePt: number): string {
   const intrinsic = svgIntrinsicSize(raw);
-  const scale = Math.min(item.width / intrinsic.width, item.height / intrinsic.height);
+  const scale = Math.min(item.width / intrinsic.width, item.height / intrinsic.height) * PANEL_CONTENT_SCALE;
   const compensatedFont = clamp(fontSizePt / Math.max(0.05, scale), 3, 72);
   return applySvgStyle(raw, null, compensatedFont);
 }
 
-function fitInside(boxW: number, boxH: number, image?: HTMLImageElement | null) {
-  const sourceW = image?.naturalWidth || image?.width || boxW;
-  const sourceH = image?.naturalHeight || image?.height || boxH;
-  const scale = Math.min(boxW / Math.max(1, sourceW), boxH / Math.max(1, sourceH));
+function fitSourceInside(boxW: number, boxH: number, sourceW: number, sourceH: number, contentScale = 1) {
+  const scale = Math.min(boxW / Math.max(1, sourceW), boxH / Math.max(1, sourceH)) * contentScale;
   const width = Math.max(1, sourceW * scale);
   const height = Math.max(1, sourceH * scale);
   return {
@@ -199,6 +198,24 @@ function fitInside(boxW: number, boxH: number, image?: HTMLImageElement | null) 
     width,
     height,
   };
+}
+
+function fitInside(boxW: number, boxH: number, image?: HTMLImageElement | null, contentScale = 1) {
+  const sourceW = image?.naturalWidth || image?.width || boxW;
+  const sourceH = image?.naturalHeight || image?.height || boxH;
+  return fitSourceInside(boxW, boxH, sourceW, sourceH, contentScale);
+}
+
+function imageSizeFromDataUrl(dataUrl: string): Promise<{ width: number; height: number } | null> {
+  return new Promise((resolve) => {
+    const image = new Image();
+    image.onload = () => resolve({
+      width: image.naturalWidth || image.width,
+      height: image.naturalHeight || image.height,
+    });
+    image.onerror = () => resolve(null);
+    image.src = dataUrl;
+  });
 }
 
 function intersects(a: { x: number; y: number; width: number; height: number }, b: { x: number; y: number; width: number; height: number }) {
@@ -255,7 +272,7 @@ function FigurePanelNode({
   registerNode: (id: string, node: Konva.Group | null) => void;
 }) {
   const image = usePanelImage(item, graphFontSize);
-  const fitted = fitInside(item.width, item.height, image);
+  const fitted = fitInside(item.width, item.height, image, PANEL_CONTENT_SCALE);
 
   const label = labelMode === 'hidden' ? '' : item.label;
 
@@ -333,6 +350,7 @@ export function FigureCanvasEditor({ canvas, figures, palettes, onLoadFigure, on
   const nodeRefs = useRef(new Map<string, Konva.Group>());
   const selectionStartRef = useRef<{ x: number; y: number } | null>(null);
   const selectionBoxRef = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
+  const transformFrameRef = useRef<number | null>(null);
 
   useEffect(() => {
     const normalized = normalizeState(canvas);
@@ -341,6 +359,10 @@ export function FigureCanvasEditor({ canvas, figures, palettes, onLoadFigure, on
     setLegend(normalized.legend || '');
     setSelectedIds([]);
   }, [canvas]);
+
+  useEffect(() => () => {
+    if (transformFrameRef.current !== null) window.cancelAnimationFrame(transformFrameRef.current);
+  }, []);
 
   const selectedItem = selectedIds.length === 1 ? state.items.find((item) => item.id === selectedIds[0]) || null : null;
   const figuresOnCanvas = useMemo(() => new Set(state.items.map((item) => item.figureId)), [state.items]);
@@ -392,6 +414,14 @@ export function FigureCanvasEditor({ canvas, figures, palettes, onLoadFigure, on
         if (!node) return item;
         const scaleX = node.scaleX();
         const scaleY = node.scaleY();
+        if (Math.abs(scaleX - 1) < 0.001 && Math.abs(scaleY - 1) < 0.001) {
+          return {
+            ...item,
+            x: Math.round(node.x()),
+            y: Math.round(node.y()),
+            rotation: Math.round(node.rotation() || 0),
+          };
+        }
         node.scaleX(1);
         node.scaleY(1);
         return {
@@ -404,6 +434,14 @@ export function FigureCanvasEditor({ canvas, figures, palettes, onLoadFigure, on
         };
       }),
     }));
+  }
+
+  function scheduleSelectedTransformCommit() {
+    if (transformFrameRef.current !== null) return;
+    transformFrameRef.current = window.requestAnimationFrame(() => {
+      transformFrameRef.current = null;
+      commitSelectedTransforms();
+    });
   }
 
   async function addFigure(figureId: string) {
@@ -582,12 +620,23 @@ export function FigureCanvasEditor({ canvas, figures, palettes, onLoadFigure, on
     a.remove();
   }
 
-  async function sourceAsDataUrl(item: CanvasItem): Promise<string | null> {
-    if (item.editedSvg) return svgToDataUrl(compensateSvgForPanel(item.editedSvg, item, state.unifiedFontSize));
+  async function sourceAsDataUrl(item: CanvasItem): Promise<{ href: string; x: number; y: number; width: number; height: number } | null> {
+    if (item.editedSvg) {
+      const intrinsic = svgIntrinsicSize(item.editedSvg);
+      return {
+        href: svgToDataUrl(compensateSvgForPanel(item.editedSvg, item, state.unifiedFontSize)),
+        ...fitSourceInside(item.width, item.height, intrinsic.width, intrinsic.height, PANEL_CONTENT_SCALE),
+      };
+    }
     if (item.svgUrl) {
       const res = await fetch(item.svgUrl, { credentials: 'same-origin' });
       if (!res.ok) return null;
-      return svgToDataUrl(compensateSvgForPanel(await res.text(), item, state.unifiedFontSize));
+      const raw = await res.text();
+      const intrinsic = svgIntrinsicSize(raw);
+      return {
+        href: svgToDataUrl(compensateSvgForPanel(raw, item, state.unifiedFontSize)),
+        ...fitSourceInside(item.width, item.height, intrinsic.width, intrinsic.height, PANEL_CONTENT_SCALE),
+      };
     }
     if (!item.pngUrl) return null;
     const res = await fetch(item.pngUrl, { credentials: 'same-origin' });
@@ -595,7 +644,19 @@ export function FigureCanvasEditor({ canvas, figures, palettes, onLoadFigure, on
     const blob = await res.blob();
     return new Promise((resolve) => {
       const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result || ''));
+      reader.onload = async () => {
+        const href = String(reader.result || '');
+        if (!href) {
+          resolve(null);
+          return;
+        }
+        const size = await imageSizeFromDataUrl(href);
+        const source = size ?? { width: item.width, height: item.height };
+        resolve({
+          href,
+          ...fitSourceInside(item.width, item.height, source.width, source.height, PANEL_CONTENT_SCALE),
+        });
+      };
       reader.onerror = () => resolve(null);
       reader.readAsDataURL(blob);
     });
@@ -605,15 +666,15 @@ export function FigureCanvasEditor({ canvas, figures, palettes, onLoadFigure, on
     setBusy('svg');
     try {
       const panels = await Promise.all(state.items.map(async (item) => {
-        const href = await sourceAsDataUrl(item);
-        return { item, href };
+        const source = await sourceAsDataUrl(item);
+        return { item, source };
       }));
       const labelNodes = state.panelLabelMode === 'hidden' ? '' : state.items.map((item) => (
         `<text x="${item.x}" y="${Math.max(0, item.y - labelFontSize - 5) + labelFontSize}" font-family="Arial" font-size="${labelFontSize}pt" font-weight="700" fill="#111827">${escapeXml(item.label)}</text>`
       )).join('\n');
-      const imageNodes = panels.map(({ item, href }) => {
-        if (!href) return '';
-        return `<rect x="${item.x - 1}" y="${item.y - 1}" width="${item.width + 2}" height="${item.height + 2}" fill="#fff" stroke="#d4d4d8" stroke-width="0.5"/><image href="${href}" x="${item.x}" y="${item.y}" width="${item.width}" height="${item.height}" preserveAspectRatio="xMidYMid meet"/>`;
+      const imageNodes = panels.map(({ item, source }) => {
+        if (!source) return '';
+        return `<rect x="${item.x - 1}" y="${item.y - 1}" width="${item.width + 2}" height="${item.height + 2}" fill="#fff" stroke="#d4d4d8" stroke-width="0.5"/><image href="${source.href}" x="${item.x + source.x}" y="${item.y + source.y}" width="${source.width}" height="${source.height}" preserveAspectRatio="xMidYMid meet"/>`;
       }).join('\n');
       const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${state.widthPx}" height="${state.heightPx}" viewBox="0 0 ${state.widthPx} ${state.heightPx}"><rect width="100%" height="100%" fill="#fff"/>\n${imageNodes}\n${labelNodes}\n</svg>`;
       const blob = new Blob([svg], { type: 'image/svg+xml;charset=utf-8' });
@@ -811,6 +872,7 @@ export function FigureCanvasEditor({ canvas, figures, palettes, onLoadFigure, on
                 anchorStroke="#2563eb"
                 anchorSize={7}
                 boundBoxFunc={(oldBox, newBox) => (newBox.width < 36 || newBox.height < 36 ? oldBox : newBox)}
+                onTransform={scheduleSelectedTransformCommit}
                 onTransformEnd={commitSelectedTransforms}
               />
             </Layer>
