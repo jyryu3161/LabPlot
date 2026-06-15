@@ -6,7 +6,7 @@ import { useRouter } from 'next/navigation';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { addProjectCollaborator, getProject, updateProject, listDatasets, listFigures, deleteDataset, deleteFigure, downloadProjectPack, enhancePrompt, removeProjectCollaborator } from '@/lib/api';
-import type { ProjectUserSearchItem } from '@/lib/types';
+import type { ProjectInviteDraft } from '@/lib/types';
 import { AppHeader } from '@/components/layout/AppHeader';
 import { DatasetUploadWizard } from '@/components/datasets/DatasetUploadWizard';
 import { ProjectCollaboratorPicker } from '@/components/projects/ProjectCollaboratorPicker';
@@ -27,13 +27,14 @@ export default function ProjectWorkspace({ params }: { params: Promise<{ id: str
   const { data: datasets, isLoading: dsLoading } = useQuery({ queryKey: ['datasets', id], queryFn: () => listDatasets(id) });
   const { data: figures } = useQuery({ queryKey: ['figures', id], queryFn: () => listFigures(id) });
   const [uploadDesc, setUploadDesc] = useState('');
-  const [newCollaborators, setNewCollaborators] = useState<ProjectUserSearchItem[]>([]);
+  const [newCollaborators, setNewCollaborators] = useState<ProjectInviteDraft[]>([]);
+  const canEditProject = project?.role === 'owner' || project?.role === 'editor';
 
   const delDs = useMutation({ mutationFn: deleteDataset, onSuccess: () => { toast.success('Dataset deleted'); qc.invalidateQueries({ queryKey: ['datasets', id] }); } });
   const delFig = useMutation({ mutationFn: deleteFigure, onSuccess: () => { toast.success('Figure deleted'); qc.invalidateQueries({ queryKey: ['figures', id] }); } });
   const addCollaborators = useMutation({
     mutationFn: async () => {
-      for (const user of newCollaborators) await addProjectCollaborator(id, user.id, 'editor');
+      for (const user of newCollaborators) await addProjectCollaborator(id, user.id, user.role);
     },
     onSuccess: () => {
       toast.success('Collaborators updated');
@@ -89,16 +90,18 @@ export default function ProjectWorkspace({ params }: { params: Promise<{ id: str
         <Card className="mb-6">
           <CardHeader className="pb-2"><CardTitle className="flex items-center gap-2 text-base"><FlaskConical className="h-4 w-4 text-primary" /> Research description</CardTitle></CardHeader>
           <CardContent className="space-y-2">
-            <Textarea value={desc} onChange={(e) => setDescDraft(e.target.value)} rows={3}
+            <Textarea value={desc} onChange={(e) => setDescDraft(e.target.value)} rows={3} readOnly={!canEditProject}
               placeholder="Describe the study (organism, design, treatments, hypothesis…). This context is given to the AI to improve chart recommendations, reviews and figure legends." />
-            <div className="flex gap-2">
-              <Button size="sm" variant="outline" onClick={() => enhanceDesc.mutate()} disabled={enhanceDesc.isPending}>
-                {enhanceDesc.isPending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Sparkles className="mr-1 h-4 w-4" />} Enhance
-              </Button>
-              <Button size="sm" variant="secondary" onClick={() => saveDesc.mutate()} disabled={saveDesc.isPending}>
-                {saveDesc.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Save description'}
-              </Button>
-            </div>
+            {canEditProject ? (
+              <div className="flex gap-2">
+                <Button size="sm" variant="outline" onClick={() => enhanceDesc.mutate()} disabled={enhanceDesc.isPending}>
+                  {enhanceDesc.isPending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Sparkles className="mr-1 h-4 w-4" />} Enhance
+                </Button>
+                <Button size="sm" variant="secondary" onClick={() => saveDesc.mutate()} disabled={saveDesc.isPending}>
+                  {saveDesc.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Save description'}
+                </Button>
+              </div>
+            ) : <p className="text-xs text-muted-foreground">Viewer access is read-only.</p>}
           </CardContent>
         </Card>
 
@@ -114,11 +117,11 @@ export default function ProjectWorkspace({ params }: { params: Promise<{ id: str
                 <ProjectCollaboratorPicker
                   selected={newCollaborators}
                   onChange={setNewCollaborators}
-                  helper="Add approved users who should be able to view, upload data, and edit figures in this project."
+                  helper="Invite approved users. They can access the project only after accepting the invitation."
                 />
                 <Button size="sm" onClick={() => addCollaborators.mutate()} disabled={!newCollaborators.length || addCollaborators.isPending}>
                   {addCollaborators.isPending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
-                  Add collaborator{newCollaborators.length > 1 ? 's' : ''}
+                  Send invitation{newCollaborators.length > 1 ? 's' : ''}
                 </Button>
               </>
             ) : (
@@ -131,7 +134,7 @@ export default function ProjectWorkspace({ params }: { params: Promise<{ id: str
                 <div key={member.id} className="flex items-center justify-between gap-3 rounded-lg border bg-background px-3 py-2 text-sm">
                   <div className="min-w-0">
                     <p className="truncate font-medium">{member.display_name}</p>
-                    <p className="truncate text-xs text-muted-foreground">{member.email} · {member.role}</p>
+                    <p className="truncate text-xs text-muted-foreground">{member.email} · {member.role} · {member.status}</p>
                   </div>
                   {project?.role === 'owner' && (
                     <Button variant="ghost" size="icon-sm" onClick={() => removeCollaborator.mutate(member.id)} aria-label={`Remove ${member.display_name}`}>
@@ -151,26 +154,32 @@ export default function ProjectWorkspace({ params }: { params: Promise<{ id: str
           </TabsList>
 
           <TabsContent value="datasets" className="space-y-6">
-            <div className="space-y-1">
-              <Label className="text-xs text-muted-foreground">Dataset description (optional). Add it before upload so AI recommendations, reviews, and legends can use the context.</Label>
-              <Textarea value={uploadDesc} onChange={(e) => setUploadDesc(e.target.value)} rows={2}
-                placeholder="Example: target gene expression and viability measured after drug A/B/C treatment in tumor cell lines" />
-              <Button size="sm" variant="outline" onClick={() => enhanceUpload.mutate()} disabled={enhanceUpload.isPending}>
-                {enhanceUpload.isPending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Sparkles className="mr-1 h-4 w-4" />} Enhance with AI
-              </Button>
-            </div>
-            <DatasetUploadWizard
-              projectId={id}
-              description={uploadDesc}
-              title="Upload data to this project"
-              helper="CSV, TSV, TXT, XLSX. Preview the table before it is saved."
-              onUploaded={async (dataset) => {
-                setUploadDesc('');
-                await qc.invalidateQueries({ queryKey: ['datasets', id] });
-                await qc.invalidateQueries({ queryKey: ['project', id] });
-                router.push(`/datasets/${dataset.id}?setup=1`);
-              }}
-            />
+            {canEditProject ? (
+              <>
+                <div className="space-y-1">
+                  <Label className="text-xs text-muted-foreground">Dataset description (optional). Add it before upload so AI recommendations, reviews, and legends can use the context.</Label>
+                  <Textarea value={uploadDesc} onChange={(e) => setUploadDesc(e.target.value)} rows={2}
+                    placeholder="Example: target gene expression and viability measured after drug A/B/C treatment in tumor cell lines" />
+                  <Button size="sm" variant="outline" onClick={() => enhanceUpload.mutate()} disabled={enhanceUpload.isPending}>
+                    {enhanceUpload.isPending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Sparkles className="mr-1 h-4 w-4" />} Enhance with AI
+                  </Button>
+                </div>
+                <DatasetUploadWizard
+                  projectId={id}
+                  description={uploadDesc}
+                  title="Upload data to this project"
+                  helper="CSV, TSV, TXT, XLSX. Preview the table before it is saved."
+                  onUploaded={async (dataset) => {
+                    setUploadDesc('');
+                    await qc.invalidateQueries({ queryKey: ['datasets', id] });
+                    await qc.invalidateQueries({ queryKey: ['project', id] });
+                    router.push(`/datasets/${dataset.id}?setup=1`);
+                  }}
+                />
+              </>
+            ) : (
+              <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">Viewer access can inspect datasets and figures but cannot upload or edit project content.</div>
+            )}
 
             {dsLoading ? <div className="flex justify-center py-8"><Loader2 className="h-6 w-6 animate-spin" /></div>
               : !datasets?.length ? <div className="rounded-lg border border-dashed p-10 text-center text-muted-foreground"><Database className="mx-auto mb-2 h-7 w-7" /> No datasets yet.</div>
@@ -181,7 +190,7 @@ export default function ProjectWorkspace({ params }: { params: Promise<{ id: str
                       <CardHeader className="pb-2">
                         <div className="flex items-start justify-between">
                           <CardTitle className="flex items-center gap-2 text-base"><FileSpreadsheet className="h-4 w-4 text-primary" /> {d.name}</CardTitle>
-                          <Button variant="ghost" size="sm" onClick={() => { if (confirm(`Delete ${d.name}?`)) delDs.mutate(d.id); }}><Trash2 className="h-4 w-4 text-muted-foreground" /></Button>
+                          {canEditProject && <Button variant="ghost" size="sm" onClick={() => { if (confirm(`Delete ${d.name}?`)) delDs.mutate(d.id); }}><Trash2 className="h-4 w-4 text-muted-foreground" /></Button>}
                         </div>
                       </CardHeader>
                       <CardContent>
@@ -210,7 +219,7 @@ export default function ProjectWorkspace({ params }: { params: Promise<{ id: str
                       <CardContent className="p-3">
                         <div className="flex items-start justify-between gap-2">
                           <Link href={`/figures/${f.id}`} className="min-w-0"><p className="truncate text-sm font-medium">{f.name}</p><p className="text-xs text-muted-foreground">{f.plot_type} · {formatStylePreset(f.style_preset)}</p></Link>
-                          <Button variant="ghost" size="sm" onClick={() => { if (confirm(`Delete ${f.name}?`)) delFig.mutate(f.id); }}><Trash2 className="h-4 w-4 text-muted-foreground" /></Button>
+                          {canEditProject && <Button variant="ghost" size="sm" onClick={() => { if (confirm(`Delete ${f.name}?`)) delFig.mutate(f.id); }}><Trash2 className="h-4 w-4 text-muted-foreground" /></Button>}
                         </div>
                       </CardContent>
                     </Card>

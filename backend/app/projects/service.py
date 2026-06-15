@@ -4,6 +4,7 @@ import shutil
 import tempfile
 import uuid
 import zipfile
+from datetime import datetime, timezone
 
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
@@ -17,6 +18,8 @@ from app.figures.models import Figure, FigureVersion
 from app.projects.models import Project, ProjectCollaborator
 
 WRITE_ROLES = {"editor"}
+ACCEPTED_STATUS = "accepted"
+PENDING_STATUS = "pending"
 
 
 def ensure_default_project(db: Session, owner_id: uuid.UUID) -> Project:
@@ -37,7 +40,11 @@ def _project_role(db: Session, project_id: uuid.UUID, user_id: uuid.UUID) -> str
         return "owner"
     collab = (
         db.query(ProjectCollaborator)
-        .filter(ProjectCollaborator.project_id == project_id, ProjectCollaborator.user_id == user_id)
+        .filter(
+            ProjectCollaborator.project_id == project_id,
+            ProjectCollaborator.user_id == user_id,
+            ProjectCollaborator.status == ACCEPTED_STATUS,
+        )
         .first()
     )
     return collab.role if collab else None
@@ -47,7 +54,7 @@ def accessible_project_ids(db: Session, user_id: uuid.UUID) -> list[uuid.UUID]:
     owned = [pid for (pid,) in db.query(Project.id).filter(Project.owner_id == user_id).all()]
     shared = [
         pid for (pid,) in db.query(ProjectCollaborator.project_id)
-        .filter(ProjectCollaborator.user_id == user_id)
+        .filter(ProjectCollaborator.user_id == user_id, ProjectCollaborator.status == ACCEPTED_STATUS)
         .all()
     ]
     return list(dict.fromkeys([*owned, *shared]))
@@ -86,7 +93,9 @@ def _project_collaborators(db: Session, project_id: uuid.UUID) -> list[dict]:
             "email": email,
             "display_name": display_name,
             "role": row.role,
+            "status": row.status,
             "created_at": row.created_at,
+            "accepted_at": row.accepted_at,
         }
         for row, email, display_name in rows
     ]
@@ -109,7 +118,10 @@ def list_projects(db: Session, owner_id: uuid.UUID) -> list[dict]:
     projects = (
         db.query(Project)
         .outerjoin(ProjectCollaborator, ProjectCollaborator.project_id == Project.id)
-        .filter(or_(Project.owner_id == owner_id, ProjectCollaborator.user_id == owner_id))
+        .filter(or_(
+            Project.owner_id == owner_id,
+            (ProjectCollaborator.user_id == owner_id) & (ProjectCollaborator.status == ACCEPTED_STATUS),
+        ))
         .order_by(Project.created_at.asc())
         .distinct()
         .all()
@@ -168,9 +180,17 @@ def add_collaborator(db: Session, project_id: uuid.UUID, owner_id: uuid.UUID, us
     )
     if existing:
         existing.role = role
+        existing.status = PENDING_STATUS
+        existing.accepted_at = None
         row = existing
     else:
-        row = ProjectCollaborator(project_id=project_id, user_id=user_id, role=role, added_by_id=owner_id)
+        row = ProjectCollaborator(
+            project_id=project_id,
+            user_id=user_id,
+            role=role,
+            status=PENDING_STATUS,
+            added_by_id=owner_id,
+        )
         db.add(row)
     db.commit()
     db.refresh(row)
@@ -197,6 +217,67 @@ def list_collaborators(db: Session, project_id: uuid.UUID, user_id: uuid.UUID) -
     return _project_collaborators(db, project_id)
 
 
+def list_invitations(db: Session, user_id: uuid.UUID) -> list[dict]:
+    rows = (
+        db.query(ProjectCollaborator, Project, User.display_name, User.email)
+        .join(Project, ProjectCollaborator.project_id == Project.id)
+        .join(User, Project.owner_id == User.id)
+        .filter(ProjectCollaborator.user_id == user_id, ProjectCollaborator.status == PENDING_STATUS)
+        .order_by(ProjectCollaborator.created_at.desc())
+        .all()
+    )
+    return [
+        {
+            "id": row.id,
+            "project_id": project.id,
+            "project_name": project.name,
+            "project_description": project.description,
+            "owner_name": owner_name,
+            "owner_email": owner_email,
+            "role": row.role,
+            "created_at": row.created_at,
+        }
+        for row, project, owner_name, owner_email in rows
+    ]
+
+
+def accept_invitation(db: Session, invitation_id: uuid.UUID, user_id: uuid.UUID) -> dict:
+    row = (
+        db.query(ProjectCollaborator)
+        .filter(
+            ProjectCollaborator.id == invitation_id,
+            ProjectCollaborator.user_id == user_id,
+            ProjectCollaborator.status == PENDING_STATUS,
+        )
+        .first()
+    )
+    if not row:
+        raise NotFoundError("Project invitation", str(invitation_id))
+    row.status = ACCEPTED_STATUS
+    row.accepted_at = datetime.now(timezone.utc)
+    db.commit()
+    project = db.query(Project).filter(Project.id == row.project_id).first()
+    if not project:
+        raise NotFoundError("Project", str(row.project_id))
+    return _project_response(db, project, user_id)
+
+
+def reject_invitation(db: Session, invitation_id: uuid.UUID, user_id: uuid.UUID) -> None:
+    row = (
+        db.query(ProjectCollaborator)
+        .filter(
+            ProjectCollaborator.id == invitation_id,
+            ProjectCollaborator.user_id == user_id,
+            ProjectCollaborator.status == PENDING_STATUS,
+        )
+        .first()
+    )
+    if not row:
+        raise NotFoundError("Project invitation", str(invitation_id))
+    db.delete(row)
+    db.commit()
+
+
 def search_users(db: Session, current_user_id: uuid.UUID, q: str, limit: int = 8) -> list[dict]:
     q = (q or "").strip()
     if len(q) < 2:
@@ -218,20 +299,36 @@ def search_users(db: Session, current_user_id: uuid.UUID, q: str, limit: int = 8
 
 
 def create_project(db: Session, owner_id: uuid.UUID, name: str, description: str | None,
-                   collaborator_ids: list[uuid.UUID] | None = None) -> dict:
+                   collaborator_ids: list[uuid.UUID] | None = None,
+                   collaborators: list | None = None) -> dict:
     p = Project(owner_id=owner_id, name=name, description=description)
     db.add(p)
     db.flush()
-    for user_id in dict.fromkeys(collaborator_ids or []):
+    invite_specs = [{"user_id": user_id, "role": "editor"} for user_id in (collaborator_ids or [])]
+    for item in collaborators or []:
+        invite_specs.append({"user_id": item.user_id, "role": item.role})
+    seen: set[uuid.UUID] = set()
+    for item in invite_specs:
+        user_id = item["user_id"]
+        role = item.get("role") if item.get("role") in {"editor", "viewer"} else "editor"
         if user_id == owner_id:
             continue
+        if user_id in seen:
+            continue
+        seen.add(user_id)
         user = (
             db.query(User.id)
             .filter(User.id == user_id, User.is_active.is_(True), User.is_approved.is_(True))
             .first()
         )
         if user:
-            db.add(ProjectCollaborator(project_id=p.id, user_id=user_id, role="editor", added_by_id=owner_id))
+            db.add(ProjectCollaborator(
+                project_id=p.id,
+                user_id=user_id,
+                role=role,
+                status=PENDING_STATUS,
+                added_by_id=owner_id,
+            ))
     db.commit()
     db.refresh(p)
     return _project_response(db, p, owner_id)

@@ -4,7 +4,7 @@ import type {
   FigureListItem, FigureDetail, FigureVersion, Review, Improvement, AdminUser, AIConfig, GalleryFigureItem, AuditLogItem,
   ClientErrorItem, Project, ProjectListItem, EmailDeliveryStatus,
   MembershipItem, MyOrganizationItem, OrganizationAIConfig, OrganizationItem, OrganizationSearchItem, OrganizationUsageSummary, OrganizationUserSearchItem,
-  ProjectCollaborator, ProjectUserSearchItem, GalleryTemplate,
+  ProjectCollaborator, ProjectInvitation, ProjectUserSearchItem, GalleryTemplate,
 } from './types';
 
 // Same-origin by default; Caddy proxies /api and /static to the backend.
@@ -163,7 +163,7 @@ export async function getOrganizationUsage(id: string): Promise<OrganizationUsag
 // ── projects ──
 export async function listProjects(): Promise<ProjectListItem[]> { return fetcher('/api/projects'); }
 export async function getProject(id: string): Promise<Project> { return fetcher(`/api/projects/${id}`); }
-export async function createProject(data: { name: string; description?: string; collaborator_ids?: string[] }): Promise<Project> {
+export async function createProject(data: { name: string; description?: string; collaborator_ids?: string[]; collaborators?: { user_id: string; role: 'editor' | 'viewer' }[] }): Promise<Project> {
   return fetcher('/api/projects', { method: 'POST', body: JSON.stringify(data) });
 }
 export async function updateProject(id: string, data: { name?: string; description?: string }): Promise<Project> {
@@ -181,6 +181,15 @@ export async function addProjectCollaborator(projectId: string, userId: string, 
 }
 export async function removeProjectCollaborator(projectId: string, collaboratorId: string): Promise<void> {
   return fetcher(`/api/projects/${projectId}/collaborators/${collaboratorId}`, { method: 'DELETE' });
+}
+export async function listProjectInvitations(): Promise<ProjectInvitation[]> {
+  return fetcher('/api/projects/invitations');
+}
+export async function acceptProjectInvitation(invitationId: string): Promise<Project> {
+  return fetcher(`/api/projects/invitations/${invitationId}/accept`, { method: 'POST' });
+}
+export async function rejectProjectInvitation(invitationId: string): Promise<void> {
+  return fetcher(`/api/projects/invitations/${invitationId}/reject`, { method: 'POST' });
 }
 export async function downloadProjectPack(projectId: string, name: string): Promise<void> {
   const headers: Record<string, string> = {};

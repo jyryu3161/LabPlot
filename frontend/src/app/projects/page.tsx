@@ -4,8 +4,8 @@ import { useState } from 'react';
 import Link from 'next/link';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { listProjects, createProject, deleteProject } from '@/lib/api';
-import type { ProjectUserSearchItem } from '@/lib/types';
+import { acceptProjectInvitation, createProject, deleteProject, listProjectInvitations, listProjects, rejectProjectInvitation } from '@/lib/api';
+import type { ProjectInviteDraft } from '@/lib/types';
 import { AppHeader } from '@/components/layout/AppHeader';
 import { ProjectCollaboratorPicker } from '@/components/projects/ProjectCollaboratorPicker';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -13,18 +13,23 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
-import { Loader2, FolderKanban, Plus, Trash2, Database, Images } from 'lucide-react';
+import { Check, Loader2, FolderKanban, Plus, Trash2, Database, Images, X } from 'lucide-react';
 
 export default function ProjectsPage() {
   const qc = useQueryClient();
   const { data: projects, isLoading } = useQuery({ queryKey: ['projects'], queryFn: listProjects });
+  const { data: invitations } = useQuery({ queryKey: ['project-invitations'], queryFn: listProjectInvitations });
   const [name, setName] = useState('');
   const [desc, setDesc] = useState('');
   const [open, setOpen] = useState(false);
-  const [collaborators, setCollaborators] = useState<ProjectUserSearchItem[]>([]);
+  const [collaborators, setCollaborators] = useState<ProjectInviteDraft[]>([]);
 
   const create = useMutation({
-    mutationFn: () => createProject({ name, description: desc || undefined, collaborator_ids: collaborators.map((user) => user.id) }),
+    mutationFn: () => createProject({
+      name,
+      description: desc || undefined,
+      collaborators: collaborators.map((user) => ({ user_id: user.id, role: user.role })),
+    }),
     onSuccess: () => {
       toast.success('Project created');
       setName('');
@@ -39,6 +44,23 @@ export default function ProjectsPage() {
     mutationFn: deleteProject,
     onSuccess: () => { toast.success('Project deleted'); qc.invalidateQueries({ queryKey: ['projects'] }); },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Delete failed'),
+  });
+  const accept = useMutation({
+    mutationFn: acceptProjectInvitation,
+    onSuccess: () => {
+      toast.success('Invitation accepted');
+      qc.invalidateQueries({ queryKey: ['projects'] });
+      qc.invalidateQueries({ queryKey: ['project-invitations'] });
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Accept failed'),
+  });
+  const reject = useMutation({
+    mutationFn: rejectProjectInvitation,
+    onSuccess: () => {
+      toast.success('Invitation declined');
+      qc.invalidateQueries({ queryKey: ['project-invitations'] });
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Decline failed'),
   });
 
   return (
@@ -68,6 +90,32 @@ export default function ProjectsPage() {
           </Card>
         )}
 
+        {!!invitations?.length && (
+          <Card className="mb-6 border-primary/25">
+            <CardHeader className="pb-2"><CardTitle className="text-base">Project invitations</CardTitle></CardHeader>
+            <CardContent className="grid gap-3">
+              {invitations.map((invite) => (
+                <div key={invite.id} className="flex flex-col gap-3 rounded-lg border bg-background p-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="min-w-0">
+                    <p className="font-medium">{invite.project_name}</p>
+                    <p className="text-xs text-muted-foreground">
+                      Invited by {invite.owner_name} ({invite.owner_email}) as {invite.role}
+                    </p>
+                  </div>
+                  <div className="flex gap-2">
+                    <Button size="sm" onClick={() => accept.mutate(invite.id)} disabled={accept.isPending}>
+                      <Check className="mr-1 h-4 w-4" /> Accept
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={() => reject.mutate(invite.id)} disabled={reject.isPending}>
+                      <X className="mr-1 h-4 w-4" /> Decline
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+        )}
+
         {isLoading ? (
           <div className="flex justify-center py-12"><Loader2 className="h-6 w-6 animate-spin" /></div>
         ) : !projects?.length ? (
@@ -84,9 +132,11 @@ export default function ProjectsPage() {
                       <FolderKanban className="h-4 w-4 shrink-0 text-primary" />
                       <span className="break-words">{p.name}</span>
                     </CardTitle>
-                    <Button variant="ghost" size="sm" onClick={() => { if (confirm(`Delete project "${p.name}" and all its datasets/figures?`)) del.mutate(p.id); }}>
-                      <Trash2 className="h-4 w-4 text-muted-foreground" />
-                    </Button>
+                    {p.role === 'owner' && (
+                      <Button variant="ghost" size="sm" onClick={() => { if (confirm(`Delete project "${p.name}" and all its datasets/figures?`)) del.mutate(p.id); }}>
+                        <Trash2 className="h-4 w-4 text-muted-foreground" />
+                      </Button>
+                    )}
                   </div>
                   {p.description && <p className="text-xs text-muted-foreground">{p.description}</p>}
                 </CardHeader>

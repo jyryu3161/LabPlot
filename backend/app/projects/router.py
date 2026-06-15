@@ -11,6 +11,7 @@ from app.projects.schemas import (
     ProjectCollaboratorCreate,
     ProjectCollaboratorItem,
     ProjectCreate,
+    ProjectInvitationItem,
     ProjectListItem,
     ProjectResponse,
     ProjectUpdate,
@@ -28,12 +29,27 @@ def list_projects(db: Session = Depends(get_db), current_user: User = Depends(ge
 
 @router.post("", response_model=ProjectResponse, status_code=201)
 def create_project(data: ProjectCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    return service.create_project(db, current_user.id, data.name, data.description, data.collaborator_ids)
+    return service.create_project(db, current_user.id, data.name, data.description, data.collaborator_ids, data.collaborators)
 
 
 @router.get("/collaborators/search", response_model=list[ProjectUserSearchItem])
 def search_project_collaborators(q: str, limit: int = 8, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     return service.search_users(db, current_user.id, q, limit=limit)
+
+
+@router.get("/invitations", response_model=list[ProjectInvitationItem])
+def list_project_invitations(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    return service.list_invitations(db, current_user.id)
+
+
+@router.post("/invitations/{invitation_id}/accept", response_model=ProjectResponse)
+def accept_project_invitation(invitation_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    return service.accept_invitation(db, invitation_id, current_user.id)
+
+
+@router.post("/invitations/{invitation_id}/reject", status_code=204)
+def reject_project_invitation(invitation_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    service.reject_invitation(db, invitation_id, current_user.id)
 
 
 @router.get("/{project_id}", response_model=ProjectResponse)

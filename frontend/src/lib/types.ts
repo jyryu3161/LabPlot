@@ -118,13 +118,30 @@ export interface ProjectCollaborator {
   email: string;
   display_name: string;
   role: 'editor' | 'viewer';
+  status: 'pending' | 'accepted';
   created_at: string;
+  accepted_at?: string;
 }
 
 export interface ProjectUserSearchItem {
   id: string;
   email: string;
   display_name: string;
+}
+
+export interface ProjectInvitation {
+  id: string;
+  project_id: string;
+  project_name: string;
+  project_description?: string;
+  owner_name: string;
+  owner_email: string;
+  role: 'editor' | 'viewer';
+  created_at: string;
+}
+
+export interface ProjectInviteDraft extends ProjectUserSearchItem {
+  role: 'editor' | 'viewer';
 }
 
 export interface Project {

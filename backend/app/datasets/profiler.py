@@ -42,6 +42,20 @@ def _is_status_like(series: pd.Series) -> bool:
     return sset.issubset(binary_words)
 
 
+def _numeric_like_series(series: pd.Series) -> pd.Series | None:
+    if series.dtype.kind in ("i", "u", "f"):
+        return series
+    if series.dtype.kind != "O":
+        return None
+    present = series.notna() & series.astype(str).str.strip().ne("")
+    if not bool(present.any()):
+        return None
+    converted = pd.to_numeric(series, errors="coerce")
+    if bool(converted[present].notna().all()):
+        return converted
+    return None
+
+
 def _detect_role(name: str, series: pd.Series, dtype_kind: str, n_unique: int, n_rows: int) -> str:
     lname = name.strip().lower()
     is_numeric = dtype_kind in ("i", "f", "u")
@@ -58,7 +72,7 @@ def _detect_role(name: str, series: pd.Series, dtype_kind: str, n_unique: int, n
         return "status"
     if _TIME_RE.search(lname):
         return "time"
-    if not is_numeric and _GENE_RE.search(lname) and n_unique > max(10, 0.5 * n_rows):
+    if _GENE_RE.search(lname) and n_unique > max(10, 0.5 * n_rows):
         return "gene"
     if not is_numeric and _GROUP_RE.search(lname):
         return "group"
@@ -81,11 +95,13 @@ def profile_dataframe(df: pd.DataFrame, preview_rows: int = 20) -> dict:
     columns = []
     for col in df.columns:
         series = df[col]
-        dtype_kind = series.dtype.kind  # i,u,f,O,b,M
+        numeric_series = _numeric_like_series(series)
+        profile_series = numeric_series if numeric_series is not None else series
+        dtype_kind = profile_series.dtype.kind  # i,u,f,O,b,M
         is_numeric = dtype_kind in ("i", "u", "f")
-        n_unique = int(series.nunique(dropna=True))
+        n_unique = int(profile_series.nunique(dropna=True))
         n_missing = int(series.isna().sum())
-        role = _detect_role(str(col), series, dtype_kind, n_unique, n_rows)
+        role = _detect_role(str(col), profile_series, dtype_kind, n_unique, n_rows)
 
         if is_numeric:
             dtype = "numeric"
@@ -98,7 +114,7 @@ def profile_dataframe(df: pd.DataFrame, preview_rows: int = 20) -> dict:
 
         stats = None
         if is_numeric and n_rows - n_missing > 0:
-            non_null = series.dropna()
+            non_null = profile_series.dropna()
             stats = {
                 "min": _clean(non_null.min()),
                 "max": _clean(non_null.max()),

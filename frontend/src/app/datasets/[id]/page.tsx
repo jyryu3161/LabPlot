@@ -7,7 +7,7 @@ import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import {
   getDataset, getChartSuggestions, recommendCharts, getPlotTypes, getStyles,
-  createFigure, listFigures, updateDataset, recommendChartsFromImage,
+  createFigure, getProject, getPublicGallery, getPublicGalleryTemplate, listFigures, updateDataset, recommendChartsFromImage,
 } from '@/lib/api';
 import { Textarea } from '@/components/ui/textarea';
 import type { ChartSuggestion, PlotTypeDef } from '@/lib/types';
@@ -29,6 +29,41 @@ const ROLE_COLORS: Record<string, string> = {
   pvalue: 'bg-pink-100 text-pink-700', gene: 'bg-amber-100 text-amber-700', text: 'bg-gray-100 text-gray-600',
 };
 
+function fieldMatchesColumn(field: { roles: string[] }, column: { role: string; dtype: string }) {
+  return field.roles.includes(column.role) || field.roles.includes(column.dtype);
+}
+
+function plotFitsColumns(plot: PlotTypeDef, columns: { role: string; dtype: string }[]) {
+  return plot.required.every((field) => columns.some((column) => fieldMatchesColumn(field, column)));
+}
+
+function defaultOptions(def: PlotTypeDef | undefined) {
+  const options: Record<string, unknown> = {};
+  def?.options.forEach((option) => {
+    if (option.default !== undefined) options[option.key] = option.default;
+  });
+  return options;
+}
+
+function suggestedMapping(def: PlotTypeDef | undefined, columns: { name: string; role: string; dtype: string }[]) {
+  if (!def) return {};
+  const used = new Set<string>();
+  const mapping: Record<string, unknown> = {};
+  for (const field of [...def.required, ...def.optional]) {
+    const matches = columns.filter((column) => fieldMatchesColumn(field, column));
+    if (field.multi) {
+      if (matches.length) mapping[field.key] = matches.map((column) => column.name).slice(0, 8);
+      continue;
+    }
+    const match = matches.find((column) => !used.has(column.name));
+    if (match) {
+      mapping[field.key] = match.name;
+      used.add(match.name);
+    }
+  }
+  return mapping;
+}
+
 export default function DatasetDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const router = useRouter();
@@ -41,6 +76,15 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
     queryKey: ['figures', ds?.project_id ?? 'all'],
     queryFn: () => listFigures(ds?.project_id ?? undefined),
     enabled: !!ds,
+  });
+  const { data: project } = useQuery({
+    queryKey: ['project', ds?.project_id],
+    queryFn: () => getProject(ds!.project_id!),
+    enabled: !!ds?.project_id,
+  });
+  const { data: galleryTemplates } = useQuery({
+    queryKey: ['public-gallery', 'dataset-templates', 60],
+    queryFn: () => getPublicGallery(60),
   });
 
   const [aiSug, setAiSug] = useState<ChartSuggestion[] | null>(null);
@@ -76,6 +120,13 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
   const plotTypes = useMemo(() => plotTypesData?.plot_types ?? [], [plotTypesData?.plot_types]);
   const styles = useMemo(() => stylesData?.styles ?? [], [stylesData?.styles]);
   const columns = useMemo(() => ds?.column_profile ?? [], [ds?.column_profile]);
+  const canEditDataset = ds?.project_id ? project?.role === 'owner' || project?.role === 'editor' : true;
+  const compatiblePlotTypes = useMemo(() => plotTypes.filter((plot) => plotFitsColumns(plot, columns)), [columns, plotTypes]);
+  const compatiblePlotTypeSet = useMemo(() => new Set(compatiblePlotTypes.map((plot) => plot.type)), [compatiblePlotTypes]);
+  const compatibleGalleryTemplates = useMemo(
+    () => (galleryTemplates?.figures ?? []).filter((figure) => compatiblePlotTypeSet.has(figure.plot_type)).slice(0, 6),
+    [compatiblePlotTypeSet, galleryTemplates?.figures],
+  );
   const savedFocusColumns = useMemo(() => ds?.focus_columns ?? [], [ds?.focus_columns]);
   const focusColumns = focusColumnsDraft ?? savedFocusColumns;
   const savedFocusSet = useMemo(() => new Set(savedFocusColumns), [savedFocusColumns]);
@@ -127,17 +178,34 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
 
   const currentDef: PlotTypeDef | undefined = useMemo(
     () => plotTypes.find((p) => p.type === plotType), [plotTypes, plotType]);
+  const missingRequiredFields = useMemo(() => (currentDef?.required ?? []).filter((field) => {
+    const value = mapping[field.key];
+    return field.multi ? !Array.isArray(value) || value.length === 0 : !value;
+  }), [currentDef?.required, mapping]);
 
   function selectPlotType(pt: string, presetMapping?: Record<string, unknown>) {
     const def = plotTypes.find((p) => p.type === pt);
     setPlotType(pt);
     setMapping(presetMapping ? { ...presetMapping } : {});
-    const opt: Record<string, unknown> = {};
-    def?.options.forEach((o) => { if (o.default !== undefined) opt[o.key] = o.default; });
-    setOptions(opt);
+    setOptions(defaultOptions(def));
     if (!name) setName(`${ds?.name ?? 'figure'} - ${def?.label ?? pt}`);
     document.getElementById('builder')?.scrollIntoView({ behavior: 'smooth' });
   }
+
+  const applyGalleryTemplate = useMutation({
+    mutationFn: (figureId: string) => getPublicGalleryTemplate(figureId),
+    onSuccess: (template) => {
+      const def = plotTypes.find((plot) => plot.type === template.plot_type);
+      setPlotType(template.plot_type);
+      setMapping(suggestedMapping(def, columns));
+      setOptions({ ...defaultOptions(def), ...(template.options ?? {}) });
+      setStyle(template.style_preset);
+      setName(`${ds?.name ?? 'figure'} - ${template.name}`);
+      document.getElementById('builder')?.scrollIntoView({ behavior: 'smooth' });
+      toast.success('Template applied');
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Template failed'),
+  });
 
   function applySuggestion(s: ChartSuggestion) {
     selectPlotType(s.plot_type, (s.suggested_mapping as Record<string, unknown>) || {});
@@ -250,9 +318,11 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
             <Card>
               <CardHeader className="pb-2"><CardTitle className="text-base">Dataset description</CardTitle></CardHeader>
               <CardContent className="space-y-2">
-                <Textarea value={dsDescValue} onChange={(e) => setDsDesc(e.target.value)} rows={2}
+                <Textarea value={dsDescValue} onChange={(e) => setDsDesc(e.target.value)} rows={2} readOnly={!canEditDataset}
                   placeholder="Describe what this dataset contains. AI recommendations, reviews, and legends use this context." />
-                <Button size="sm" variant="secondary" onClick={() => saveDsDesc.mutate()} disabled={saveDsDesc.isPending}>Save description</Button>
+                {canEditDataset ? (
+                  <Button size="sm" variant="secondary" onClick={() => saveDsDesc.mutate()} disabled={saveDsDesc.isPending}>Save description</Button>
+                ) : <p className="text-xs text-muted-foreground">Viewer access is read-only.</p>}
               </CardContent>
             </Card>
             <Card>
@@ -336,7 +406,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                     </div>
                     <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
                       <Button variant="outline" onClick={() => setFocusColumnsDraft(null)}>Reset</Button>
-                      <Button onClick={() => saveFocusColumns.mutate()} disabled={saveFocusColumns.isPending}>
+                      <Button onClick={() => saveFocusColumns.mutate()} disabled={saveFocusColumns.isPending || !canEditDataset}>
                         {saveFocusColumns.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
                         Save focus
                       </Button>
@@ -359,6 +429,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                   <div className="grid min-w-0 gap-3 md:grid-cols-[1fr_1.2fr]">
                     <div className="space-y-1">
                       <Label>Reference figure image</Label>
+                      <p className="text-xs text-muted-foreground">Optional screenshot of a figure style you want to imitate. This is not a data upload.</p>
                       <Input
                         type="file"
                         accept="image/png,image/jpeg,image/webp"
@@ -393,7 +464,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                           <Clipboard className="h-5 w-5 text-primary" />
                           <div>
                             <p className="text-sm font-medium">Paste screenshot here</p>
-                            <p className="text-xs text-muted-foreground">Click this box, then paste a copied PNG/JPEG/WebP image.</p>
+                            <p className="text-xs text-muted-foreground">Paste a copied graph screenshot; LabPlot will suggest similar chart types for your data.</p>
                           </div>
                         </>
                       )}
@@ -445,6 +516,26 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
               </CardContent>
             </Card>
 
+            {compatibleGalleryTemplates.length > 0 && (
+              <Card>
+                <CardHeader><CardTitle className="text-base">Templates that fit this data</CardTitle></CardHeader>
+                <CardContent className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                  {compatibleGalleryTemplates.map((template) => (
+                    <button
+                      key={template.id}
+                      type="button"
+                      onClick={() => applyGalleryTemplate.mutate(template.id)}
+                      className="rounded-lg border bg-background p-3 text-left transition hover:border-primary hover:shadow-sm"
+                    >
+                      <img src={template.thumb_url} alt={template.name} className="mb-2 aspect-[4/3] w-full rounded border bg-white object-contain" />
+                      <p className="truncate text-sm font-medium">{template.name}</p>
+                      <p className="text-xs text-muted-foreground">{template.plot_type.replace(/_/g, ' ')}</p>
+                    </button>
+                  ))}
+                </CardContent>
+              </Card>
+            )}
+
             {/* ── Builder ── */}
             <Card id="builder">
               <CardHeader><CardTitle className="text-base">Chart builder</CardTitle></CardHeader>
@@ -454,8 +545,12 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                     <Label>Chart type</Label>
                     <select className="w-full rounded-md border px-3 py-2 text-sm" value={plotType} onChange={(e) => selectPlotType(e.target.value)}>
                       <option value="">Select a chart type…</option>
-                      {plotTypes.map((p) => <option key={p.type} value={p.type}>{p.label}</option>)}
+                      {plotTypes.map((p) => {
+                        const compatible = compatiblePlotTypeSet.has(p.type);
+                        return <option key={p.type} value={p.type} disabled={!compatible}>{p.label}{compatible ? '' : ' (needs different data)'}</option>;
+                      })}
                     </select>
+                    <p className="text-xs text-muted-foreground">{compatiblePlotTypes.length} chart types match the detected columns.</p>
                   </div>
                   <div className="space-y-1">
                     <Label>Figure name</Label>
@@ -533,7 +628,13 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                       </div>
                     </div>
 
-                    <Button onClick={() => create.mutate()} disabled={create.isPending} className="w-full">
+                    {missingRequiredFields.length > 0 && (
+                      <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                        Select required columns for: {missingRequiredFields.map((field) => field.label).join(', ')}.
+                      </div>
+                    )}
+                    {!canEditDataset && <p className="text-sm text-muted-foreground">Viewer access can inspect this dataset but cannot generate new figures.</p>}
+                    <Button onClick={() => create.mutate()} disabled={create.isPending || !canEditDataset || missingRequiredFields.length > 0} className="w-full">
                       {create.isPending ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Rendering…</> : 'Generate figure'}
                     </Button>
                   </>
