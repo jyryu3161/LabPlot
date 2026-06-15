@@ -1,3 +1,4 @@
+import json
 import uuid
 
 from fastapi import APIRouter, Depends, File, Request, UploadFile
@@ -12,7 +13,7 @@ from app.common.quotas import enforce_storage_quota
 from app.common.security import rate_limit
 from app.config import settings
 from app.datasets import service
-from app.datasets.schemas import DatasetListItem, DatasetResponse, DatasetUpdate
+from app.datasets.schemas import DatasetListItem, DatasetPreviewResponse, DatasetResponse, DatasetUpdate
 from app.projects import service as project_service
 from app.recommend import rules
 
@@ -34,6 +35,59 @@ async def _read_upload_limited(file: UploadFile) -> bytes:
     return b"".join(chunks)
 
 
+def _ingest_options_from_form(
+    sheet_name: str | None,
+    header_row: int | None,
+    data_start_row: int | None,
+    end_row: int | None,
+    start_col: int | None,
+    end_col: int | None,
+) -> dict:
+    options = {}
+    if sheet_name:
+        options["sheet_name"] = sheet_name
+    for key, value in {
+        "header_row": header_row,
+        "data_start_row": data_start_row,
+        "end_row": end_row,
+        "start_col": start_col,
+        "end_col": end_col,
+    }.items():
+        if value is not None:
+            options[key] = value
+    return options
+
+
+def _focus_columns_from_form(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return [str(item) for item in parsed if isinstance(item, str)]
+    except json.JSONDecodeError:
+        pass
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+@router.post("/preview", response_model=DatasetPreviewResponse)
+async def preview_dataset_upload(
+    file: UploadFile = File(...),
+    sheet_name: str | None = Form(None),
+    header_row: int | None = Form(None),
+    data_start_row: int | None = Form(None),
+    end_row: int | None = Form(None),
+    start_col: int | None = Form(None),
+    end_col: int | None = Form(None),
+    current_user: User = Depends(get_current_user),
+    _: None = Depends(rate_limit("dataset_preview", 80, 3600)),
+):
+    _ = current_user
+    content = await _read_upload_limited(file)
+    options = _ingest_options_from_form(sheet_name, header_row, data_start_row, end_row, start_col, end_col)
+    return service.preview_upload(file.filename, content, options)
+
+
 @router.post("", response_model=DatasetResponse, status_code=201)
 async def upload_dataset(
     request: Request,
@@ -41,6 +95,13 @@ async def upload_dataset(
     name: str | None = Form(None),
     description: str | None = Form(None),
     project_id: uuid.UUID | None = Form(None),
+    sheet_name: str | None = Form(None),
+    header_row: int | None = Form(None),
+    data_start_row: int | None = Form(None),
+    end_row: int | None = Form(None),
+    start_col: int | None = Form(None),
+    end_col: int | None = Form(None),
+    focus_columns: str | None = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     _: None = Depends(rate_limit("dataset_upload", 30, 3600)),
@@ -51,8 +112,11 @@ async def upload_dataset(
         project_service.get_project(db, project_id, current_user.id)  # ownership check
     content = await _read_upload_limited(file)
     enforce_storage_quota(db, current_user, len(content))
+    options = _ingest_options_from_form(sheet_name, header_row, data_start_row, end_row, start_col, end_col)
+    focus = _focus_columns_from_form(focus_columns)
     ds = service.create_dataset(db, current_user.id, file.filename, content,
-                                name=name, project_id=project_id, description=description)
+                                name=name, project_id=project_id, description=description,
+                                ingest_options=options, focus_columns=focus)
     audit_service.log_event(
         db,
         actor_id=current_user.id,
@@ -91,4 +155,4 @@ def delete_dataset(dataset_id: uuid.UUID, request: Request, db: Session = Depend
 @router.get("/{dataset_id}/chart-suggestions")
 def chart_suggestions(dataset_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     ds = service.get_dataset(db, dataset_id, current_user.id)
-    return {"suggestions": rules.suggest_charts(ds.column_profile)}
+    return {"suggestions": rules.suggest_charts(service.focused_column_profile(ds))}

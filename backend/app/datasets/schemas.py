@@ -18,6 +18,20 @@ class ColumnProfile(BaseModel):
 class DatasetUpdate(BaseModel):
     name: str | None = None
     description: str | None = None
+    focus_columns: list[str] | None = None
+
+
+class DatasetPreviewResponse(BaseModel):
+    filename: str
+    format: str
+    sheets: list[str] = Field(default_factory=list)
+    selected_sheet: str | None = None
+    ingest_options: dict[str, Any]
+    raw_preview: list[list[Any]]
+    parsed_preview: list[dict[str, Any]]
+    column_profile: list[dict[str, Any]]
+    n_rows: int
+    n_cols: int
 
 
 class DatasetListItem(BaseModel):
@@ -48,4 +62,6 @@ class DatasetResponse(BaseModel):
     column_profile: list[dict[str, Any]]
     preview: list[dict[str, Any]]
     statistics: dict[str, Any] | None = None
+    ingest_options: dict[str, Any] = Field(default_factory=dict)
+    focus_columns: list[str] = Field(default_factory=list)
     created_at: datetime

@@ -1,62 +1,44 @@
 'use client';
 
-import { use, useCallback, useEffect, useState } from 'react';
+import { use, useState } from 'react';
 import Link from 'next/link';
-import { useDropzone } from 'react-dropzone';
+import { useRouter } from 'next/navigation';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { getProject, updateProject, listDatasets, listFigures, uploadDataset, deleteDataset, deleteFigure, downloadProjectPack, enhancePrompt } from '@/lib/api';
+import { getProject, updateProject, listDatasets, listFigures, deleteDataset, deleteFigure, downloadProjectPack, enhancePrompt } from '@/lib/api';
 import { AppHeader } from '@/components/layout/AppHeader';
+import { DatasetUploadWizard } from '@/components/datasets/DatasetUploadWizard';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Loader2, UploadCloud, FileSpreadsheet, Trash2, Images, Database, Package, FlaskConical, Sparkles } from 'lucide-react';
+import { Loader2, FileSpreadsheet, Trash2, Images, Database, Package, FlaskConical, Sparkles } from 'lucide-react';
 import { formatStylePreset } from '@/lib/style-presets';
 
 export default function ProjectWorkspace({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
+  const router = useRouter();
   const qc = useQueryClient();
   const { data: project } = useQuery({ queryKey: ['project', id], queryFn: () => getProject(id) });
   const { data: datasets, isLoading: dsLoading } = useQuery({ queryKey: ['datasets', id], queryFn: () => listDatasets(id) });
   const { data: figures } = useQuery({ queryKey: ['figures', id], queryFn: () => listFigures(id) });
-  const [uploading, setUploading] = useState(false);
   const [uploadDesc, setUploadDesc] = useState('');
-
-  const onDrop = useCallback(async (files: File[]) => {
-    if (!files.length) return;
-    setUploading(true);
-    try {
-      for (const f of files) await uploadDataset(f, id, uploadDesc || undefined);
-      toast.success(`${files.length} dataset(s) uploaded`);
-      setUploadDesc('');
-      qc.invalidateQueries({ queryKey: ['datasets', id] });
-      qc.invalidateQueries({ queryKey: ['project', id] });
-    } catch (e) { toast.error(e instanceof Error ? e.message : 'Upload failed'); }
-    finally { setUploading(false); }
-  }, [qc, id, uploadDesc]);
-
-  const { getRootProps, getInputProps, isDragActive } = useDropzone({
-    onDrop,
-    accept: { 'text/csv': ['.csv'], 'text/tab-separated-values': ['.tsv'], 'text/plain': ['.txt'],
-      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'] },
-  });
 
   const delDs = useMutation({ mutationFn: deleteDataset, onSuccess: () => { toast.success('Dataset deleted'); qc.invalidateQueries({ queryKey: ['datasets', id] }); } });
   const delFig = useMutation({ mutationFn: deleteFigure, onSuccess: () => { toast.success('Figure deleted'); qc.invalidateQueries({ queryKey: ['figures', id] }); } });
 
-  const [desc, setDesc] = useState('');
-  useEffect(() => { if (project) setDesc((d) => (d || project.description || '')); }, [project]);
+  const [descDraft, setDescDraft] = useState<string | null>(null);
+  const desc = descDraft ?? project?.description ?? '';
   const saveDesc = useMutation({
     mutationFn: () => updateProject(id, { description: desc }),
-    onSuccess: () => { toast.success('Research description saved'); qc.invalidateQueries({ queryKey: ['project', id] }); },
+    onSuccess: () => { toast.success('Research description saved'); setDescDraft(null); qc.invalidateQueries({ queryKey: ['project', id] }); },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Save failed'),
   });
   const enhanceDesc = useMutation({
     mutationFn: () => enhancePrompt(desc, 'project'),
-    onSuccess: (r) => { setDesc(r.enhanced); toast.success('Enhanced'); },
+    onSuccess: (r) => { setDescDraft(r.enhanced); toast.success('Enhanced'); },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Enhance failed'),
   });
   const enhanceUpload = useMutation({
@@ -83,7 +65,7 @@ export default function ProjectWorkspace({ params }: { params: Promise<{ id: str
         <Card className="mb-6">
           <CardHeader className="pb-2"><CardTitle className="flex items-center gap-2 text-base"><FlaskConical className="h-4 w-4 text-primary" /> Research description</CardTitle></CardHeader>
           <CardContent className="space-y-2">
-            <Textarea value={desc} onChange={(e) => setDesc(e.target.value)} rows={3}
+            <Textarea value={desc} onChange={(e) => setDescDraft(e.target.value)} rows={3}
               placeholder="Describe the study (organism, design, treatments, hypothesis…). This context is given to the AI to improve chart recommendations, reviews and figure legends." />
             <div className="flex gap-2">
               <Button size="sm" variant="outline" onClick={() => enhanceDesc.mutate()} disabled={enhanceDesc.isPending}>
@@ -111,13 +93,18 @@ export default function ProjectWorkspace({ params }: { params: Promise<{ id: str
                 {enhanceUpload.isPending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Sparkles className="mr-1 h-4 w-4" />} Enhance with AI
               </Button>
             </div>
-            <div {...getRootProps()}
-              className={`flex cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed p-8 transition ${isDragActive ? 'border-primary bg-primary/5' : 'border-muted-foreground/25 hover:border-primary/50'}`}>
-              <input {...getInputProps()} />
-              {uploading ? <Loader2 className="h-7 w-7 animate-spin text-primary" /> : <UploadCloud className="h-7 w-7 text-muted-foreground" />}
-              <p className="mt-2 text-sm font-medium">{isDragActive ? 'Drop here' : 'Upload data to this project'}</p>
-              <p className="text-xs text-muted-foreground">CSV, TSV, TXT, XLSX — statistics computed automatically</p>
-            </div>
+            <DatasetUploadWizard
+              projectId={id}
+              description={uploadDesc}
+              title="Upload data to this project"
+              helper="CSV, TSV, TXT, XLSX. Preview the table before it is saved."
+              onUploaded={async (dataset) => {
+                setUploadDesc('');
+                await qc.invalidateQueries({ queryKey: ['datasets', id] });
+                await qc.invalidateQueries({ queryKey: ['project', id] });
+                router.push(`/datasets/${dataset.id}?setup=1`);
+              }}
+            />
 
             {dsLoading ? <div className="flex justify-center py-8"><Loader2 className="h-6 w-6 animate-spin" /></div>
               : !datasets?.length ? <div className="rounded-lg border border-dashed p-10 text-center text-muted-foreground"><Database className="mx-auto mb-2 h-7 w-7" /> No datasets yet.</div>

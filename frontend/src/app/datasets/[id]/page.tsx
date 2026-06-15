@@ -16,10 +16,11 @@ import { AppHeader } from '@/components/layout/AppHeader';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Clipboard, ImageIcon, Loader2, Sparkles, Wand2, ArrowRight, X } from 'lucide-react';
+import { CheckCircle2, Clipboard, Columns3, ImageIcon, Loader2, Sparkles, Wand2, ArrowRight, X } from 'lucide-react';
 
 const ROLE_COLORS: Record<string, string> = {
   numeric: 'bg-blue-100 text-blue-700', group: 'bg-green-100 text-green-700',
@@ -60,6 +61,11 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
 
   const qc = useQueryClient();
   const [dsDesc, setDsDesc] = useState<string | null>(null);
+  const [showColumnGuide, setShowColumnGuide] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    return new URLSearchParams(window.location.search).get('setup') === '1';
+  });
+  const [focusColumnsDraft, setFocusColumnsDraft] = useState<string[] | null>(null);
   const dsDescValue = dsDesc ?? ds?.description ?? '';
   const saveDsDesc = useMutation({
     mutationFn: () => updateDataset(id, { description: dsDescValue }),
@@ -69,7 +75,15 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
 
   const plotTypes = useMemo(() => plotTypesData?.plot_types ?? [], [plotTypesData?.plot_types]);
   const styles = useMemo(() => stylesData?.styles ?? [], [stylesData?.styles]);
-  const columns = ds?.column_profile ?? [];
+  const columns = useMemo(() => ds?.column_profile ?? [], [ds?.column_profile]);
+  const savedFocusColumns = useMemo(() => ds?.focus_columns ?? [], [ds?.focus_columns]);
+  const focusColumns = focusColumnsDraft ?? savedFocusColumns;
+  const savedFocusSet = useMemo(() => new Set(savedFocusColumns), [savedFocusColumns]);
+  const focusDraftSet = useMemo(() => new Set(focusColumns), [focusColumns]);
+  const suggestedFocusColumns = useMemo(() => {
+    const preferred = columns.filter((c) => c.role !== 'text').map((c) => c.name);
+    return (preferred.length ? preferred : columns.map((c) => c.name)).slice(0, 8);
+  }, [columns]);
   const suggestions = useMemo(() => aiSug ?? ruleSug?.suggestions ?? [], [aiSug, ruleSug?.suggestions]);
   const displayedSuggestions = useMemo(() => (
     suggestions
@@ -88,6 +102,21 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
       if (referencePreviewUrl) URL.revokeObjectURL(referencePreviewUrl);
     };
   }, [referencePreviewUrl]);
+
+  const saveFocusColumns = useMutation({
+    mutationFn: () => updateDataset(id, { focus_columns: focusColumns }),
+    onSuccess: () => {
+      toast.success('Column focus saved');
+      setAiSug(null);
+      setShowColumnGuide(false);
+      qc.setQueryData(['dataset', id], (old: typeof ds | undefined) => old ? { ...old, focus_columns: focusColumns } : old);
+      setFocusColumnsDraft(null);
+      qc.invalidateQueries({ queryKey: ['dataset', id] });
+      qc.invalidateQueries({ queryKey: ['suggest', id] });
+      router.replace(`/datasets/${id}`);
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Save failed'),
+  });
 
   // ── builder state ──
   const [plotType, setPlotType] = useState('');
@@ -121,6 +150,15 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
       return;
     }
     setReferenceFile(file);
+  }
+
+  function toggleFocusColumn(name: string, checked: boolean) {
+    setFocusColumnsDraft((current) => {
+      const base = current ?? savedFocusColumns;
+      return checked
+        ? [...base, name].filter((value, index, arr) => arr.indexOf(value) === index)
+        : base.filter((value) => value !== name);
+    });
   }
 
   function handleReferencePaste(e: React.ClipboardEvent<HTMLDivElement>) {
@@ -249,6 +287,65 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
 
           {/* ── Visualize ── */}
           <TabsContent value="visualize" className="space-y-6">
+            <Card className={showColumnGuide ? 'border-primary/30 shadow-sm' : ''}>
+              <CardHeader className="flex flex-row items-start justify-between gap-3">
+                <div>
+                  <CardTitle className="flex items-center gap-2 text-base">
+                    <Columns3 className="h-4 w-4 text-primary" /> Analysis focus
+                  </CardTitle>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    {savedFocusColumns.length
+                      ? `Recommendations are currently prioritizing ${savedFocusColumns.length} selected column(s).`
+                      : 'Recommendations currently consider all detected columns.'}
+                  </p>
+                </div>
+                <Button size="sm" variant={showColumnGuide ? 'secondary' : 'outline'} onClick={() => setShowColumnGuide((v) => !v)}>
+                  {showColumnGuide ? 'Hide' : 'Choose columns'}
+                </Button>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                {!showColumnGuide ? (
+                  <div className="flex flex-wrap gap-2">
+                    {(savedFocusColumns.length ? savedFocusColumns : columns.map((c) => c.name).slice(0, 10)).map((name) => (
+                      <Badge key={name} variant={savedFocusSet.has(name) ? 'default' : 'secondary'}>{name}</Badge>
+                    ))}
+                    {!savedFocusColumns.length && columns.length > 10 && <Badge variant="outline">+{columns.length - 10} more</Badge>}
+                  </div>
+                ) : (
+                  <>
+                    <div className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
+                      <CheckCircle2 className="mr-2 inline h-4 w-4 text-green-600" />
+                      Start with treatment/group/time/value columns. Text-only ID columns can stay unchecked unless you need them in a plot.
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <Button type="button" variant="outline" size="sm" onClick={() => setFocusColumnsDraft(suggestedFocusColumns)}>Suggested</Button>
+                      <Button type="button" variant="outline" size="sm" onClick={() => setFocusColumnsDraft(columns.map((c) => c.name))}>All</Button>
+                      <Button type="button" variant="ghost" size="sm" onClick={() => setFocusColumnsDraft([])}>Clear</Button>
+                    </div>
+                    <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                      {columns.map((column) => {
+                        const checked = focusDraftSet.has(column.name);
+                        return (
+                          <label key={column.name} className="flex cursor-pointer items-center gap-2 rounded-lg border bg-background p-2 text-sm">
+                            <Checkbox checked={checked} onCheckedChange={(next) => toggleFocusColumn(column.name, Boolean(next))} />
+                            <span className="min-w-0 flex-1 truncate">{column.name}</span>
+                            <Badge variant="secondary" className="shrink-0">{column.role}</Badge>
+                          </label>
+                        );
+                      })}
+                    </div>
+                    <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
+                      <Button variant="outline" onClick={() => setFocusColumnsDraft(null)}>Reset</Button>
+                      <Button onClick={() => saveFocusColumns.mutate()} disabled={saveFocusColumns.isPending}>
+                        {saveFocusColumns.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                        Save focus
+                      </Button>
+                    </div>
+                  </>
+                )}
+              </CardContent>
+            </Card>
+
             <Card>
               <CardHeader className="flex flex-row items-center justify-between">
                 <CardTitle className="text-base flex items-center gap-2"><Sparkles className="h-4 w-4 text-primary" /> Recommended charts</CardTitle>

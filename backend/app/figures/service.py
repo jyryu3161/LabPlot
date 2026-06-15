@@ -738,7 +738,10 @@ def ai_recommend(db: Session, dataset_id: uuid.UUID, owner_id: uuid.UUID) -> lis
     ctx = _project_context(db, ds.project_id)
     if ds.description and ds.description.strip():
         ctx = ((ctx + " ") if ctx else "") + "Dataset: " + ds.description.strip()
-    return ai_client.recommend_charts(db, ds.column_profile, project_context=ctx, user_id=owner_id)
+    column_profile = ds_service.focused_column_profile(ds)
+    if ds.focus_columns:
+        ctx = ((ctx + " ") if ctx else "") + "Prioritize these user-selected columns: " + ", ".join(ds.focus_columns)
+    return ai_client.recommend_charts(db, column_profile, project_context=ctx, user_id=owner_id)
 
 
 def ai_recommend_from_reference_image(db: Session, dataset_id: uuid.UUID, owner_id: uuid.UUID,
@@ -751,8 +754,11 @@ def ai_recommend_from_reference_image(db: Session, dataset_id: uuid.UUID, owner_
     ctx = _project_context(db, ds.project_id)
     if ds.description and ds.description.strip():
         ctx = ((ctx + " ") if ctx else "") + "Dataset: " + ds.description.strip()
+    column_profile = ds_service.focused_column_profile(ds)
+    if ds.focus_columns:
+        ctx = ((ctx + " ") if ctx else "") + "Prioritize these user-selected columns: " + ", ".join(ds.focus_columns)
     return ai_client.recommend_from_reference_image(
-        db, ds.column_profile, image_bytes, mime, project_context=ctx, user_id=owner_id
+        db, column_profile, image_bytes, mime, project_context=ctx, user_id=owner_id
     )
 
 

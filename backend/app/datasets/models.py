@@ -23,6 +23,8 @@ class Dataset(Base):
     column_profile = Column(JSONB, nullable=False, default=list)
     preview = Column(JSONB, nullable=False, default=list)
     statistics = Column(JSONB, nullable=True)
+    ingest_options = Column(JSONB, nullable=False, default=dict)
+    focus_columns = Column(JSONB, nullable=False, default=list)
     project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=True, index=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 

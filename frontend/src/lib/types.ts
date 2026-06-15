@@ -119,6 +119,30 @@ export interface DatasetDetail extends DatasetListItem {
   column_profile: ColumnProfile[];
   preview: Record<string, unknown>[];
   statistics?: DatasetStatistics;
+  ingest_options?: DatasetIngestOptions;
+  focus_columns?: string[];
+}
+
+export interface DatasetIngestOptions {
+  sheet_name?: string;
+  header_row?: number;
+  data_start_row?: number;
+  end_row?: number;
+  start_col?: number;
+  end_col?: number;
+}
+
+export interface DatasetPreview {
+  filename: string;
+  format: string;
+  sheets: string[];
+  selected_sheet?: string;
+  ingest_options: DatasetIngestOptions;
+  raw_preview: unknown[][];
+  parsed_preview: Record<string, unknown>[];
+  column_profile: ColumnProfile[];
+  n_rows: number;
+  n_cols: number;
 }
 
 export interface ChartSuggestion {

@@ -1,6 +1,6 @@
 import type {
   User, TokenResponse, LoginRequest, RegisterRequest,
-  DatasetListItem, DatasetDetail, ChartSuggestion, PlotTypeDef, StyleDef,
+  DatasetIngestOptions, DatasetListItem, DatasetDetail, DatasetPreview, ChartSuggestion, PlotTypeDef, StyleDef,
   FigureListItem, FigureDetail, FigureVersion, Review, Improvement, AdminUser, AIConfig, GalleryFigureItem, AuditLogItem,
   ClientErrorItem, Project, ProjectListItem, EmailDeliveryStatus,
   MembershipItem, MyOrganizationItem, OrganizationAIConfig, OrganizationItem, OrganizationSearchItem, OrganizationUsageSummary, OrganizationUserSearchItem,
@@ -188,7 +188,7 @@ export async function listDatasets(projectId?: string): Promise<DatasetListItem[
 }
 export async function getDataset(id: string): Promise<DatasetDetail> { return fetcher(`/api/datasets/${id}`); }
 export async function deleteDataset(id: string): Promise<void> { return fetcher(`/api/datasets/${id}`, { method: 'DELETE' }); }
-export async function updateDataset(id: string, data: { name?: string; description?: string }): Promise<DatasetDetail> {
+export async function updateDataset(id: string, data: { name?: string; description?: string; focus_columns?: string[] }): Promise<DatasetDetail> {
   return fetcher(`/api/datasets/${id}`, { method: 'PATCH', body: JSON.stringify(data) });
 }
 export async function getPublicGallery(limit = 12): Promise<{ figures: import('./types').PublicFigure[] }> {
@@ -197,12 +197,40 @@ export async function getPublicGallery(limit = 12): Promise<{ figures: import('.
 export async function enhancePrompt(draft: string, kind: string, context?: string): Promise<{ enhanced: string }> {
   return fetcher('/api/ai/enhance-prompt', { method: 'POST', body: JSON.stringify({ draft, kind, context }) });
 }
-export async function uploadDataset(file: File, projectId?: string, description?: string, name?: string): Promise<DatasetDetail> {
+function appendDatasetIngestOptions(fd: FormData, options?: DatasetIngestOptions) {
+  if (!options) return;
+  for (const [key, value] of Object.entries(options)) {
+    if (value !== undefined && value !== null && value !== '') fd.append(key, String(value));
+  }
+}
+
+export async function previewDatasetUpload(file: File, options?: DatasetIngestOptions): Promise<DatasetPreview> {
+  const fd = new FormData();
+  fd.append('file', file);
+  appendDatasetIngestOptions(fd, options);
+  const headers: Record<string, string> = {};
+  const token = getAccessToken();
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const res = await fetch(`${BASE_URL}/api/datasets/preview`, { method: 'POST', body: fd, headers });
+  if (!res.ok) { const b = await res.text().catch(() => ''); throw new ApiError(parseErrorMessage(b, res.statusText), res.status); }
+  return res.json();
+}
+
+export async function uploadDataset(
+  file: File,
+  projectId?: string,
+  description?: string,
+  name?: string,
+  ingestOptions?: DatasetIngestOptions,
+  focusColumns?: string[],
+): Promise<DatasetDetail> {
   const fd = new FormData();
   fd.append('file', file);
   if (projectId) fd.append('project_id', projectId);
   if (description) fd.append('description', description);
   if (name) fd.append('name', name);
+  appendDatasetIngestOptions(fd, ingestOptions);
+  if (focusColumns?.length) fd.append('focus_columns', JSON.stringify(focusColumns));
   const headers: Record<string, string> = {};
   const token = getAccessToken();
   if (token) headers['Authorization'] = `Bearer ${token}`;
