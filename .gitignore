@@ -21,6 +21,7 @@ backend/private/
 
 # bkit tooling internals
 .bkit/
+docs/.bkit-memory.json
 
 # ops logs
 scripts/*.log
