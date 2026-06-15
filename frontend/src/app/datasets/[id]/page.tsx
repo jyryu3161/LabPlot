@@ -1,16 +1,16 @@
 'use client';
 
-import { use, useEffect, useMemo, useState } from 'react';
+import { use, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import {
   getDataset, getChartSuggestions, recommendCharts, getPlotTypes, getStyles,
-  createFigure, getProject, getPublicGallery, getPublicGalleryTemplate, listFigures, updateDataset, recommendChartsFromImage,
+  createFigure, getFigure, getProject, listFigures, updateDataset, recommendChartsFromImage,
 } from '@/lib/api';
 import { Textarea } from '@/components/ui/textarea';
-import type { ChartSuggestion, PlotTypeDef } from '@/lib/types';
+import type { ChartSuggestion, FigureDetail, PlotTypeDef } from '@/lib/types';
 import { formatStylePreset } from '@/lib/style-presets';
 import { AppHeader } from '@/components/layout/AppHeader';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -45,16 +45,35 @@ function defaultOptions(def: PlotTypeDef | undefined) {
   return options;
 }
 
-function suggestedMapping(def: PlotTypeDef | undefined, columns: { name: string; role: string; dtype: string }[]) {
+function remapTemplateMapping(def: PlotTypeDef | undefined, sourceMapping: Record<string, unknown>, columns: { name: string; role: string; dtype: string }[]) {
   if (!def) return {};
   const used = new Set<string>();
   const mapping: Record<string, unknown> = {};
+  const columnByName = new Map(columns.map((column) => [column.name, column]));
+
   for (const field of [...def.required, ...def.optional]) {
+    const sourceValue = sourceMapping[field.key];
     const matches = columns.filter((column) => fieldMatchesColumn(field, column));
     if (field.multi) {
-      if (matches.length) mapping[field.key] = matches.map((column) => column.name).slice(0, 8);
+      const sourceValues = Array.isArray(sourceValue) ? sourceValue.filter((value): value is string => typeof value === 'string') : [];
+      const kept = sourceValues.filter((name) => {
+        const column = columnByName.get(name);
+        return column && fieldMatchesColumn(field, column);
+      });
+      const values = kept.length ? kept : matches.map((column) => column.name).slice(0, 8);
+      if (values.length) mapping[field.key] = values;
       continue;
     }
+
+    if (typeof sourceValue === 'string') {
+      const column = columnByName.get(sourceValue);
+      if (column && fieldMatchesColumn(field, column)) {
+        mapping[field.key] = sourceValue;
+        used.add(sourceValue);
+        continue;
+      }
+    }
+
     const match = matches.find((column) => !used.has(column.name));
     if (match) {
       mapping[field.key] = match.name;
@@ -77,21 +96,26 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
     queryFn: () => listFigures(ds?.project_id ?? undefined),
     enabled: !!ds,
   });
+  const { data: formatFigures } = useQuery({
+    queryKey: ['figures', 'format-copy'],
+    queryFn: () => listFigures(),
+    enabled: !!ds,
+  });
   const { data: project } = useQuery({
     queryKey: ['project', ds?.project_id],
     queryFn: () => getProject(ds!.project_id!),
     enabled: !!ds?.project_id,
   });
-  const { data: galleryTemplates } = useQuery({
-    queryKey: ['public-gallery', 'dataset-templates', 60],
-    queryFn: () => getPublicGallery(60),
-  });
 
   const [aiSug, setAiSug] = useState<ChartSuggestion[] | null>(null);
   const [referenceFile, setReferenceFile] = useState<File | null>(null);
-  const aiRecommend = useMutation({
+  const autoRecommendDatasetId = useRef<string | null>(null);
+  const aiRecommend = useMutation<ChartSuggestion[], Error, { silent?: boolean } | undefined>({
     mutationFn: () => recommendCharts(id),
-    onSuccess: (s) => { setAiSug(s); toast.success('AI recommendations ready'); },
+    onSuccess: (s, variables) => {
+      setAiSug(s);
+      if (!variables?.silent) toast.success('AI recommendations ready');
+    },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'AI recommend failed'),
   });
   const referenceRecommend = useMutation({
@@ -113,7 +137,13 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
   const dsDescValue = dsDesc ?? ds?.description ?? '';
   const saveDsDesc = useMutation({
     mutationFn: () => updateDataset(id, { description: dsDescValue }),
-    onSuccess: () => { toast.success('Description saved'); setDsDesc(null); qc.invalidateQueries({ queryKey: ['dataset', id] }); },
+    onSuccess: () => {
+      toast.success('Description saved');
+      setDsDesc(null);
+      setAiSug(null);
+      qc.invalidateQueries({ queryKey: ['dataset', id] });
+      aiRecommend.mutate({ silent: true });
+    },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Save failed'),
   });
 
@@ -123,10 +153,6 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
   const canEditDataset = ds?.project_id ? project?.role === 'owner' || project?.role === 'editor' : true;
   const compatiblePlotTypes = useMemo(() => plotTypes.filter((plot) => plotFitsColumns(plot, columns)), [columns, plotTypes]);
   const compatiblePlotTypeSet = useMemo(() => new Set(compatiblePlotTypes.map((plot) => plot.type)), [compatiblePlotTypes]);
-  const compatibleGalleryTemplates = useMemo(
-    () => (galleryTemplates?.figures ?? []).filter((figure) => compatiblePlotTypeSet.has(figure.plot_type)).slice(0, 6),
-    [compatiblePlotTypeSet, galleryTemplates?.figures],
-  );
   const savedFocusColumns = useMemo(() => ds?.focus_columns ?? [], [ds?.focus_columns]);
   const focusColumns = focusColumnsDraft ?? savedFocusColumns;
   const savedFocusSet = useMemo(() => new Set(savedFocusColumns), [savedFocusColumns]);
@@ -154,6 +180,12 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
     };
   }, [referencePreviewUrl]);
 
+  useEffect(() => {
+    if (!ds || autoRecommendDatasetId.current === ds.id) return;
+    autoRecommendDatasetId.current = ds.id;
+    aiRecommend.mutate({ silent: true });
+  }, [aiRecommend, ds]);
+
   const saveFocusColumns = useMutation({
     mutationFn: () => updateDataset(id, { focus_columns: focusColumns }),
     onSuccess: () => {
@@ -175,6 +207,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
   const [options, setOptions] = useState<Record<string, unknown>>({});
   const [style, setStyle] = useState('nature');
   const [name, setName] = useState('');
+  const [formatFigureId, setFormatFigureId] = useState('');
 
   const currentDef: PlotTypeDef | undefined = useMemo(
     () => plotTypes.find((p) => p.type === plotType), [plotTypes, plotType]);
@@ -182,6 +215,30 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
     const value = mapping[field.key];
     return field.multi ? !Array.isArray(value) || value.length === 0 : !value;
   }), [currentDef?.required, mapping]);
+  const formatCopyFigures = useMemo(() => (formatFigures ?? [])
+    .filter((figure) => figure.status === 'ready' && figure.dataset_id !== id)
+    .slice(0, 80), [formatFigures, id]);
+
+  const applyFigureFormat = useMutation({
+    mutationFn: (figureId: string) => getFigure(figureId),
+    onSuccess: (source: FigureDetail) => {
+      const version = source.versions.find((item) => item.id === source.current_version_id) ?? source.versions[source.versions.length - 1];
+      if (!version) {
+        toast.error('Selected figure has no saved version');
+        return;
+      }
+      const def = plotTypes.find((plot) => plot.type === source.plot_type);
+      setPlotType(source.plot_type);
+      setMapping(remapTemplateMapping(def, version.mapping ?? {}, columns));
+      setOptions({ ...defaultOptions(def), ...(version.options ?? {}) });
+      setStyle(version.style_preset);
+      setName(`${ds?.name ?? 'figure'} - ${source.name} format`);
+      setFormatFigureId(source.id);
+      toast.success('Figure format copied');
+      document.getElementById('builder')?.scrollIntoView({ behavior: 'smooth' });
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Could not copy figure format'),
+  });
 
   function selectPlotType(pt: string, presetMapping?: Record<string, unknown>) {
     const def = plotTypes.find((p) => p.type === pt);
@@ -191,21 +248,6 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
     if (!name) setName(`${ds?.name ?? 'figure'} - ${def?.label ?? pt}`);
     document.getElementById('builder')?.scrollIntoView({ behavior: 'smooth' });
   }
-
-  const applyGalleryTemplate = useMutation({
-    mutationFn: (figureId: string) => getPublicGalleryTemplate(figureId),
-    onSuccess: (template) => {
-      const def = plotTypes.find((plot) => plot.type === template.plot_type);
-      setPlotType(template.plot_type);
-      setMapping(suggestedMapping(def, columns));
-      setOptions({ ...defaultOptions(def), ...(template.options ?? {}) });
-      setStyle(template.style_preset);
-      setName(`${ds?.name ?? 'figure'} - ${template.name}`);
-      document.getElementById('builder')?.scrollIntoView({ behavior: 'smooth' });
-      toast.success('Template applied');
-    },
-    onError: (e) => toast.error(e instanceof Error ? e.message : 'Template failed'),
-  });
 
   function applySuggestion(s: ChartSuggestion) {
     selectPlotType(s.plot_type, (s.suggested_mapping as Record<string, unknown>) || {});
@@ -417,14 +459,23 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
             </Card>
 
             <Card>
-              <CardHeader className="flex flex-row items-center justify-between">
-                <CardTitle className="text-base flex items-center gap-2"><Sparkles className="h-4 w-4 text-primary" /> Recommended charts</CardTitle>
-                <Button size="sm" variant="outline" onClick={() => aiRecommend.mutate()} disabled={aiRecommend.isPending}>
+              <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <CardTitle className="text-base flex items-center gap-2"><Sparkles className="h-4 w-4 text-primary" /> Recommended charts</CardTitle>
+                  <p className="mt-1 text-sm text-muted-foreground">Ask AI runs automatically after upload and uses the dataset purpose when provided.</p>
+                </div>
+                <Button size="lg" className="h-11 px-5 text-sm font-semibold shadow-sm" onClick={() => aiRecommend.mutate({ silent: false })} disabled={aiRecommend.isPending}>
                   {aiRecommend.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Wand2 className="mr-2 h-4 w-4" />}
-                  Ask AI {aiSug ? '(refresh)' : ''}
+                  Ask AI for charts {aiSug ? '(refresh)' : ''}
                 </Button>
               </CardHeader>
               <CardContent className="space-y-4">
+                {aiRecommend.isPending && !aiSug && (
+                  <div className="flex items-center rounded-lg border bg-primary/5 px-3 py-2 text-sm text-primary">
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    AI is reading the dataset profile and purpose.
+                  </div>
+                )}
                 <div className="grid gap-3 rounded-lg border bg-muted/30 p-3 lg:grid-cols-[1fr_auto] lg:items-end">
                   <div className="grid min-w-0 gap-3 md:grid-cols-[1fr_1.2fr]">
                     <div className="space-y-1">
@@ -516,34 +567,40 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
               </CardContent>
             </Card>
 
-            {compatibleGalleryTemplates.length > 0 && (
-              <Card>
-                <CardHeader><CardTitle className="text-base">Templates that fit this data</CardTitle></CardHeader>
-                <CardContent className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                  {compatibleGalleryTemplates.map((template) => (
-                    <button
-                      key={template.id}
-                      type="button"
-                      onClick={() => applyGalleryTemplate.mutate(template.id)}
-                      className="rounded-lg border bg-background p-3 text-left transition hover:border-primary hover:shadow-sm"
-                    >
-                      <img src={template.thumb_url} alt={template.name} className="mb-2 aspect-[4/3] w-full rounded border bg-white object-contain" />
-                      <p className="truncate text-sm font-medium">{template.name}</p>
-                      <p className="text-xs text-muted-foreground">{template.plot_type.replace(/_/g, ' ')}</p>
-                    </button>
-                  ))}
-                </CardContent>
-              </Card>
-            )}
-
             {/* ── Builder ── */}
             <Card id="builder">
               <CardHeader><CardTitle className="text-base">Chart builder</CardTitle></CardHeader>
               <CardContent className="space-y-4">
+                <div className="space-y-1 rounded-lg border bg-muted/20 p-3">
+                  <Label htmlFor="format-figure-select">Copy format from my figure</Label>
+                  <select
+                    id="format-figure-select"
+                    data-testid="format-figure-select"
+                    className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                    value={formatFigureId}
+                    onChange={(e) => {
+                      const next = e.target.value;
+                      setFormatFigureId(next);
+                      if (next) applyFigureFormat.mutate(next);
+                    }}
+                    disabled={applyFigureFormat.isPending || formatCopyFigures.length === 0}
+                  >
+                    <option value="">{formatCopyFigures.length ? 'Choose a saved figure...' : 'No saved figures available yet'}</option>
+                    {formatCopyFigures.map((figure) => {
+                      const compatible = compatiblePlotTypeSet.has(figure.plot_type);
+                      return (
+                        <option key={figure.id} value={figure.id} disabled={!compatible}>
+                          {figure.name} - {figure.plot_type.replace(/_/g, ' ')}{compatible ? '' : ' (needs different data)'}
+                        </option>
+                      );
+                    })}
+                  </select>
+                  <p className="text-xs text-muted-foreground">Copies chart type, style preset, and visual settings. Column mappings are remapped to this dataset.</p>
+                </div>
                 <div className="grid gap-4 md:grid-cols-2">
                   <div className="space-y-1">
                     <Label>Chart type</Label>
-                    <select className="w-full rounded-md border px-3 py-2 text-sm" value={plotType} onChange={(e) => selectPlotType(e.target.value)}>
+                    <select data-testid="chart-type-select" className="w-full rounded-md border px-3 py-2 text-sm" value={plotType} onChange={(e) => selectPlotType(e.target.value)}>
                       <option value="">Select a chart type…</option>
                       {plotTypes.map((p) => {
                         const compatible = compatiblePlotTypeSet.has(p.type);
@@ -618,7 +675,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                     <div className="grid gap-4 md:grid-cols-2">
                       <div className="space-y-1">
                         <Label>In-plot title (usually blank)</Label>
-                        <Input value={String(options.title ?? '')} onChange={(e) => setOptions({ ...options, title: e.target.value })} placeholder="Leave blank for manuscript-style figures" />
+                        <Input data-testid="in-plot-title" value={String(options.title ?? '')} onChange={(e) => setOptions({ ...options, title: e.target.value })} placeholder="Leave blank for manuscript-style figures" />
                       </div>
                       <div className="space-y-1">
                         <Label>Style preset</Label>

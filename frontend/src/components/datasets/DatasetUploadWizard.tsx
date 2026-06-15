@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo, useState, type ReactNode } from 'react';
 import { useDropzone } from 'react-dropzone';
 import { toast } from 'sonner';
 import { CheckCircle2, Columns3, FileSpreadsheet, Loader2, RefreshCw, Settings2, UploadCloud, X } from 'lucide-react';
@@ -12,10 +12,13 @@ import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Checkbox } from '@/components/ui/checkbox';
+import { Textarea } from '@/components/ui/textarea';
 
 type Props = {
   projectId?: string;
   description?: string;
+  onDescriptionChange?: (value: string) => void;
+  descriptionAction?: ReactNode;
   onUploaded: (dataset: DatasetDetail) => void | Promise<void>;
   title?: string;
   helper?: string;
@@ -46,6 +49,8 @@ function numericValue(value: number | undefined): string {
 export function DatasetUploadWizard({
   projectId,
   description,
+  onDescriptionChange,
+  descriptionAction,
   onUploaded,
   title = 'Upload data',
   helper = 'CSV, TSV, TXT, XLSX',
@@ -54,10 +59,12 @@ export function DatasetUploadWizard({
   const [preview, setPreview] = useState<DatasetPreview | null>(null);
   const [options, setOptions] = useState<DatasetIngestOptions>({});
   const [name, setName] = useState('');
+  const [localDescription, setLocalDescription] = useState(description ?? '');
   const [focusColumns, setFocusColumns] = useState<string[]>([]);
   const [previewing, setPreviewing] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [previewDirty, setPreviewDirty] = useState(false);
+  const purposeValue = onDescriptionChange ? (description ?? '') : localDescription;
 
   const loadPreview = useCallback(async (nextFile: File, nextOptions?: DatasetIngestOptions) => {
     setPreviewing(true);
@@ -114,12 +121,13 @@ export function DatasetUploadWizard({
 
   async function submit() {
     if (!file || !preview) return;
+    const purpose = purposeValue.trim();
     setUploading(true);
     try {
       const dataset = await uploadDataset(
         file,
         projectId,
-        description || undefined,
+        purpose || undefined,
         name || undefined,
         preview.ingest_options,
         focusColumns,
@@ -130,6 +138,7 @@ export function DatasetUploadWizard({
       setOptions({});
       setFocusColumns([]);
       setName('');
+      if (!onDescriptionChange) setLocalDescription('');
       await onUploaded(dataset);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'Upload failed');
@@ -181,6 +190,25 @@ export function DatasetUploadWizard({
             <Badge variant="secondary">{preview ? `${preview.n_cols} columns` : '...'}</Badge>
             {preview && <Badge variant="outline">{preview.format.toUpperCase()}</Badge>}
           </div>
+        </div>
+        <div className="space-y-2 rounded-lg border bg-background p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <Label htmlFor="dataset-purpose">Dataset purpose</Label>
+              <p className="mt-1 text-xs text-muted-foreground">Used by Ask AI to choose chart types, mappings, labels, and rationale.</p>
+            </div>
+            {descriptionAction}
+          </div>
+          <Textarea
+            id="dataset-purpose"
+            value={purposeValue}
+            onChange={(e) => {
+              if (onDescriptionChange) onDescriptionChange(e.target.value);
+              else setLocalDescription(e.target.value);
+            }}
+            rows={3}
+            placeholder="Example: Compare tumor cell viability after drug A/B/C treatment across dose groups."
+          />
         </div>
       </CardHeader>
       <CardContent className="space-y-5">

@@ -14,7 +14,6 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Textarea } from '@/components/ui/textarea';
-import { Label } from '@/components/ui/label';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Loader2, FileSpreadsheet, Trash2, Images, Database, Package, FlaskConical, Sparkles, Users } from 'lucide-react';
 import { formatStylePreset } from '@/lib/style-presets';
@@ -155,28 +154,24 @@ export default function ProjectWorkspace({ params }: { params: Promise<{ id: str
 
           <TabsContent value="datasets" className="space-y-6">
             {canEditProject ? (
-              <>
-                <div className="space-y-1">
-                  <Label className="text-xs text-muted-foreground">Dataset description (optional). Add it before upload so AI recommendations, reviews, and legends can use the context.</Label>
-                  <Textarea value={uploadDesc} onChange={(e) => setUploadDesc(e.target.value)} rows={2}
-                    placeholder="Example: target gene expression and viability measured after drug A/B/C treatment in tumor cell lines" />
+              <DatasetUploadWizard
+                projectId={id}
+                description={uploadDesc}
+                onDescriptionChange={setUploadDesc}
+                descriptionAction={(
                   <Button size="sm" variant="outline" onClick={() => enhanceUpload.mutate()} disabled={enhanceUpload.isPending}>
                     {enhanceUpload.isPending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Sparkles className="mr-1 h-4 w-4" />} Enhance with AI
                   </Button>
-                </div>
-                <DatasetUploadWizard
-                  projectId={id}
-                  description={uploadDesc}
-                  title="Upload data to this project"
-                  helper="CSV, TSV, TXT, XLSX. Preview the table before it is saved."
-                  onUploaded={async (dataset) => {
-                    setUploadDesc('');
-                    await qc.invalidateQueries({ queryKey: ['datasets', id] });
-                    await qc.invalidateQueries({ queryKey: ['project', id] });
-                    router.push(`/datasets/${dataset.id}?setup=1`);
-                  }}
-                />
-              </>
+                )}
+                title="Upload data to this project"
+                helper="CSV, TSV, TXT, XLSX. Preview the table before it is saved."
+                onUploaded={async (dataset) => {
+                  setUploadDesc('');
+                  await qc.invalidateQueries({ queryKey: ['datasets', id] });
+                  await qc.invalidateQueries({ queryKey: ['project', id] });
+                  router.push(`/datasets/${dataset.id}?setup=1`);
+                }}
+              />
             ) : (
               <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">Viewer access can inspect datasets and figures but cannot upload or edit project content.</div>
             )}
