@@ -6,7 +6,7 @@ import Link from 'next/link';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import {
-  getDataset, getChartSuggestions, recommendCharts, getPlotTypes, getStyles,
+  getDataset, getChartSuggestions, getSavedChartRecommendations, recommendCharts, getPlotTypes, getStyles,
   createFigure, getFigure, getProject, listFigures, updateDataset, recommendChartsFromImage,
 } from '@/lib/api';
 import { Textarea } from '@/components/ui/textarea';
@@ -29,11 +29,24 @@ const ROLE_COLORS: Record<string, string> = {
   pvalue: 'bg-pink-100 text-pink-700', gene: 'bg-amber-100 text-amber-700', text: 'bg-gray-100 text-gray-600',
 };
 
-function fieldMatchesColumn(field: { roles: string[] }, column: { role: string; dtype: string }) {
-  return field.roles.includes(column.role) || field.roles.includes(column.dtype);
+type ColumnShape = { name: string; role: string; dtype: string; sample_values?: unknown[] };
+
+function isNumericLikeColumn(column: ColumnShape) {
+  if (column.dtype === 'numeric' || ['numeric', 'log2fc', 'pvalue'].includes(column.role)) return true;
+  const values = (column.sample_values ?? []).filter((value) => value !== null && value !== undefined && String(value).trim() !== '');
+  return values.length > 0 && values.every((value) => {
+    if (typeof value === 'number') return Number.isFinite(value);
+    if (typeof value !== 'string') return false;
+    return Number.isFinite(Number(value.trim()));
+  });
 }
 
-function plotFitsColumns(plot: PlotTypeDef, columns: { role: string; dtype: string }[]) {
+function fieldMatchesColumn(field: { roles: string[] }, column: ColumnShape) {
+  if (field.roles.includes(column.role) || field.roles.includes(column.dtype)) return true;
+  return field.roles.includes('numeric') && isNumericLikeColumn(column);
+}
+
+function plotFitsColumns(plot: PlotTypeDef, columns: ColumnShape[]) {
   return plot.required.every((field) => columns.some((column) => fieldMatchesColumn(field, column)));
 }
 
@@ -45,7 +58,7 @@ function defaultOptions(def: PlotTypeDef | undefined) {
   return options;
 }
 
-function remapTemplateMapping(def: PlotTypeDef | undefined, sourceMapping: Record<string, unknown>, columns: { name: string; role: string; dtype: string }[]) {
+function remapTemplateMapping(def: PlotTypeDef | undefined, sourceMapping: Record<string, unknown>, columns: ColumnShape[]) {
   if (!def) return {};
   const used = new Set<string>();
   const mapping: Record<string, unknown> = {};
@@ -86,9 +99,15 @@ function remapTemplateMapping(def: PlotTypeDef | undefined, sourceMapping: Recor
 export default function DatasetDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const router = useRouter();
+  const qc = useQueryClient();
 
   const { data: ds, isLoading } = useQuery({ queryKey: ['dataset', id], queryFn: () => getDataset(id) });
   const { data: ruleSug } = useQuery({ queryKey: ['suggest', id], queryFn: () => getChartSuggestions(id) });
+  const { data: savedAiSug, isFetched: savedAiSugFetched } = useQuery({
+    queryKey: ['ai-recommendations', id],
+    queryFn: () => getSavedChartRecommendations(id),
+    enabled: !!ds,
+  });
   const { data: plotTypesData } = useQuery({ queryKey: ['plot-types'], queryFn: getPlotTypes });
   const { data: stylesData } = useQuery({ queryKey: ['styles'], queryFn: getStyles });
   const { data: figures } = useQuery({
@@ -108,12 +127,18 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
   });
 
   const [aiSug, setAiSug] = useState<ChartSuggestion[] | null>(null);
+  const [recommendPrompt, setRecommendPrompt] = useState('');
   const [referenceFile, setReferenceFile] = useState<File | null>(null);
   const autoRecommendDatasetId = useRef<string | null>(null);
-  const aiRecommend = useMutation<ChartSuggestion[], Error, { silent?: boolean } | undefined>({
-    mutationFn: () => recommendCharts(id),
+  const aiRecommend = useMutation<ChartSuggestion[], Error, { silent?: boolean; refresh?: boolean; prompt?: string } | undefined>({
+    mutationFn: (variables) => {
+      const prompt = variables?.prompt?.trim();
+      const payload = variables?.refresh || prompt ? { refresh: Boolean(variables?.refresh), prompt } : undefined;
+      return recommendCharts(id, payload);
+    },
     onSuccess: (s, variables) => {
       setAiSug(s);
+      qc.setQueryData(['ai-recommendations', id], { cached: true, suggestions: s });
       if (!variables?.silent) toast.success('AI recommendations ready');
     },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'AI recommend failed'),
@@ -127,7 +152,6 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Reference recommendation failed'),
   });
 
-  const qc = useQueryClient();
   const [dsDesc, setDsDesc] = useState<string | null>(null);
   const [showColumnGuide, setShowColumnGuide] = useState(() => {
     if (typeof window === 'undefined') return false;
@@ -141,34 +165,43 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
       toast.success('Description saved');
       setDsDesc(null);
       setAiSug(null);
+      qc.invalidateQueries({ queryKey: ['ai-recommendations', id] });
       qc.invalidateQueries({ queryKey: ['dataset', id] });
-      aiRecommend.mutate({ silent: true });
+      aiRecommend.mutate({ silent: true, refresh: true, prompt: recommendPrompt });
     },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Save failed'),
   });
 
   const plotTypes = useMemo(() => plotTypesData?.plot_types ?? [], [plotTypesData?.plot_types]);
   const styles = useMemo(() => stylesData?.styles ?? [], [stylesData?.styles]);
-  const columns = useMemo(() => ds?.column_profile ?? [], [ds?.column_profile]);
+  const columns = useMemo(() => (ds?.column_profile ?? []) as ColumnShape[], [ds?.column_profile]);
   const canEditDataset = ds?.project_id ? project?.role === 'owner' || project?.role === 'editor' : true;
-  const compatiblePlotTypes = useMemo(() => plotTypes.filter((plot) => plotFitsColumns(plot, columns)), [columns, plotTypes]);
-  const compatiblePlotTypeSet = useMemo(() => new Set(compatiblePlotTypes.map((plot) => plot.type)), [compatiblePlotTypes]);
   const savedFocusColumns = useMemo(() => ds?.focus_columns ?? [], [ds?.focus_columns]);
   const focusColumns = focusColumnsDraft ?? savedFocusColumns;
   const savedFocusSet = useMemo(() => new Set(savedFocusColumns), [savedFocusColumns]);
   const focusDraftSet = useMemo(() => new Set(focusColumns), [focusColumns]);
+  const focusedColumns = useMemo(() => {
+    if (!focusColumns.length) return columns;
+    const focus = new Set(focusColumns);
+    const picked = columns.filter((column) => focus.has(column.name));
+    return picked.length ? picked : columns;
+  }, [columns, focusColumns]);
+  const compatiblePlotTypes = useMemo(() => plotTypes.filter((plot) => plotFitsColumns(plot, focusedColumns)), [focusedColumns, plotTypes]);
+  const compatiblePlotTypeSet = useMemo(() => new Set(compatiblePlotTypes.map((plot) => plot.type)), [compatiblePlotTypes]);
   const suggestedFocusColumns = useMemo(() => {
     const preferred = columns.filter((c) => c.role !== 'text').map((c) => c.name);
     return (preferred.length ? preferred : columns.map((c) => c.name)).slice(0, 8);
   }, [columns]);
-  const suggestions = useMemo(() => aiSug ?? ruleSug?.suggestions ?? [], [aiSug, ruleSug?.suggestions]);
+  const cachedAiSuggestions = savedAiSug?.cached ? savedAiSug.suggestions : null;
+  const activeAiSuggestions = aiSug ?? cachedAiSuggestions;
+  const suggestions = useMemo(() => activeAiSuggestions ?? ruleSug?.suggestions ?? [], [activeAiSuggestions, ruleSug?.suggestions]);
   const displayedSuggestions = useMemo(() => (
     suggestions
       .map((suggestion, index) => ({ suggestion, index }))
       .sort((a, b) => ((b.suggestion.score ?? 0) - (a.suggestion.score ?? 0)) || (a.index - b.index))
       .slice(0, 5)
   ), [suggestions]);
-  const suggestionLabel = aiSug ? 'Top AI matches' : 'Top dataset matches';
+  const suggestionLabel = activeAiSuggestions ? 'Top AI matches' : 'Top dataset matches';
   const referencePreviewUrl = useMemo(
     () => (referenceFile ? URL.createObjectURL(referenceFile) : null),
     [referenceFile],
@@ -181,10 +214,11 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
   }, [referencePreviewUrl]);
 
   useEffect(() => {
-    if (!ds || autoRecommendDatasetId.current === ds.id) return;
+    if (!ds || !savedAiSugFetched || autoRecommendDatasetId.current === ds.id) return;
     autoRecommendDatasetId.current = ds.id;
+    if (savedAiSug?.cached) return;
     aiRecommend.mutate({ silent: true });
-  }, [aiRecommend, ds]);
+  }, [aiRecommend, ds, savedAiSug?.cached, savedAiSugFetched]);
 
   const saveFocusColumns = useMutation({
     mutationFn: () => updateDataset(id, { focus_columns: focusColumns }),
@@ -196,6 +230,8 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
       setFocusColumnsDraft(null);
       qc.invalidateQueries({ queryKey: ['dataset', id] });
       qc.invalidateQueries({ queryKey: ['suggest', id] });
+      qc.invalidateQueries({ queryKey: ['ai-recommendations', id] });
+      aiRecommend.mutate({ silent: true, refresh: true, prompt: recommendPrompt });
       router.replace(`/datasets/${id}`);
     },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Save failed'),
@@ -403,12 +439,12 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
               <CardHeader className="flex flex-row items-start justify-between gap-3">
                 <div>
                   <CardTitle className="flex items-center gap-2 text-base">
-                    <Columns3 className="h-4 w-4 text-primary" /> Analysis focus
+                    <Columns3 className="h-4 w-4 text-primary" /> Columns to use
                   </CardTitle>
                   <p className="mt-1 text-sm text-muted-foreground">
                     {savedFocusColumns.length
-                      ? `Recommendations are currently prioritizing ${savedFocusColumns.length} selected column(s).`
-                      : 'Recommendations currently consider all detected columns.'}
+                      ? `Recommendations and chart checks are using ${savedFocusColumns.length} selected column(s).`
+                      : 'Recommendations and chart checks currently use all detected columns.'}
                   </p>
                 </div>
                 <Button size="sm" variant={showColumnGuide ? 'secondary' : 'outline'} onClick={() => setShowColumnGuide((v) => !v)}>
@@ -427,7 +463,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                   <>
                     <div className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
                       <CheckCircle2 className="mr-2 inline h-4 w-4 text-green-600" />
-                      Start with treatment/group/time/value columns. Text-only ID columns can stay unchecked unless you need them in a plot.
+                      Select the columns you want the next chart to use. ID-only text columns can stay unchecked unless they should appear in the plot.
                     </div>
                     <div className="flex flex-wrap gap-2">
                       <Button type="button" variant="outline" size="sm" onClick={() => setFocusColumnsDraft(suggestedFocusColumns)}>Suggested</Button>
@@ -450,7 +486,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                       <Button variant="outline" onClick={() => setFocusColumnsDraft(null)}>Reset</Button>
                       <Button onClick={() => saveFocusColumns.mutate()} disabled={saveFocusColumns.isPending || !canEditDataset}>
                         {saveFocusColumns.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-                        Save focus
+                        Save columns
                       </Button>
                     </div>
                   </>
@@ -462,20 +498,32 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
               <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div>
                   <CardTitle className="text-base flex items-center gap-2"><Sparkles className="h-4 w-4 text-primary" /> Recommended charts</CardTitle>
-                  <p className="mt-1 text-sm text-muted-foreground">Ask AI runs automatically after upload and uses the dataset purpose when provided.</p>
+                  <p className="mt-1 text-sm text-muted-foreground">AI recommendations are saved after the first run and reused when you reopen this dataset.</p>
                 </div>
-                <Button size="lg" className="h-11 px-5 text-sm font-semibold shadow-sm" onClick={() => aiRecommend.mutate({ silent: false })} disabled={aiRecommend.isPending}>
+                <Button size="lg" className="h-11 px-5 text-sm font-semibold shadow-sm" onClick={() => aiRecommend.mutate({ silent: false, refresh: true, prompt: recommendPrompt })} disabled={aiRecommend.isPending}>
                   {aiRecommend.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Wand2 className="mr-2 h-4 w-4" />}
-                  Ask AI for charts {aiSug ? '(refresh)' : ''}
+                  Ask AI for charts {activeAiSuggestions ? '(refresh)' : ''}
                 </Button>
               </CardHeader>
               <CardContent className="space-y-4">
-                {aiRecommend.isPending && !aiSug && (
+                {aiRecommend.isPending && !activeAiSuggestions && (
                   <div className="flex items-center rounded-lg border bg-primary/5 px-3 py-2 text-sm text-primary">
                     <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                     AI is reading the dataset profile and purpose.
                   </div>
                 )}
+                <div className="space-y-1 rounded-lg border bg-muted/30 p-3">
+                  <Label htmlFor="chart-request">Optional chart direction</Label>
+                  <Textarea
+                    id="chart-request"
+                    value={recommendPrompt}
+                    onChange={(e) => setRecommendPrompt(e.target.value)}
+                    placeholder="Example: show x and y as a scatter plot, or compare response by group."
+                    className="min-h-20 bg-background"
+                    maxLength={1500}
+                  />
+                  <p className="text-xs text-muted-foreground">Used when you refresh AI recommendations. Saved recommendations load automatically without calling AI again.</p>
+                </div>
                 <div className="grid gap-3 rounded-lg border bg-muted/30 p-3 lg:grid-cols-[1fr_auto] lg:items-end">
                   <div className="grid min-w-0 gap-3 md:grid-cols-[1fr_1.2fr]">
                     <div className="space-y-1">

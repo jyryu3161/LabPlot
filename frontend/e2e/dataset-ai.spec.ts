@@ -7,12 +7,20 @@ test('dataset upload saves purpose and auto-runs Ask AI recommendations', async 
   test.skip(!email || !password, 'Set E2E_EMAIL and E2E_PASSWORD to run authenticated flow');
 
   let recommendCalled = false;
+  const recommendBodies: unknown[] = [];
   await page.route('**/api/datasets/*/recommend', async (route) => {
     if (route.request().method() !== 'POST') {
       await route.continue();
       return;
     }
     recommendCalled = true;
+    let body: unknown = null;
+    try {
+      body = route.request().postDataJSON();
+    } catch {
+      body = null;
+    }
+    recommendBodies.push(body);
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -93,6 +101,14 @@ test('dataset upload saves purpose and auto-runs Ask AI recommendations', async 
     await expect(page.getByText('AI dose response scatter')).toBeVisible();
     await expect(page.getByText('Templates that fit this data')).toHaveCount(0);
     await expect(page.getByRole('button', { name: /Ask AI for charts/ })).toBeVisible();
+    await expect(page.getByText('Columns to use')).toBeVisible();
+    await page.getByLabel('Optional chart direction').fill('Prefer a scatter plot for dose and response.');
+    await page.getByRole('button', { name: /Ask AI for charts/ }).click();
+    await expect.poll(() => recommendBodies.length, { timeout: 10_000 }).toBeGreaterThan(1);
+    expect(recommendBodies).toContainEqual({
+      refresh: true,
+      prompt: 'Prefer a scatter plot for dose and response.',
+    });
 
     await page.getByRole('button', { name: `Use figure format ${source.figureName}` }).click();
     await expect(page.locator('[data-testid="in-plot-title"]')).toHaveValue('Copied template title');

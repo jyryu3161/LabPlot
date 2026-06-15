@@ -4,7 +4,7 @@ import type {
   FigureListItem, FigureDetail, FigureVersion, Review, Improvement, AdminUser, AIConfig, GalleryFigureItem, AuditLogItem,
   ClientErrorItem, Project, ProjectListItem, EmailDeliveryStatus,
   MembershipItem, MyOrganizationItem, OrganizationAIConfig, OrganizationItem, OrganizationSearchItem, OrganizationUsageSummary, OrganizationUserSearchItem,
-  ProjectCollaborator, ProjectInvitation, ProjectUserSearchItem, GalleryTemplate,
+  ProjectCollaborator, ProjectInvitation, ProjectUserSearchItem, GalleryTemplate, RecommendationCache,
 } from './types';
 
 // Same-origin by default; Caddy proxies /api and /static to the backend.
@@ -266,8 +266,14 @@ export async function uploadDataset(
 export async function getChartSuggestions(datasetId: string): Promise<{ suggestions: ChartSuggestion[] }> {
   return fetcher(`/api/datasets/${datasetId}/chart-suggestions`);
 }
-export async function recommendCharts(datasetId: string): Promise<ChartSuggestion[]> {
-  return fetcher(`/api/datasets/${datasetId}/recommend`, { method: 'POST' });
+export async function getSavedChartRecommendations(datasetId: string): Promise<RecommendationCache> {
+  return fetcher(`/api/datasets/${datasetId}/recommendations`);
+}
+export async function recommendCharts(datasetId: string, data?: { refresh?: boolean; prompt?: string }): Promise<ChartSuggestion[]> {
+  return fetcher(`/api/datasets/${datasetId}/recommend`, {
+    method: 'POST',
+    body: data ? JSON.stringify(data) : undefined,
+  });
 }
 export async function recommendChartsFromImage(datasetId: string, file: File): Promise<ChartSuggestion[]> {
   const fd = new FormData();

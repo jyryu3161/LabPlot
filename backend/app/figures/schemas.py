@@ -47,6 +47,11 @@ class EnhancePromptResponse(BaseModel):
     enhanced: str
 
 
+class RecommendationRequest(BaseModel):
+    refresh: bool = False
+    prompt: str | None = Field(default=None, max_length=1500)
+
+
 class VersionResponse(BaseModel):
     id: uuid.UUID
     version_number: int
@@ -137,8 +142,15 @@ class RecommendationItem(BaseModel):
     plot_type: str
     title: str | None = None
     score: float | str | None = None
+    rank: int | None = None
+    fit: str | None = None
     rationale: str | None = None
     required_vars: dict[str, Any] | None = None
     suggested_mapping: dict[str, Any] | None = None
     example_usage: str | None = None
     source: str = "rule"
+
+
+class RecommendationCacheResponse(BaseModel):
+    cached: bool = False
+    suggestions: list[RecommendationItem] = Field(default_factory=list)

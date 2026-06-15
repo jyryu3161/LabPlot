@@ -7,6 +7,7 @@ from typing import Any
 import pandas as pd
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.common import storage
 from app.config import settings
@@ -195,6 +196,14 @@ def _build_dataframe(raw: pd.DataFrame, options: dict[str, Any]) -> pd.DataFrame
         raise BadRequestError("Selected data range appears to be empty", error_code="EMPTY_FILE")
     df = df.reset_index(drop=True)
     df.columns = [str(c) for c in df.columns]
+    for column in df.columns:
+        series = df[column]
+        present = series.notna() & series.astype(str).str.strip().ne("")
+        if not bool(present.any()):
+            continue
+        converted = pd.to_numeric(series, errors="coerce")
+        if bool(converted[present].notna().all()):
+            df[column] = converted
     return df
 
 
@@ -245,9 +254,41 @@ def _clean_focus_columns(focus_columns: list[str] | None, column_profile: list[d
     return clean
 
 
+def _sample_values_numeric_like(values: Any) -> bool:
+    if not isinstance(values, list):
+        return False
+    present = [value for value in values if value not in (None, "")]
+    if not present:
+        return False
+    for value in present:
+        try:
+            pd.to_numeric(pd.Series([value]), errors="raise")
+        except Exception:
+            return False
+    return True
+
+
+def normalized_column_profile(column_profile: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for column in column_profile or []:
+        item = dict(column)
+        if item.get("dtype") == "text" and item.get("role") == "text" and _sample_values_numeric_like(item.get("sample_values")):
+            item["dtype"] = "numeric"
+            item["role"] = "numeric"
+        normalized.append(item)
+    return normalized
+
+
+def _apply_normalized_column_profile(dataset: Dataset) -> Dataset:
+    normalized = normalized_column_profile(dataset.column_profile)
+    if normalized != (dataset.column_profile or []):
+        set_committed_value(dataset, "column_profile", normalized)
+    return dataset
+
+
 def focused_column_profile(dataset: Dataset) -> list[dict[str, Any]]:
     focus = set(dataset.focus_columns or [])
-    columns = dataset.column_profile or []
+    columns = normalized_column_profile(dataset.column_profile)
     if not focus:
         return columns
     focused = [c for c in columns if c.get("name") in focus]
@@ -329,7 +370,7 @@ def get_dataset(db: Session, dataset_id: uuid.UUID, owner_id: uuid.UUID) -> Data
     )
     if not ds or (ds.owner_id != owner_id and not project_service.can_access_project(db, ds.project_id, owner_id)):
         raise NotFoundError("Dataset", str(dataset_id))
-    return ds
+    return _apply_normalized_column_profile(ds)
 
 
 def update_dataset(db: Session, dataset_id: uuid.UUID, owner_id: uuid.UUID, data: dict) -> Dataset:
@@ -338,11 +379,21 @@ def update_dataset(db: Session, dataset_id: uuid.UUID, owner_id: uuid.UUID, data
     ds = get_dataset(db, dataset_id, owner_id)
     if ds.owner_id != owner_id:
         project_service.require_project_write(db, ds.project_id, owner_id)
+    clear_recommendations = False
     for k in ("name", "description"):
         if k in data and data[k] is not None:
+            if k == "description" and getattr(ds, k) != data[k]:
+                clear_recommendations = True
             setattr(ds, k, data[k])
     if "focus_columns" in data and data["focus_columns"] is not None:
-        ds.focus_columns = _clean_focus_columns(data["focus_columns"], ds.column_profile or [])
+        next_focus = _clean_focus_columns(data["focus_columns"], ds.column_profile or [])
+        if next_focus != (ds.focus_columns or []):
+            clear_recommendations = True
+        ds.focus_columns = next_focus
+    if clear_recommendations:
+        from app.figures.models import Recommendation
+
+        db.query(Recommendation).filter(Recommendation.dataset_id == ds.id).delete(synchronize_session=False)
     db.commit()
     db.refresh(ds)
     return ds

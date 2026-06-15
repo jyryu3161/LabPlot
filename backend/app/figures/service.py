@@ -19,7 +19,7 @@ from app.common.quotas import enforce_render_quota
 from app.config import settings
 from app.datasets.models import Dataset
 from app.datasets import service as ds_service
-from app.figures.models import Figure, FigureCodeArtifact, FigureVersion, Improvement, Review
+from app.figures.models import Figure, FigureCodeArtifact, FigureVersion, Improvement, Recommendation, Review
 from app.projects.models import Project
 from app.r_engine import renderer
 from app.r_engine.presets import PRESETS
@@ -745,16 +745,108 @@ def _sanitize_param_patch(patch: dict[str, Any], pdef: dict, base_mapping: dict[
     return clean
 
 
+def _score_value(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _recommendation_record_to_item(row: Recommendation) -> dict[str, Any] | None:
+    if row.plot_type == "_none":
+        return None
+    stored = row.required_vars if isinstance(row.required_vars, dict) else {}
+    if "required_vars" in stored or "suggested_mapping" in stored:
+        required_vars = stored.get("required_vars")
+        suggested_mapping = stored.get("suggested_mapping")
+        fit = stored.get("fit")
+        rank = stored.get("rank")
+    else:
+        required_vars = stored
+        suggested_mapping = None
+        fit = None
+        rank = None
+    item: dict[str, Any] = {
+        "plot_type": row.plot_type,
+        "title": row.title,
+        "score": _score_value(row.score),
+        "rationale": row.rationale,
+        "required_vars": required_vars if isinstance(required_vars, dict) else None,
+        "suggested_mapping": suggested_mapping if isinstance(suggested_mapping, dict) else None,
+        "example_usage": row.example_usage,
+        "source": row.source,
+    }
+    if isinstance(rank, int):
+        item["rank"] = rank
+    if isinstance(fit, str):
+        item["fit"] = fit
+    return item
+
+
+def cached_recommendations(db: Session, dataset_id: uuid.UUID, owner_id: uuid.UUID) -> tuple[list[dict], bool]:
+    ds_service.get_dataset(db, dataset_id, owner_id)
+    rows = (
+        db.query(Recommendation)
+        .filter(Recommendation.dataset_id == dataset_id)
+        .order_by(Recommendation.created_at.asc())
+        .all()
+    )
+    if not rows:
+        return [], False
+    items = [item for row in rows if (item := _recommendation_record_to_item(row)) is not None]
+    return sorted(items, key=lambda item: float(item.get("score") or 0), reverse=True), True
+
+
+def _save_recommendations(db: Session, dataset_id: uuid.UUID, suggestions: list[dict]) -> None:
+    db.query(Recommendation).filter(Recommendation.dataset_id == dataset_id).delete(synchronize_session=False)
+    if not suggestions:
+        db.add(Recommendation(dataset_id=dataset_id, plot_type="_none", source="ai", required_vars={"empty": True}))
+        db.commit()
+        return
+    for index, suggestion in enumerate(suggestions, start=1):
+        payload = {
+            "required_vars": suggestion.get("required_vars") if isinstance(suggestion.get("required_vars"), dict) else {},
+            "suggested_mapping": suggestion.get("suggested_mapping") if isinstance(suggestion.get("suggested_mapping"), dict) else {},
+            "fit": suggestion.get("fit"),
+            "rank": suggestion.get("rank") or index,
+        }
+        score = _score_value(suggestion.get("score"))
+        source = str(suggestion.get("source") or "ai")
+        if source != "rule":
+            source = "ai"
+        db.add(Recommendation(
+            dataset_id=dataset_id,
+            plot_type=str(suggestion.get("plot_type") or ""),
+            title=suggestion.get("title"),
+            score=None if score is None else f"{score:.4f}",
+            rationale=suggestion.get("rationale"),
+            required_vars=payload,
+            example_usage=suggestion.get("example_usage"),
+            source=source[:16],
+        ))
+    db.commit()
+
+
 # ---------------------------------------------------------------- recommend
-def ai_recommend(db: Session, dataset_id: uuid.UUID, owner_id: uuid.UUID) -> list[dict]:
+def ai_recommend(db: Session, dataset_id: uuid.UUID, owner_id: uuid.UUID,
+                 refresh: bool = False, prompt: str | None = None) -> list[dict]:
     ds = ds_service.get_dataset(db, dataset_id, owner_id)
+    clean_prompt = (prompt or "").strip()
+    if not refresh and not clean_prompt:
+        cached, found = cached_recommendations(db, dataset_id, owner_id)
+        if found:
+            return cached
     ctx = _project_context(db, ds.project_id)
     if ds.description and ds.description.strip():
         ctx = ((ctx + " ") if ctx else "") + "Dataset: " + ds.description.strip()
     column_profile = ds_service.focused_column_profile(ds)
     if ds.focus_columns:
         ctx = ((ctx + " ") if ctx else "") + "Prioritize these user-selected columns: " + ", ".join(ds.focus_columns)
-    return ai_client.recommend_charts(db, column_profile, project_context=ctx, user_id=owner_id)
+    suggestions = ai_client.recommend_charts(
+        db, column_profile, project_context=ctx, user_id=owner_id, chart_prompt=clean_prompt or None
+    )
+    _save_recommendations(db, dataset_id, suggestions)
+    return suggestions
 
 
 def ai_recommend_from_reference_image(db: Session, dataset_id: uuid.UUID, owner_id: uuid.UUID,

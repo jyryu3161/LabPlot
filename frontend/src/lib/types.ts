@@ -199,6 +199,11 @@ export interface ChartSuggestion {
   source: string;
 }
 
+export interface RecommendationCache {
+  cached: boolean;
+  suggestions: ChartSuggestion[];
+}
+
 export interface PlotField { key: string; label: string; roles: string[]; multi?: boolean; }
 export interface PlotOption { key: string; label: string; type: string; choices?: string[]; default?: unknown; }
 export interface PlotTypeDef {

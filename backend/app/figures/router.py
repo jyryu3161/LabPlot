@@ -20,7 +20,9 @@ from app.figures.schemas import (
     GalleryFigureItem,
     ImprovementResponse,
     LegendResponse,
+    RecommendationCacheResponse,
     RecommendationItem,
+    RecommendationRequest,
     RerenderRequest,
     ReviewResponse,
     SvgEditRequest,
@@ -58,8 +60,18 @@ def enhance_prompt(data: EnhancePromptRequest, db: Session = Depends(get_db), cu
 
 @meta_router.post("/datasets/{dataset_id}/recommend", response_model=list[RecommendationItem],
                   dependencies=[Depends(rate_limit("ai_recommend", 60, 3600))])
-def ai_recommend(dataset_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    return service.ai_recommend(db, dataset_id, current_user.id)
+def ai_recommend(dataset_id: uuid.UUID, data: RecommendationRequest | None = None,
+                 db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    req = data or RecommendationRequest()
+    return service.ai_recommend(
+        db, dataset_id, current_user.id, refresh=req.refresh, prompt=req.prompt
+    )
+
+
+@meta_router.get("/datasets/{dataset_id}/recommendations", response_model=RecommendationCacheResponse)
+def ai_recommendations(dataset_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    suggestions, cached = service.cached_recommendations(db, dataset_id, current_user.id)
+    return {"cached": cached, "suggestions": suggestions}
 
 
 @meta_router.post("/datasets/{dataset_id}/recommend-from-image", response_model=list[RecommendationItem])
