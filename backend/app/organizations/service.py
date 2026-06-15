@@ -199,6 +199,39 @@ def list_members(db: Session, organization_id: uuid.UUID, acting_user: User) -> 
     return [_membership_item(org, membership, user) for membership, user in rows]
 
 
+def search_users_for_organization(db: Session, organization_id: uuid.UUID, q: str | None, acting_user: User, limit: int = 10) -> list[dict]:
+    org = require_org_admin(db, organization_id, acting_user.id)
+    term = (q or "").strip().lower()
+    if len(term) < 2:
+        return []
+    limit = max(1, min(limit, 25))
+    rows = (
+        db.query(User, OrganizationMembership)
+        .outerjoin(
+            OrganizationMembership,
+            (OrganizationMembership.user_id == User.id) & (OrganizationMembership.organization_id == org.id),
+        )
+        .filter(
+            User.is_active == True,
+            or_(func.lower(User.email).like(f"%{term}%"), func.lower(User.display_name).like(f"%{term}%")),
+        )
+        .order_by(User.email.asc())
+        .limit(limit)
+        .all()
+    )
+    return [
+        {
+            "id": user.id,
+            "email": user.email,
+            "display_name": user.display_name,
+            "is_approved": user.is_approved,
+            "membership_status": membership.status if membership else None,
+            "membership_role": membership.role if membership else None,
+        }
+        for user, membership in rows
+    ]
+
+
 def approve_member(db: Session, organization_id: uuid.UUID, membership_id: uuid.UUID, role: str, acting_user: User, request=None) -> dict:
     org = require_org_admin(db, organization_id, acting_user.id)
     membership = db.query(OrganizationMembership).filter(OrganizationMembership.id == membership_id, OrganizationMembership.organization_id == org.id).first()

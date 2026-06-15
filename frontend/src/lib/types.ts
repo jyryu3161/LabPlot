@@ -44,6 +44,15 @@ export interface MembershipItem {
   reviewed_at?: string | null;
 }
 
+export interface OrganizationUserSearchItem {
+  id: string;
+  email: string;
+  display_name: string;
+  is_approved: boolean;
+  membership_status?: 'pending' | 'active' | 'rejected' | null;
+  membership_role?: 'admin' | 'member' | null;
+}
+
 export interface MyOrganizationItem {
   organization: OrganizationItem;
   membership: MembershipItem;
@@ -262,6 +271,13 @@ export interface AdminUser {
   ai_monthly_used: number;
   render_monthly_used: number;
   storage_used_mb: number;
+  organizations: {
+    organization_id: string;
+    organization_name: string;
+    role: 'admin' | 'member';
+    status: 'pending' | 'active' | 'rejected';
+    active: boolean;
+  }[];
 }
 
 export interface AuditLogItem {

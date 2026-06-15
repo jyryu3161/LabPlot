@@ -6,6 +6,14 @@ from pydantic import BaseModel, ConfigDict, Field
 EMAIL_PATTERN = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
 
 
+class AdminUserOrganizationItem(BaseModel):
+    organization_id: uuid.UUID
+    organization_name: str
+    role: str
+    status: str
+    active: bool = False
+
+
 class AdminUserItem(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -29,6 +37,7 @@ class AdminUserItem(BaseModel):
     ai_monthly_used: int = 0
     render_monthly_used: int = 0
     storage_used_mb: float = 0.0
+    organizations: list[AdminUserOrganizationItem] = Field(default_factory=list)
 
 
 class AdminUserUpdate(BaseModel):

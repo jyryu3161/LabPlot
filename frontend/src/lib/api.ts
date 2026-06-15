@@ -3,7 +3,7 @@ import type {
   DatasetListItem, DatasetDetail, ChartSuggestion, PlotTypeDef, StyleDef,
   FigureListItem, FigureDetail, FigureVersion, Review, Improvement, AdminUser, AIConfig, GalleryFigureItem, AuditLogItem,
   ClientErrorItem, Project, ProjectListItem, EmailDeliveryStatus,
-  MembershipItem, MyOrganizationItem, OrganizationAIConfig, OrganizationItem, OrganizationSearchItem, OrganizationUsageSummary,
+  MembershipItem, MyOrganizationItem, OrganizationAIConfig, OrganizationItem, OrganizationSearchItem, OrganizationUsageSummary, OrganizationUserSearchItem,
 } from './types';
 
 // Same-origin by default; Caddy proxies /api and /static to the backend.
@@ -136,6 +136,9 @@ export async function setActiveOrganization(organization_id: string | null): Pro
 }
 export async function listOrganizationMembers(id: string): Promise<MembershipItem[]> {
   return fetcher(`/api/organizations/${id}/members`);
+}
+export async function searchOrganizationUsers(id: string, q: string): Promise<OrganizationUserSearchItem[]> {
+  return fetcher(`/api/organizations/${id}/user-search?q=${encodeURIComponent(q)}`);
 }
 export async function approveOrganizationMember(organizationId: string, membershipId: string, role: 'admin' | 'member' = 'member'): Promise<MembershipItem> {
   return fetcher(`/api/organizations/${organizationId}/members/${membershipId}/approve`, { method: 'POST', body: JSON.stringify({ role }) });

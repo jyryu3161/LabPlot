@@ -21,6 +21,7 @@ from app.organizations.schemas import (
     OrganizationItem,
     OrganizationSearchItem,
     OrganizationUpdate,
+    OrganizationUserSearchItem,
     OrganizationUsageSummary,
 )
 
@@ -108,6 +109,17 @@ def list_members(
     current_user: User = Depends(get_current_user),
 ):
     return service.list_members(db, organization_id, current_user)
+
+
+@router.get("/{organization_id}/user-search", response_model=list[OrganizationUserSearchItem])
+def search_users_for_organization(
+    organization_id: uuid.UUID,
+    q: str | None = None,
+    limit: int = 10,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return service.search_users_for_organization(db, organization_id, q, current_user, limit=limit)
 
 
 @router.post("/{organization_id}/members/{membership_id}/approve", response_model=MembershipItem)

@@ -195,7 +195,7 @@ export default function AdminPage() {
               : (
                 <table className="w-full text-sm">
                   <thead><tr className="border-b text-left text-muted-foreground">
-                    <th className="px-2 py-2">Email</th><th className="px-2 py-2">Name</th><th className="px-2 py-2">Role</th>
+                    <th className="px-2 py-2">Email</th><th className="px-2 py-2">Name</th><th className="px-2 py-2">Organizations</th><th className="px-2 py-2">Role</th>
                     <th className="px-2 py-2">Approval</th><th className="px-2 py-2">Active</th><th className="px-2 py-2">Data</th><th className="px-2 py-2">Figs</th>
                     <th className="px-2 py-2">AI Calls</th><th className="px-2 py-2">Renders</th><th className="px-2 py-2">Storage</th>
                     <th className="px-2 py-2">Tokens</th><th className="px-2 py-2">Est. Cost</th><th className="px-2 py-2">Actions</th>
@@ -205,6 +205,19 @@ export default function AdminPage() {
                       <tr key={u.id} className="border-b last:border-0">
                         <td className="px-2 py-2 font-medium">{u.email}</td>
                         <td className="px-2 py-2">{u.display_name}</td>
+                        <td className="min-w-48 px-2 py-2">
+                          {u.organizations?.length ? (
+                            <div className="flex max-w-64 flex-wrap gap-1">
+                              {u.organizations.map((org) => (
+                                <Badge key={`${u.id}-${org.organization_id}`} variant={org.status === 'active' ? 'outline' : 'secondary'} title={`${org.organization_name} · ${org.role} · ${org.status}`}>
+                                  {org.organization_name}{org.active ? ' *' : ''} · {org.role}{org.status !== 'active' ? `/${org.status}` : ''}
+                                </Badge>
+                              ))}
+                            </div>
+                          ) : (
+                            <span className="text-xs text-muted-foreground">-</span>
+                          )}
+                        </td>
                         <td className="px-2 py-2">
                           <Badge variant={u.is_admin ? 'default' : 'secondary'} className="cursor-pointer"
                             onClick={() => u.id !== user?.id && update.mutate({ id: u.id, data: { is_admin: !u.is_admin } })}>

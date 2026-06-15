@@ -23,6 +23,7 @@ from app.common.quotas import quota_summary
 from app.config import settings
 from app.datasets.models import Dataset
 from app.figures.models import Figure, FigureCodeArtifact
+from app.organizations.models import Organization, OrganizationMembership
 
 
 def list_users(db: Session) -> list[dict]:
@@ -58,9 +59,28 @@ def list_users(db: Session) -> list[dict]:
         }
         for user_id, request_count, input_tokens, output_tokens, total_tokens, estimated_cost in usage_rows
     }
+    memberships_by_user: dict[uuid.UUID, list[dict]] = {}
+    org_rows = (
+        db.query(OrganizationMembership, Organization)
+        .join(Organization, Organization.id == OrganizationMembership.organization_id)
+        .filter(Organization.is_active == True)
+        .order_by(Organization.name.asc())
+        .all()
+    )
+    for membership, org in org_rows:
+        memberships_by_user.setdefault(membership.user_id, []).append({
+            "organization_id": org.id,
+            "organization_name": org.name,
+            "role": membership.role,
+            "status": membership.status,
+        })
     out = []
     for u in users:
         quotas = quota_summary(db, u)
+        memberships = [
+            {**row, "active": bool(u.active_organization_id == row["organization_id"])}
+            for row in memberships_by_user.get(u.id, [])
+        ]
         out.append({
             "id": u.id,
             "email": u.email,
@@ -75,6 +95,7 @@ def list_users(db: Session) -> list[dict]:
             "created_at": u.created_at,
             "dataset_count": ds_counts.get(u.id, 0),
             "figure_count": fig_counts.get(u.id, 0),
+            "organizations": memberships,
             **usage.get(u.id, {
                 "ai_request_count": 0,
                 "ai_input_tokens": 0,

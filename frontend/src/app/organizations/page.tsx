@@ -22,6 +22,7 @@ import {
   listOrganizationMembers,
   rejectOrganizationMember,
   searchOrganizations,
+  searchOrganizationUsers,
   setActiveOrganization,
   updateOrganizationAiConfig,
 } from '@/lib/api';
@@ -52,6 +53,11 @@ export default function OrganizationsPage() {
     queryKey: ['organization-members', selectedId],
     queryFn: () => listOrganizationMembers(selectedId!),
     enabled: Boolean(selectedId && canAdmin),
+  });
+  const { data: userMatches, isFetching: searchingUsers } = useQuery({
+    queryKey: ['organization-user-search', selectedId, memberEmail],
+    queryFn: () => searchOrganizationUsers(selectedId!, memberEmail),
+    enabled: Boolean(selectedId && canAdmin && memberEmail.trim().length >= 2),
   });
   const { data: aiCfg } = useQuery({
     queryKey: ['organization-ai-config', selectedId],
@@ -234,9 +240,36 @@ export default function OrganizationsPage() {
                     <CardHeader className="pb-2"><CardTitle className="flex items-center gap-2 text-base"><Users className="h-4 w-4" /> Members</CardTitle></CardHeader>
                     <CardContent className="space-y-4 overflow-x-auto">
                       <div className="grid items-end gap-2 rounded-md border bg-muted/20 p-3 md:grid-cols-[minmax(0,1fr)_140px_auto]">
-                        <div className="space-y-1">
+                        <div className="relative space-y-1">
                           <Label>Existing user email</Label>
                           <Input type="email" value={memberEmail} onChange={(e) => setMemberEmail(e.target.value)} placeholder="user@lab.edu" />
+                          {memberEmail.trim().length >= 2 && (
+                            <div className="absolute left-0 right-0 top-full z-20 mt-1 max-h-56 overflow-auto rounded-md border bg-background shadow-lg">
+                              {searchingUsers ? (
+                                <div className="flex items-center gap-2 px-3 py-2 text-xs text-muted-foreground"><Loader2 className="h-3.5 w-3.5 animate-spin" /> Searching...</div>
+                              ) : (userMatches ?? []).length > 0 ? (
+                                (userMatches ?? []).map((match) => (
+                                  <button
+                                    key={match.id}
+                                    type="button"
+                                    onClick={() => setMemberEmail(match.email)}
+                                    className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm hover:bg-muted"
+                                  >
+                                    <span className="min-w-0">
+                                      <span className="block truncate font-medium">{match.display_name}</span>
+                                      <span className="block truncate text-xs text-muted-foreground">{match.email}</span>
+                                    </span>
+                                    <span className="flex shrink-0 gap-1">
+                                      {!match.is_approved && <Badge variant="secondary">pending approval</Badge>}
+                                      {match.membership_status && <Badge variant={match.membership_status === 'active' ? 'outline' : 'secondary'}>{match.membership_status}</Badge>}
+                                    </span>
+                                  </button>
+                                ))
+                              ) : (
+                                <div className="px-3 py-2 text-xs text-muted-foreground">No matching users.</div>
+                              )}
+                            </div>
+                          )}
                         </div>
                         <div className="space-y-1">
                           <Label>Role</Label>

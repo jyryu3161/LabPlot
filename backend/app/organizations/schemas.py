@@ -73,6 +73,15 @@ class AddOrganizationMemberRequest(BaseModel):
     role: str = Field(default="member", pattern="^(admin|member)$")
 
 
+class OrganizationUserSearchItem(BaseModel):
+    id: uuid.UUID
+    email: str
+    display_name: str
+    is_approved: bool
+    membership_status: str | None = None
+    membership_role: str | None = None
+
+
 class ActiveOrganizationRequest(BaseModel):
     organization_id: uuid.UUID | None = None
 
