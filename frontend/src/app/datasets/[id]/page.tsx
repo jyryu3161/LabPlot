@@ -571,31 +571,48 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
             <Card id="builder">
               <CardHeader><CardTitle className="text-base">Chart builder</CardTitle></CardHeader>
               <CardContent className="space-y-4">
-                <div className="space-y-1 rounded-lg border bg-muted/20 p-3">
-                  <Label htmlFor="format-figure-select">Copy format from my figure</Label>
-                  <select
-                    id="format-figure-select"
-                    data-testid="format-figure-select"
-                    className="w-full rounded-md border bg-background px-3 py-2 text-sm"
-                    value={formatFigureId}
-                    onChange={(e) => {
-                      const next = e.target.value;
-                      setFormatFigureId(next);
-                      if (next) applyFigureFormat.mutate(next);
-                    }}
-                    disabled={applyFigureFormat.isPending || formatCopyFigures.length === 0}
-                  >
-                    <option value="">{formatCopyFigures.length ? 'Choose a saved figure...' : 'No saved figures available yet'}</option>
-                    {formatCopyFigures.map((figure) => {
-                      const compatible = compatiblePlotTypeSet.has(figure.plot_type);
-                      return (
-                        <option key={figure.id} value={figure.id} disabled={!compatible}>
-                          {figure.name} - {figure.plot_type.replace(/_/g, ' ')}{compatible ? '' : ' (needs different data)'}
-                        </option>
-                      );
-                    })}
-                  </select>
-                  <p className="text-xs text-muted-foreground">Copies chart type, style preset, and visual settings. Column mappings are remapped to this dataset.</p>
+                <div className="space-y-3 rounded-lg border bg-muted/20 p-3">
+                  <div>
+                    <p className="text-sm font-medium">Use one of my figures as a template</p>
+                    <p className="text-xs text-muted-foreground">Copies chart type, style preset, and visual settings. Column mappings are remapped to this dataset.</p>
+                  </div>
+                  {formatCopyFigures.length === 0 ? (
+                    <div className="rounded-lg border border-dashed bg-background p-4 text-sm text-muted-foreground">No saved figures available yet.</div>
+                  ) : (
+                    <div className="grid max-h-[28rem] gap-3 overflow-y-auto pr-1 sm:grid-cols-2 lg:grid-cols-3">
+                      {formatCopyFigures.map((figure) => {
+                        const compatible = compatiblePlotTypeSet.has(figure.plot_type);
+                        const selected = formatFigureId === figure.id;
+                        return (
+                          <button
+                            key={figure.id}
+                            type="button"
+                            data-testid="figure-format-card"
+                            aria-label={`Use figure format ${figure.name}`}
+                            disabled={!compatible || applyFigureFormat.isPending}
+                            onClick={() => applyFigureFormat.mutate(figure.id)}
+                            className={`overflow-hidden rounded-lg border bg-background text-left transition ${selected ? 'border-primary ring-2 ring-primary/20' : 'hover:border-primary hover:shadow-sm'} disabled:cursor-not-allowed disabled:opacity-55`}
+                          >
+                            {figure.thumb_url ? (
+                              <img src={figure.thumb_url} alt={figure.name} className="aspect-[4/3] w-full bg-white object-contain" loading="lazy" decoding="async" />
+                            ) : (
+                              <div className="flex aspect-[4/3] w-full items-center justify-center bg-white text-muted-foreground">
+                                <ImageIcon className="h-8 w-8" />
+                              </div>
+                            )}
+                            <div className="space-y-1 p-3">
+                              <p className="truncate text-sm font-medium">{figure.name}</p>
+                              <div className="flex flex-wrap gap-1">
+                                <Badge variant="secondary">{figure.plot_type.replace(/_/g, ' ')}</Badge>
+                                <Badge variant="outline">{formatStylePreset(figure.style_preset)}</Badge>
+                                {!compatible && <Badge variant="outline">needs different data</Badge>}
+                              </div>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
                 <div className="grid gap-4 md:grid-cols-2">
                   <div className="space-y-1">

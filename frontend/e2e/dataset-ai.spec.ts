@@ -94,7 +94,7 @@ test('dataset upload saves purpose and auto-runs Ask AI recommendations', async 
     await expect(page.getByText('Templates that fit this data')).toHaveCount(0);
     await expect(page.getByRole('button', { name: /Ask AI for charts/ })).toBeVisible();
 
-    await page.getByLabel('Copy format from my figure').selectOption(source.figureId);
+    await page.getByRole('button', { name: `Use figure format ${source.figureName}` }).click();
     await expect(page.locator('[data-testid="in-plot-title"]')).toHaveValue('Copied template title');
     await expect(page.locator('[data-testid="chart-type-select"]')).toHaveValue('scatter');
 
