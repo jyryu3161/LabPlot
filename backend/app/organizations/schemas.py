@@ -68,6 +68,11 @@ class MembershipDecision(BaseModel):
     role: str = Field(default="member", pattern="^(admin|member)$")
 
 
+class AddOrganizationMemberRequest(BaseModel):
+    email: str = Field(..., min_length=3, max_length=255, pattern=EMAIL_PATTERN)
+    role: str = Field(default="member", pattern="^(admin|member)$")
+
+
 class ActiveOrganizationRequest(BaseModel):
     organization_id: uuid.UUID | None = None
 

@@ -10,6 +10,7 @@ from app.common.security import rate_limit
 from app.organizations import service
 from app.organizations.schemas import (
     ActiveOrganizationRequest,
+    AddOrganizationMemberRequest,
     JoinOrganizationRequest,
     MembershipDecision,
     MembershipItem,
@@ -130,6 +131,17 @@ def reject_member(
     current_user: User = Depends(get_current_user),
 ):
     return service.reject_member(db, organization_id, membership_id, current_user, request=request)
+
+
+@router.post("/{organization_id}/members", response_model=MembershipItem)
+def add_existing_member(
+    organization_id: uuid.UUID,
+    data: AddOrganizationMemberRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return service.add_existing_member(db, organization_id, data.email, data.role, current_user, request=request)
 
 
 @router.get("/{organization_id}/ai-config", response_model=OrganizationAIConfigView)

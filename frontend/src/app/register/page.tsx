@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { useAuthContext } from '@/components/auth/AuthProvider';
 import { searchOrganizations } from '@/lib/api';
 import type { OrganizationSearchItem } from '@/lib/types';
@@ -13,6 +14,7 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Loader2 } from 'lucide-react';
 
 export default function RegisterPage() {
+  const router = useRouter();
   const { register } = useAuthContext();
   const [displayName, setDisplayName] = useState('');
   const [email, setEmail] = useState('');
@@ -24,7 +26,6 @@ export default function RegisterPage() {
   const [selectedOrg, setSelectedOrg] = useState<OrganizationSearchItem | null>(null);
   const [newOrgName, setNewOrgName] = useState('');
   const [error, setError] = useState('');
-  const [success, setSuccess] = useState('');
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
@@ -42,7 +43,7 @@ export default function RegisterPage() {
   }, [orgMode, orgQuery]);
 
   const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault(); setError(''); setSuccess('');
+    e.preventDefault(); setError('');
     if (password !== confirm) { setError('Passwords do not match'); return; }
     if (password.length < 10 || !/[A-Za-z]/.test(password) || !/\d/.test(password)) {
       setError('Password must be at least 10 characters and include a letter and a number');
@@ -65,12 +66,7 @@ export default function RegisterPage() {
         ...(orgMode === 'join' && selectedOrg ? { organization_id: selectedOrg.id } : {}),
         ...(orgMode === 'create' ? { organization_name: newOrgName.trim() } : {}),
       });
-      setSuccess(orgMode === 'create'
-        ? 'Account and organization created. You can sign in as the organization admin.'
-        : orgMode === 'join'
-          ? 'Account created. Your organization admin must approve your request before you can sign in.'
-          : 'Account created. A platform admin must approve it before you can sign in.');
-      setDisplayName(''); setEmail(''); setPassword(''); setConfirm(''); setSelectedOrg(null); setNewOrgName('');
+      router.push(`/login?registered=${orgMode}`);
     }
     catch (err) { setError(err instanceof Error ? err.message : 'Registration failed'); }
     finally { setLoading(false); }
@@ -86,7 +82,6 @@ export default function RegisterPage() {
         <CardContent>
           <form onSubmit={handleSubmit} className="space-y-4">
             {error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}
-            {success && <Alert><AlertDescription>{success}</AlertDescription></Alert>}
             <div className="space-y-2">
               <Label htmlFor="dn">Name</Label>
               <Input id="dn" value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="Dr. Kim" required />

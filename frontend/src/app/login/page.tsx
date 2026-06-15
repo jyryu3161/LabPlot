@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useAuthContext } from '@/components/auth/AuthProvider';
 import { Button } from '@/components/ui/button';
@@ -15,10 +15,22 @@ export default function LoginPage() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
   const [loading, setLoading] = useState(false);
 
+  useEffect(() => {
+    const registered = new URLSearchParams(window.location.search).get('registered');
+    if (registered === 'create') {
+      setNotice('Account and organization created. You can sign in as the organization admin.');
+    } else if (registered === 'join') {
+      setNotice('Account created. Your organization admin must approve your request before you can sign in.');
+    } else if (registered === 'none') {
+      setNotice('Account created. A platform admin must approve it before you can sign in.');
+    }
+  }, []);
+
   const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault(); setError(''); setLoading(true);
+    e.preventDefault(); setError(''); setNotice(''); setLoading(true);
     try { await login({ email, password }); }
     catch (err) { setError(err instanceof Error ? err.message : 'Login failed'); }
     finally { setLoading(false); }
@@ -33,6 +45,7 @@ export default function LoginPage() {
         </CardHeader>
         <CardContent>
           <form onSubmit={handleSubmit} className="space-y-4">
+            {notice && <Alert><AlertDescription>{notice}</AlertDescription></Alert>}
             {error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}
             <div className="space-y-2">
               <Label htmlFor="email">Email</Label>

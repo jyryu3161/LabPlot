@@ -140,6 +140,9 @@ export async function listOrganizationMembers(id: string): Promise<MembershipIte
 export async function approveOrganizationMember(organizationId: string, membershipId: string, role: 'admin' | 'member' = 'member'): Promise<MembershipItem> {
   return fetcher(`/api/organizations/${organizationId}/members/${membershipId}/approve`, { method: 'POST', body: JSON.stringify({ role }) });
 }
+export async function addOrganizationMember(organizationId: string, email: string, role: 'admin' | 'member' = 'member'): Promise<MembershipItem> {
+  return fetcher(`/api/organizations/${organizationId}/members`, { method: 'POST', body: JSON.stringify({ email, role }) });
+}
 export async function rejectOrganizationMember(organizationId: string, membershipId: string): Promise<MembershipItem> {
   return fetcher(`/api/organizations/${organizationId}/members/${membershipId}/reject`, { method: 'POST' });
 }

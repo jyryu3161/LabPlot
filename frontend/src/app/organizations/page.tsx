@@ -12,6 +12,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import {
+  addOrganizationMember,
   approveOrganizationMember,
   createOrganization,
   getOrganizationAiConfig,
@@ -39,6 +40,8 @@ export default function OrganizationsPage() {
   const [geminiModel, setGeminiModel] = useState('');
   const [anthropicKey, setAnthropicKey] = useState('');
   const [geminiKey, setGeminiKey] = useState('');
+  const [memberEmail, setMemberEmail] = useState('');
+  const [memberRole, setMemberRole] = useState<'admin' | 'member'>('member');
 
   const { data: myOrgs, isLoading } = useQuery({ queryKey: ['my-organizations'], queryFn: listMyOrganizations });
   const { data: searchResults } = useQuery({ queryKey: ['organization-search', query], queryFn: () => searchOrganizations(query) });
@@ -91,6 +94,11 @@ export default function OrganizationsPage() {
     mutationFn: ({ id, role }: { id: string; role: 'admin' | 'member' }) => approveOrganizationMember(selectedId!, id, role),
     onSuccess: () => { toast.success('Member approved'); refresh(); },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Approval failed'),
+  });
+  const addMember = useMutation({
+    mutationFn: () => addOrganizationMember(selectedId!, memberEmail, memberRole),
+    onSuccess: () => { toast.success('Member added'); setMemberEmail(''); setMemberRole('member'); refresh(); },
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Add member failed'),
   });
   const reject = useMutation({
     mutationFn: (id: string) => rejectOrganizationMember(selectedId!, id),
@@ -224,7 +232,23 @@ export default function OrganizationsPage() {
 
                   <Card>
                     <CardHeader className="pb-2"><CardTitle className="flex items-center gap-2 text-base"><Users className="h-4 w-4" /> Members</CardTitle></CardHeader>
-                    <CardContent className="overflow-x-auto">
+                    <CardContent className="space-y-4 overflow-x-auto">
+                      <div className="grid items-end gap-2 rounded-md border bg-muted/20 p-3 md:grid-cols-[minmax(0,1fr)_140px_auto]">
+                        <div className="space-y-1">
+                          <Label>Existing user email</Label>
+                          <Input type="email" value={memberEmail} onChange={(e) => setMemberEmail(e.target.value)} placeholder="user@lab.edu" />
+                        </div>
+                        <div className="space-y-1">
+                          <Label>Role</Label>
+                          <select className="w-full rounded-md border bg-background px-3 py-2 text-sm" value={memberRole} onChange={(e) => setMemberRole(e.target.value as 'admin' | 'member')}>
+                            <option value="member">Member</option>
+                            <option value="admin">Admin</option>
+                          </select>
+                        </div>
+                        <Button onClick={() => addMember.mutate()} disabled={addMember.isPending || !memberEmail.trim()}>
+                          {addMember.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Add user'}
+                        </Button>
+                      </div>
                       <table className="w-full text-sm">
                         <thead><tr className="border-b text-left text-muted-foreground"><th className="px-2 py-2">User</th><th className="px-2 py-2">Role</th><th className="px-2 py-2">Status</th><th className="px-2 py-2">Actions</th></tr></thead>
                         <tbody>

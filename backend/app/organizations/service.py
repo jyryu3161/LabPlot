@@ -227,6 +227,44 @@ def approve_member(db: Session, organization_id: uuid.UUID, membership_id: uuid.
     return _membership_item(org, membership, member_user)
 
 
+def add_existing_member(db: Session, organization_id: uuid.UUID, email: str, role: str, acting_user: User, request=None) -> dict:
+    org = require_org_admin(db, organization_id, acting_user.id)
+    normalized_email = email.strip().lower()
+    member_user = db.query(User).filter(User.email == normalized_email).first()
+    if not member_user:
+        raise NotFoundError("User", normalized_email)
+    membership = _membership(db, organization_id, member_user.id)
+    if membership:
+        membership.status = "active"
+        membership.role = role if role in {"admin", "member"} else "member"
+        membership.reviewed_at = _now()
+        membership.reviewed_by_id = acting_user.id
+    else:
+        membership = OrganizationMembership(
+            organization_id=org.id,
+            user_id=member_user.id,
+            role=role if role in {"admin", "member"} else "member",
+            status="active",
+            reviewed_at=_now(),
+            reviewed_by_id=acting_user.id,
+        )
+        db.add(membership)
+    member_user.is_approved = True
+    if member_user.active_organization_id is None:
+        member_user.active_organization_id = org.id
+    audit_service.log_event(
+        db,
+        actor_id=acting_user.id,
+        action="organization.membership.add_existing",
+        target_type="organization_membership",
+        target_id=membership.id,
+        metadata={"organization_id": org.id, "user_id": member_user.id, "role": membership.role},
+        request=request,
+    )
+    db.commit()
+    return _membership_item(org, membership, member_user)
+
+
 def reject_member(db: Session, organization_id: uuid.UUID, membership_id: uuid.UUID, acting_user: User, request=None) -> dict:
     org = require_org_admin(db, organization_id, acting_user.id)
     membership = db.query(OrganizationMembership).filter(OrganizationMembership.id == membership_id, OrganizationMembership.organization_id == org.id).first()
