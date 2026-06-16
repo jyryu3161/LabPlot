@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, type MouseEvent } from 'react';
 import { toast } from 'sonner';
-import { AlertTriangle, Download, Loader2, Maximize2, MousePointer2, RefreshCw, Save, Type } from 'lucide-react';
+import { AlertTriangle, Download, Loader2, Maximize2, MousePointer2, RefreshCw, Ruler, Save, SlidersHorizontal, Type } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -11,10 +11,30 @@ import { Label } from '@/components/ui/label';
 
 const EDITABLE_SELECTOR = 'path,line,polyline,polygon,rect,circle,ellipse,text,tspan';
 const HEAVY_SVG_ELEMENT_LIMIT = 1500;
+const PT_PER_MM = 72 / 25.4;
+const PX_PER_MM = 96 / 25.4;
+const LENGTH_RE = /^(-?\d*\.?\d+(?:e[-+]?\d+)?)([a-zA-Z%]*)$/i;
+
+const RESIZE_PRESETS = [
+  { label: 'Single column', targetMm: 85, fontScale: 0.85, strokeScale: 0.75, markerScale: 0.75 },
+  { label: 'Double column', targetMm: 170, fontScale: 1, strokeScale: 1, markerScale: 1 },
+  { label: 'Compact panel', targetMm: 55, fontScale: 0.75, strokeScale: 0.65, markerScale: 0.65 },
+];
 
 interface TextItem {
   index: string;
   label: string;
+}
+
+interface SvgLength {
+  value: number;
+  unit: string;
+}
+
+interface SvgDimensions {
+  width: number;
+  height: number;
+  unit: string;
 }
 
 interface SvgVectorEditorProps {
@@ -74,21 +94,159 @@ function styleValue(el: SVGElement, prop: string): string {
   return el.style.getPropertyValue(prop) || el.getAttribute(prop) || '';
 }
 
-function numericSvgLength(value: string | null | undefined): number | null {
-  if (!value) return null;
-  const parsed = parseFloat(value);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+function roundLength(value: number): number {
+  return Number(value.toFixed(2));
 }
 
-function svgDimensions(svg: SVGSVGElement): { width: number; height: number } {
-  const attrWidth = numericSvgLength(svg.getAttribute('width'));
-  const attrHeight = numericSvgLength(svg.getAttribute('height'));
-  if (attrWidth && attrHeight) return { width: attrWidth, height: attrHeight };
+function formatLengthNumber(value: number): string {
+  return Number(value.toFixed(3)).toString();
+}
+
+function parseSvgLength(value: string | null | undefined): SvgLength | null {
+  if (!value) return null;
+  const match = value.trim().match(LENGTH_RE);
+  if (!match) return null;
+  const parsed = Number(match[1]);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return { value: parsed, unit: match[2] || 'px' };
+}
+
+function svgDimensions(svg: SVGSVGElement): SvgDimensions {
+  const attrWidth = parseSvgLength(svg.getAttribute('width'));
+  const attrHeight = parseSvgLength(svg.getAttribute('height'));
+  if (attrWidth && attrHeight) return { width: attrWidth.value, height: attrHeight.value, unit: attrWidth.unit || attrHeight.unit || 'px' };
   const viewBox = svg.getAttribute('viewBox')?.trim().split(/\s+/).map(Number);
   if (viewBox && viewBox.length === 4 && viewBox.every(Number.isFinite) && viewBox[2] > 0 && viewBox[3] > 0) {
-    return { width: viewBox[2], height: viewBox[3] };
+    return { width: viewBox[2], height: viewBox[3], unit: attrWidth?.unit || attrHeight?.unit || 'px' };
   }
-  return { width: 720, height: 500 };
+  return { width: 720, height: 500, unit: 'px' };
+}
+
+function unitToMm(value: number, unit: string): number | null {
+  if (!Number.isFinite(value) || value <= 0) return null;
+  switch (unit) {
+    case 'mm':
+      return value;
+    case 'cm':
+      return value * 10;
+    case 'in':
+      return value * 25.4;
+    case 'pt':
+      return value / PT_PER_MM;
+    case 'px':
+    default:
+      return value / PX_PER_MM;
+  }
+}
+
+function mmToUnit(value: number, unit: string): number {
+  switch (unit) {
+    case 'mm':
+      return value;
+    case 'cm':
+      return value / 10;
+    case 'in':
+      return value / 25.4;
+    case 'pt':
+      return value * PT_PER_MM;
+    case 'px':
+    default:
+      return value * PX_PER_MM;
+  }
+}
+
+function formatSvgLength(value: number, unit: string): string {
+  return `${formatLengthNumber(value)}${unit || 'px'}`;
+}
+
+function scaleNumericValue(value: string | null | undefined, scale: number, allowPercent = false): string | null {
+  if (!value || !Number.isFinite(scale) || scale <= 0) return null;
+  const match = value.trim().match(LENGTH_RE);
+  if (!match) return null;
+  const unit = match[2] || '';
+  if (unit === '%' && !allowPercent) return null;
+  const parsed = Number(match[1]);
+  if (!Number.isFinite(parsed)) return null;
+  return `${formatLengthNumber(parsed * scale)}${unit}`;
+}
+
+function scaleNumericList(value: string | null | undefined, scale: number): string | null {
+  if (!value) return null;
+  let changed = false;
+  const next = value.replace(/-?\d*\.?\d+(?:e[-+]?\d+)?[a-zA-Z%]*/gi, (token) => {
+    const scaled = scaleNumericValue(token, scale);
+    if (!scaled) return token;
+    changed = true;
+    return scaled;
+  });
+  return changed ? next : null;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function scaleStyleProperty(style: string, prop: string, scale: number, list = false): string {
+  const pattern = new RegExp(`(${escapeRegExp(prop)}\\s*:\\s*)([^;]+)`, 'gi');
+  return style.replace(pattern, (full, prefix: string, raw: string) => {
+    const scaled = list ? scaleNumericList(raw, scale) : scaleNumericValue(raw, scale);
+    return scaled ? `${prefix}${scaled}` : full;
+  });
+}
+
+function scaleAttribute(el: Element, attr: string, scale: number, list = false): void {
+  const raw = el.getAttribute(attr);
+  const scaled = list ? scaleNumericList(raw, scale) : scaleNumericValue(raw, scale);
+  if (scaled) el.setAttribute(attr, scaled);
+}
+
+function scaleSvgPresentation(svg: SVGSVGElement, scales: { font: number; stroke: number; marker: number }): void {
+  const fontScale = Number.isFinite(scales.font) && scales.font > 0 ? scales.font : 1;
+  const strokeScale = Number.isFinite(scales.stroke) && scales.stroke > 0 ? scales.stroke : 1;
+  const markerScale = Number.isFinite(scales.marker) && scales.marker > 0 ? scales.marker : 1;
+
+  svg.querySelectorAll('*').forEach((el) => {
+    if (fontScale !== 1) {
+      scaleAttribute(el, 'font-size', fontScale);
+      scaleAttribute(el, 'textLength', fontScale);
+      scaleAttribute(el, 'letter-spacing', fontScale);
+      scaleAttribute(el, 'word-spacing', fontScale);
+    }
+
+    if (strokeScale !== 1) {
+      scaleAttribute(el, 'stroke-width', strokeScale);
+      scaleAttribute(el, 'stroke-dashoffset', strokeScale);
+      scaleAttribute(el, 'stroke-dasharray', strokeScale, true);
+    }
+
+    if (markerScale !== 1) {
+      const tag = el.tagName.toLowerCase();
+      if (tag === 'circle') scaleAttribute(el, 'r', markerScale);
+      if (tag === 'ellipse') {
+        scaleAttribute(el, 'rx', markerScale);
+        scaleAttribute(el, 'ry', markerScale);
+      }
+      if (tag === 'marker') {
+        scaleAttribute(el, 'markerWidth', markerScale);
+        scaleAttribute(el, 'markerHeight', markerScale);
+      }
+    }
+
+    const style = el.getAttribute('style');
+    if (!style) return;
+    let nextStyle = style;
+    if (fontScale !== 1) {
+      nextStyle = scaleStyleProperty(nextStyle, 'font-size', fontScale);
+      nextStyle = scaleStyleProperty(nextStyle, 'letter-spacing', fontScale);
+      nextStyle = scaleStyleProperty(nextStyle, 'word-spacing', fontScale);
+    }
+    if (strokeScale !== 1) {
+      nextStyle = scaleStyleProperty(nextStyle, 'stroke-width', strokeScale);
+      nextStyle = scaleStyleProperty(nextStyle, 'stroke-dashoffset', strokeScale);
+      nextStyle = scaleStyleProperty(nextStyle, 'stroke-dasharray', strokeScale, true);
+    }
+    if (nextStyle !== style) el.setAttribute('style', nextStyle);
+  });
 }
 
 function selectedEditable(host: HTMLDivElement | null): SVGElement | null {
@@ -110,6 +268,8 @@ function safeFilename(name: string): string {
 
 export function SvgVectorEditor({ svgUrl, filenameBase, versionNumber, isSaving = false, onSaveVersion }: SvgVectorEditorProps) {
   const stageRef = useRef<HTMLDivElement>(null);
+  const presentationScaleRef = useRef({ font: 1, stroke: 1, marker: 1 });
+  const baselineWidthMmRef = useRef<number | null>(null);
   const [svgMarkup, setSvgMarkup] = useState('');
   const [originalMarkup, setOriginalMarkup] = useState('');
   const [loading, setLoading] = useState(false);
@@ -124,7 +284,12 @@ export function SvgVectorEditor({ svgUrl, filenameBase, versionNumber, isSaving 
   const [textValue, setTextValue] = useState('');
   const [svgWidth, setSvgWidth] = useState(720);
   const [svgHeight, setSvgHeight] = useState(500);
+  const [svgUnit, setSvgUnit] = useState('px');
   const [lockAspect, setLockAspect] = useState(true);
+  const [targetWidthMm, setTargetWidthMm] = useState(85);
+  const [fontScale, setFontScale] = useState(0.85);
+  const [strokeScaleResize, setStrokeScaleResize] = useState(0.75);
+  const [markerScale, setMarkerScale] = useState(0.75);
 
   const refreshTextItems = useCallback(() => {
     const host = stageRef.current;
@@ -169,12 +334,17 @@ export function SvgVectorEditor({ svgUrl, filenameBase, versionNumber, isSaving 
     syncControls(el);
   }, [syncControls]);
 
-  const syncSvgSize = useCallback(() => {
+  const syncSvgSize = useCallback((resetBaseline = false) => {
     const svg = stageRef.current?.querySelector('svg') as SVGSVGElement | null;
     if (!svg) return;
     const dims = svgDimensions(svg);
-    setSvgWidth(Math.round(dims.width));
-    setSvgHeight(Math.round(dims.height));
+    const widthMm = unitToMm(dims.width, dims.unit);
+    setSvgWidth(roundLength(dims.width));
+    setSvgHeight(roundLength(dims.height));
+    setSvgUnit(dims.unit);
+    if (widthMm) {
+      if (resetBaseline || baselineWidthMmRef.current === null) baselineWidthMmRef.current = widthMm;
+    }
   }, []);
 
   useEffect(() => {
@@ -182,6 +352,8 @@ export function SvgVectorEditor({ svgUrl, filenameBase, versionNumber, isSaving 
 
     async function loadSvg() {
       if (stageRef.current) stageRef.current.innerHTML = '';
+      presentationScaleRef.current = { font: 1, stroke: 1, marker: 1 };
+      baselineWidthMmRef.current = null;
       setSvgMarkup('');
       setOriginalMarkup('');
       setError(null);
@@ -217,16 +389,19 @@ export function SvgVectorEditor({ svgUrl, filenameBase, versionNumber, isSaving 
     if (!host || !svgMarkup) return;
     host.innerHTML = svgMarkup;
     setElementCount(host.querySelectorAll(EDITABLE_SELECTOR).length);
-    syncSvgSize();
+    syncSvgSize(true);
     refreshTextItems();
   }, [svgMarkup, refreshTextItems, syncSvgSize]);
 
   function handleStageClick(event: MouseEvent<HTMLDivElement>) {
     const target = event.target as Element | null;
     const host = stageRef.current;
-    if (!target || !host || target === host) return;
+    if (!target || !host) return;
     const editable = target.closest('[data-labplot-editable="true"]') as SVGElement | null;
-    if (!editable || !host.contains(editable)) return;
+    if (!editable || !host.contains(editable)) {
+      selectElement(null);
+      return;
+    }
     event.preventDefault();
     event.stopPropagation();
     selectElement(editable);
@@ -250,18 +425,22 @@ export function SvgVectorEditor({ svgUrl, filenameBase, versionNumber, isSaving 
     refreshTextItems();
   }
 
-  function applySvgSize(width: number, height: number) {
+  function applySvgSize(width: number, height: number, unit = svgUnit) {
     const svg = stageRef.current?.querySelector('svg') as SVGSVGElement | null;
-    if (!svg) return;
-    const nextWidth = Math.max(72, Math.min(2400, Math.round(width)));
-    const nextHeight = Math.max(72, Math.min(2400, Math.round(height)));
-    svg.setAttribute('width', String(nextWidth));
-    svg.setAttribute('height', String(nextHeight));
-    svg.style.width = `${nextWidth}px`;
-    svg.style.height = `${nextHeight}px`;
+    if (!svg) return false;
+    const nextWidth = Math.max(24, Math.min(4800, roundLength(width)));
+    const nextHeight = Math.max(24, Math.min(4800, roundLength(height)));
+    const widthAttr = formatSvgLength(nextWidth, unit);
+    const heightAttr = formatSvgLength(nextHeight, unit);
+    svg.setAttribute('width', widthAttr);
+    svg.setAttribute('height', heightAttr);
+    svg.style.width = widthAttr;
+    svg.style.height = heightAttr;
     svg.style.maxWidth = 'none';
     setSvgWidth(nextWidth);
     setSvgHeight(nextHeight);
+    setSvgUnit(unit || 'px');
+    return true;
   }
 
   function updateSvgWidth(value: number) {
@@ -280,6 +459,44 @@ export function SvgVectorEditor({ svgUrl, filenameBase, versionNumber, isSaving 
     } else {
       applySvgSize(svgWidth, value);
     }
+  }
+
+  function applySmartResize(targetMm = targetWidthMm, font = fontScale, stroke = strokeScaleResize, marker = markerScale) {
+    const svg = stageRef.current?.querySelector('svg') as SVGSVGElement | null;
+    if (!svg) return;
+    const dims = svgDimensions(svg);
+    const unit = dims.unit || svgUnit || 'px';
+    const ratio = dims.height / Math.max(1, dims.width);
+    const nextTargetMm = Math.max(10, Math.min(300, targetMm));
+    const nextWidth = mmToUnit(nextTargetMm, unit);
+    const changed = applySvgSize(nextWidth, nextWidth * ratio, unit);
+    if (!changed) return;
+    const currentWidthMm = unitToMm(dims.width, unit);
+    const baselineWidthMm = baselineWidthMmRef.current || currentWidthMm || nextTargetMm;
+    const canvasScale = Math.max(0.01, nextTargetMm / baselineWidthMm);
+    const nextScale = {
+      font: (Number.isFinite(font) && font > 0 ? font : 1) / canvasScale,
+      stroke: (Number.isFinite(stroke) && stroke > 0 ? stroke : 1) / canvasScale,
+      marker: (Number.isFinite(marker) && marker > 0 ? marker : 1) / canvasScale,
+    };
+    const currentScale = presentationScaleRef.current;
+    scaleSvgPresentation(svg, {
+      font: nextScale.font / Math.max(0.01, currentScale.font),
+      stroke: nextScale.stroke / Math.max(0.01, currentScale.stroke),
+      marker: nextScale.marker / Math.max(0.01, currentScale.marker),
+    });
+    presentationScaleRef.current = nextScale;
+    syncControls(selectedEditable(stageRef.current));
+    refreshTextItems();
+    toast.success('SVG resize applied');
+  }
+
+  function applyResizePreset(preset: typeof RESIZE_PRESETS[number]) {
+    setTargetWidthMm(preset.targetMm);
+    setFontScale(preset.fontScale);
+    setStrokeScaleResize(preset.strokeScale);
+    setMarkerScale(preset.markerScale);
+    applySmartResize(preset.targetMm, preset.fontScale, preset.strokeScale, preset.markerScale);
   }
 
   function selectTextIndex(index: string) {
@@ -321,8 +538,10 @@ export function SvgVectorEditor({ svgUrl, filenameBase, versionNumber, isSaving 
     const host = stageRef.current;
     if (host) {
       host.innerHTML = originalMarkup;
+      presentationScaleRef.current = { font: 1, stroke: 1, marker: 1 };
+      baselineWidthMmRef.current = null;
       setElementCount(host.querySelectorAll(EDITABLE_SELECTOR).length);
-      syncSvgSize();
+      syncSvgSize(true);
     }
     window.requestAnimationFrame(() => {
       syncControls(null);
@@ -366,22 +585,54 @@ export function SvgVectorEditor({ svgUrl, filenameBase, versionNumber, isSaving 
               className="svg-vector-editor-stage max-h-[70vh] overflow-auto rounded-md border bg-white p-3"
             />
 
-            <div className="grid gap-3 rounded-md border bg-muted/20 p-3 md:grid-cols-[1fr_1fr_auto_auto]">
+            <div className="grid gap-3 rounded-md border bg-muted/20 p-3 md:grid-cols-[1fr_1fr_auto]">
               <div className="space-y-1">
-                <Label className="flex items-center gap-1 text-xs"><Maximize2 className="h-3 w-3" /> Figure width (px)</Label>
-                <Input data-testid="svg-figure-width" type="number" min="72" max="2400" value={svgWidth} onChange={(e) => updateSvgWidth(Number(e.target.value || svgWidth))} />
+                <Label className="flex items-center gap-1 text-xs"><Maximize2 className="h-3 w-3" /> Canvas width ({svgUnit})</Label>
+                <Input data-testid="svg-figure-width" type="number" min="24" max="4800" step="0.1" value={svgWidth} onChange={(e) => updateSvgWidth(Number(e.target.value || svgWidth))} />
               </div>
               <div className="space-y-1">
-                <Label className="text-xs">Figure height (px)</Label>
-                <Input data-testid="svg-figure-height" type="number" min="72" max="2400" value={svgHeight} onChange={(e) => updateSvgHeight(Number(e.target.value || svgHeight))} />
+                <Label className="text-xs">Canvas height ({svgUnit})</Label>
+                <Input data-testid="svg-figure-height" type="number" min="24" max="4800" step="0.1" value={svgHeight} onChange={(e) => updateSvgHeight(Number(e.target.value || svgHeight))} />
               </div>
               <label className="flex items-end gap-2 pb-2 text-xs">
                 <input type="checkbox" checked={lockAspect} onChange={(e) => setLockAspect(e.target.checked)} />
                 Lock ratio
               </label>
-              <div className="flex items-end gap-1">
-                <Button type="button" variant="outline" size="sm" onClick={() => applySvgSize(720, 500)}>Double</Button>
-                <Button type="button" variant="outline" size="sm" onClick={() => applySvgSize(360, 500)}>Single</Button>
+            </div>
+
+            <div className="space-y-3 rounded-md border bg-muted/20 p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <Label className="flex items-center gap-1 text-xs"><Ruler className="h-3 w-3" /> Smart resize</Label>
+                <div className="flex flex-wrap gap-1">
+                  {RESIZE_PRESETS.map((preset) => (
+                    <Button key={preset.label} type="button" variant="outline" size="sm" onClick={() => applyResizePreset(preset)}>
+                      {preset.label}
+                    </Button>
+                  ))}
+                </div>
+              </div>
+              <div className="grid gap-3 md:grid-cols-[1fr_1fr_1fr_1fr_auto]">
+                <div className="space-y-1">
+                  <Label className="text-xs">Target width (mm)</Label>
+                  <Input data-testid="svg-target-width-mm" type="number" min="10" max="300" step="1" value={targetWidthMm} onChange={(e) => setTargetWidthMm(Number(e.target.value || targetWidthMm))} />
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs">Font scale</Label>
+                  <Input data-testid="svg-font-scale" type="number" min="0.2" max="2" step="0.05" value={fontScale} onChange={(e) => setFontScale(Number(e.target.value || fontScale))} />
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs">Line scale</Label>
+                  <Input data-testid="svg-line-scale" type="number" min="0.2" max="2" step="0.05" value={strokeScaleResize} onChange={(e) => setStrokeScaleResize(Number(e.target.value || strokeScaleResize))} />
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs">Marker scale</Label>
+                  <Input data-testid="svg-marker-scale" type="number" min="0.2" max="2" step="0.05" value={markerScale} onChange={(e) => setMarkerScale(Number(e.target.value || markerScale))} />
+                </div>
+                <div className="flex items-end">
+                  <Button data-testid="svg-apply-smart-resize" type="button" variant="secondary" onClick={() => applySmartResize()}>
+                    <SlidersHorizontal className="mr-2 h-4 w-4" /> Apply
+                  </Button>
+                </div>
               </div>
             </div>
 
