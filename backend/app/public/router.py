@@ -35,10 +35,7 @@ PUBLIC_DOMAIN_LABELS = {
 PUBLIC_GALLERY_ITEMS: list[tuple[str, str]] = [
     # Basic, widely recognized examples first. The landing page consumes this
     # same order, so keep the opening set conservative and familiar.
-    ("Scatter plot", "basic"),
-    ("Scatter plot with regression", "basic"),
     ("Scatter plot with confidence interval", "basic"),
-    ("Box plot", "basic"),
     ("Box plot with jitter", "basic"),
     ("Violin plot", "basic"),
     ("Bar chart with error bars", "basic"),
