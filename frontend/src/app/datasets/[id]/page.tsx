@@ -307,6 +307,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
   const [name, setName] = useState('');
   const [formatFigureId, setFormatFigureId] = useState('');
   const [buildEntryMode, setBuildEntryMode] = useState<BuildEntryMode>('manual');
+  const [showFormatTemplatePicker, setShowFormatTemplatePicker] = useState(false);
 
   const currentDef: PlotTypeDef | undefined = useMemo(
     () => plotTypes.find((p) => p.type === plotType), [plotTypes, plotType]);
@@ -339,6 +340,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
       setName(`${ds?.name ?? 'figure'} - ${source.name} format`);
       setFormatFigureId(source.id);
       setBuildEntryMode('manual');
+      setShowFormatTemplatePicker(true);
       setVisualizeStep('build');
       toast.success('Figure format copied');
       document.getElementById('builder')?.scrollIntoView({ behavior: 'smooth' });
@@ -346,9 +348,15 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Could not copy figure format'),
   });
 
-  function selectPlotType(pt: string, presetMapping?: Record<string, unknown>, entryMode: BuildEntryMode = buildEntryMode) {
+  function selectPlotType(
+    pt: string,
+    presetMapping?: Record<string, unknown>,
+    entryMode: BuildEntryMode = buildEntryMode,
+    showTemplates = showFormatTemplatePicker,
+  ) {
     const def = plotTypes.find((p) => p.type === pt);
     setBuildEntryMode(entryMode);
+    setShowFormatTemplatePicker(entryMode === 'manual' && showTemplates);
     setPlotType(pt);
     setMapping(presetMapping ? { ...presetMapping } : {});
     setOptions(defaultOptions(def));
@@ -358,11 +366,13 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
   }
 
   function applySuggestion(s: ChartSuggestion) {
-    selectPlotType(s.plot_type, (s.suggested_mapping as Record<string, unknown>) || {}, 'recommendation');
+    setFormatFigureId('');
+    selectPlotType(s.plot_type, (s.suggested_mapping as Record<string, unknown>) || {}, 'recommendation', false);
   }
 
   function openManualBuild() {
     setBuildEntryMode('manual');
+    setShowFormatTemplatePicker(true);
     setVisualizeStep('build');
     window.requestAnimationFrame(() => document.getElementById('builder')?.scrollIntoView({ behavior: 'smooth' }));
   }
@@ -579,7 +589,10 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                     type="button"
                     disabled={blocked}
                     onClick={() => {
-                      if (step.key === 'build') setBuildEntryMode('manual');
+                      if (step.key === 'build') {
+                        setBuildEntryMode('manual');
+                        setShowFormatTemplatePicker(false);
+                      }
                       setVisualizeStep(step.key as 'columns' | 'recommend' | 'build');
                     }}
                     className={`flex items-center justify-between rounded-lg border px-3 py-2 text-left text-sm transition ${active ? 'border-primary bg-primary/5 text-primary' : 'bg-background hover:border-primary'} disabled:cursor-not-allowed disabled:opacity-50`}
@@ -782,7 +795,9 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                   <p className="mt-1 text-sm text-muted-foreground">
                     {buildEntryMode === 'recommendation'
                       ? 'Review the AI-filled chart type, mappings, and options before rendering.'
-                      : 'Choose a chart type manually, or copy visual settings from a saved figure.'}
+                      : showFormatTemplatePicker
+                        ? 'Choose a chart type manually, or copy visual settings from a saved figure.'
+                        : 'Choose a chart type and mappings manually before rendering.'}
                   </p>
                 </div>
                 <Button variant="outline" onClick={() => setVisualizeStep('recommend')}>Back to recommendations</Button>
@@ -805,7 +820,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                   </div>
                 </div>
 
-                {buildEntryMode === 'manual' && (
+                {showFormatTemplatePicker && (
                   <div className="space-y-3 rounded-lg border bg-muted/20 p-3">
                     <div>
                       <p className="text-sm font-medium">Use one of my figures as a template</p>
