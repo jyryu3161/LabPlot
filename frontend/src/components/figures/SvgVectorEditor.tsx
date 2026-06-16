@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState, type MouseEvent, type PointerEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type PointerEvent } from 'react';
 import { toast } from 'sonner';
 import { AlertTriangle, Download, Loader2, Maximize2, MousePointer2, RefreshCw, Ruler, Save, SlidersHorizontal, Type } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
@@ -10,7 +10,9 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 
 const EDITABLE_SELECTOR = 'path,line,polyline,polygon,rect,circle,ellipse,text,tspan';
+const EDITOR_OVERLAY_SELECTOR = '[data-labplot-editor-overlay="true"]';
 const HEAVY_SVG_ELEMENT_LIMIT = 1500;
+const HANDLE_SIZE = 7;
 const PT_PER_MM = 72 / 25.4;
 const PX_PER_MM = 96 / 25.4;
 const LENGTH_RE = /^(-?\d*\.?\d+(?:e[-+]?\d+)?)([a-zA-Z%]*)$/i;
@@ -42,13 +44,34 @@ interface SvgPoint {
   y: number;
 }
 
-interface DragState {
+interface SvgBox extends SvgPoint {
+  width: number;
+  height: number;
+}
+
+type ResizeHandle = 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w' | 'nw';
+
+interface MoveDragState {
+  kind: 'move';
   el: SVGElement;
   pointerId: number;
   start: SvgPoint;
   baseTransform: string;
   moved: boolean;
 }
+
+interface ResizeDragState {
+  kind: 'resize';
+  el: SVGElement;
+  pointerId: number;
+  handle: ResizeHandle;
+  start: SvgPoint;
+  box: SvgBox;
+  baseTransform: string;
+  moved: boolean;
+}
+
+type DragState = MoveDragState | ResizeDragState;
 
 interface SvgVectorEditorProps {
   svgUrl?: string | null;
@@ -219,6 +242,8 @@ function scaleSvgPresentation(svg: SVGSVGElement, scales: { font: number; stroke
   const markerScale = Number.isFinite(scales.marker) && scales.marker > 0 ? scales.marker : 1;
 
   svg.querySelectorAll('*').forEach((el) => {
+    if (el.closest(EDITOR_OVERLAY_SELECTOR)) return;
+
     if (fontScale !== 1) {
       scaleAttribute(el, 'font-size', fontScale);
       scaleAttribute(el, 'textLength', fontScale);
@@ -262,6 +287,119 @@ function scaleSvgPresentation(svg: SVGSVGElement, scales: { font: number; stroke
   });
 }
 
+function pointFromMatrix(x: number, y: number, matrix: DOMMatrix | SVGMatrix): SvgPoint {
+  return {
+    x: matrix.a * x + matrix.c * y + matrix.e,
+    y: matrix.b * x + matrix.d * y + matrix.f,
+  };
+}
+
+function boxFromPoints(points: SvgPoint[]): SvgBox {
+  const xs = points.map((point) => point.x);
+  const ys = points.map((point) => point.y);
+  const x = Math.min(...xs);
+  const y = Math.min(...ys);
+  return {
+    x,
+    y,
+    width: Math.max(1, Math.max(...xs) - x),
+    height: Math.max(1, Math.max(...ys) - y),
+  };
+}
+
+function elementBoxInSpace(el: SVGElement, target: SVGGraphicsElement): SvgBox | null {
+  const graphics = el as SVGGraphicsElement;
+  if (typeof graphics.getBBox !== 'function' || typeof graphics.getCTM !== 'function') return null;
+  try {
+    const bbox = graphics.getBBox();
+    const elCtm = graphics.getCTM();
+    const targetCtm = target.getCTM();
+    if (!elCtm || !targetCtm) return null;
+    const matrix = targetCtm.inverse().multiply(elCtm);
+    return boxFromPoints([
+      pointFromMatrix(bbox.x, bbox.y, matrix),
+      pointFromMatrix(bbox.x + bbox.width, bbox.y, matrix),
+      pointFromMatrix(bbox.x + bbox.width, bbox.y + bbox.height, matrix),
+      pointFromMatrix(bbox.x, bbox.y + bbox.height, matrix),
+    ]);
+  } catch {
+    return null;
+  }
+}
+
+function parentGraphicsElement(el: SVGElement): SVGGraphicsElement | null {
+  const parent = el.parentElement as SVGGraphicsElement | null;
+  if (parent && typeof parent.getCTM === 'function') return parent;
+  return el.ownerSVGElement;
+}
+
+function resizeHandlePoints(box: SvgBox): Array<{ handle: ResizeHandle; x: number; y: number; cursor: string }> {
+  const midX = box.x + box.width / 2;
+  const midY = box.y + box.height / 2;
+  const right = box.x + box.width;
+  const bottom = box.y + box.height;
+  return [
+    { handle: 'nw', x: box.x, y: box.y, cursor: 'nwse-resize' },
+    { handle: 'n', x: midX, y: box.y, cursor: 'ns-resize' },
+    { handle: 'ne', x: right, y: box.y, cursor: 'nesw-resize' },
+    { handle: 'e', x: right, y: midY, cursor: 'ew-resize' },
+    { handle: 'se', x: right, y: bottom, cursor: 'nwse-resize' },
+    { handle: 's', x: midX, y: bottom, cursor: 'ns-resize' },
+    { handle: 'sw', x: box.x, y: bottom, cursor: 'nesw-resize' },
+    { handle: 'w', x: box.x, y: midY, cursor: 'ew-resize' },
+  ];
+}
+
+function removeSelectionOverlay(svg: SVGSVGElement | null): void {
+  svg?.querySelectorAll(EDITOR_OVERLAY_SELECTOR).forEach((el) => el.remove());
+}
+
+function renderSelectionOverlay(el: SVGElement | null): void {
+  const svg = el?.ownerSVGElement ?? null;
+  if (!svg || !el) {
+    removeSelectionOverlay(svg);
+    return;
+  }
+  removeSelectionOverlay(svg);
+  const box = elementBoxInSpace(el, svg);
+  if (!box) return;
+
+  const ns = 'http://www.w3.org/2000/svg';
+  const overlay = document.createElementNS(ns, 'g');
+  overlay.setAttribute('data-labplot-editor-overlay', 'true');
+
+  const rect = document.createElementNS(ns, 'rect');
+  rect.setAttribute('x', formatLengthNumber(box.x));
+  rect.setAttribute('y', formatLengthNumber(box.y));
+  rect.setAttribute('width', formatLengthNumber(box.width));
+  rect.setAttribute('height', formatLengthNumber(box.height));
+  rect.setAttribute('fill', 'none');
+  rect.setAttribute('stroke', '#2563eb');
+  rect.setAttribute('stroke-width', '1.5');
+  rect.setAttribute('stroke-dasharray', '4 3');
+  rect.setAttribute('vector-effect', 'non-scaling-stroke');
+  rect.setAttribute('pointer-events', 'none');
+  overlay.appendChild(rect);
+
+  resizeHandlePoints(box).forEach((point) => {
+    const handle = document.createElementNS(ns, 'rect');
+    handle.setAttribute('x', formatLengthNumber(point.x - HANDLE_SIZE / 2));
+    handle.setAttribute('y', formatLengthNumber(point.y - HANDLE_SIZE / 2));
+    handle.setAttribute('width', String(HANDLE_SIZE));
+    handle.setAttribute('height', String(HANDLE_SIZE));
+    handle.setAttribute('rx', '1.5');
+    handle.setAttribute('fill', '#ffffff');
+    handle.setAttribute('stroke', '#2563eb');
+    handle.setAttribute('stroke-width', '1.25');
+    handle.setAttribute('vector-effect', 'non-scaling-stroke');
+    handle.setAttribute('data-labplot-resize-handle', point.handle);
+    handle.style.cursor = point.cursor;
+    overlay.appendChild(handle);
+  });
+
+  svg.appendChild(overlay);
+}
+
 function editableFromTarget(target: Element | null, host: HTMLDivElement | null): SVGElement | null {
   if (!target || !host) return null;
   const editable = target.closest('[data-labplot-editable="true"]') as SVGElement | null;
@@ -292,11 +430,46 @@ function translatedTransform(baseTransform: string, dx: number, dy: number): str
   return base ? `${base} ${translate}` : translate;
 }
 
+function scaledTransform(baseTransform: string, box: SvgBox, handle: ResizeHandle, dx: number, dy: number, keepAspect: boolean): string {
+  let left = box.x;
+  let right = box.x + box.width;
+  let top = box.y;
+  let bottom = box.y + box.height;
+
+  if (handle.includes('e')) right += dx;
+  if (handle.includes('w')) left += dx;
+  if (handle.includes('s')) bottom += dy;
+  if (handle.includes('n')) top += dy;
+
+  const horizontal = handle.includes('e') || handle.includes('w');
+  const vertical = handle.includes('n') || handle.includes('s');
+  let sx = horizontal ? Math.max(0.05, (right - left) / Math.max(1, box.width)) : 1;
+  let sy = vertical ? Math.max(0.05, (bottom - top) / Math.max(1, box.height)) : 1;
+
+  if (keepAspect && horizontal && vertical) {
+    const scale = Math.max(sx, sy);
+    sx = scale;
+    sy = scale;
+  }
+
+  const anchorX = handle.includes('e') ? box.x : handle.includes('w') ? box.x + box.width : box.x + box.width / 2;
+  const anchorY = handle.includes('s') ? box.y : handle.includes('n') ? box.y + box.height : box.y + box.height / 2;
+  const scale = `translate(${formatLengthNumber(anchorX)} ${formatLengthNumber(anchorY)}) scale(${formatLengthNumber(sx)} ${formatLengthNumber(sy)}) translate(${formatLengthNumber(-anchorX)} ${formatLengthNumber(-anchorY)})`;
+  const base = baseTransform.trim();
+  return base ? `${base} ${scale}` : scale;
+}
+
+function resizeHandleFromTarget(target: Element | null): ResizeHandle | null {
+  const handle = target?.closest('[data-labplot-resize-handle]')?.getAttribute('data-labplot-resize-handle');
+  return handle && ['n', 'ne', 'e', 'se', 's', 'sw', 'w', 'nw'].includes(handle) ? handle as ResizeHandle : null;
+}
+
 function selectedEditable(host: HTMLDivElement | null): SVGElement | null {
   return host?.querySelector('[data-labplot-selected="true"]') as SVGElement | null;
 }
 
 function cleanEditorAttributes(svg: SVGSVGElement): void {
+  removeSelectionOverlay(svg);
   svg.querySelectorAll('[data-labplot-editable],[data-labplot-edit-index],[data-labplot-selected]').forEach((el) => {
     el.removeAttribute('data-labplot-editable');
     el.removeAttribute('data-labplot-edit-index');
@@ -371,10 +544,12 @@ export function SvgVectorEditor({ svgUrl, filenameBase, versionNumber, isSaving 
     if (!host) return;
     selectedEditable(host)?.removeAttribute('data-labplot-selected');
     if (!el) {
+      removeSelectionOverlay(host.querySelector('svg') as SVGSVGElement | null);
       syncControls(null);
       return;
     }
     el.setAttribute('data-labplot-selected', 'true');
+    renderSelectionOverlay(el);
     syncControls(el);
   }, [syncControls]);
 
@@ -438,6 +613,11 @@ export function SvgVectorEditor({ svgUrl, filenameBase, versionNumber, isSaving 
   }, [svgMarkup, refreshTextItems, syncSvgSize]);
 
   function handleStageClick(event: MouseEvent<HTMLDivElement>) {
+    if (resizeHandleFromTarget(event.target as Element | null)) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
     const target = event.target as Element | null;
     const host = stageRef.current;
     if (!target || !host) return;
@@ -454,12 +634,41 @@ export function SvgVectorEditor({ svgUrl, filenameBase, versionNumber, isSaving 
   function handleStagePointerDown(event: PointerEvent<HTMLDivElement>) {
     if (event.button !== 0) return;
     const host = stageRef.current;
+    host?.focus();
+    const handle = resizeHandleFromTarget(event.target as Element | null);
+    if (handle) {
+      const selected = selectedEditable(host);
+      const parent = selected ? parentGraphicsElement(selected) : null;
+      if (!selected || !parent) return;
+      const start = pointerToLocalPoint(selected, event.clientX, event.clientY);
+      const box = elementBoxInSpace(selected, parent);
+      if (!start || !box) return;
+      dragRef.current = {
+        kind: 'resize',
+        el: selected,
+        pointerId: event.pointerId,
+        handle,
+        start,
+        box,
+        baseTransform: selected.getAttribute('transform') || '',
+        moved: false,
+      };
+      try {
+        event.currentTarget.setPointerCapture(event.pointerId);
+      } catch {
+        // Pointer capture can fail if the browser has already cancelled the pointer.
+      }
+      event.preventDefault();
+      return;
+    }
+
     const editable = editableFromTarget(event.target as Element | null, host);
     if (!editable) return;
     const start = pointerToLocalPoint(editable, event.clientX, event.clientY);
     if (!start) return;
     selectElement(editable);
     dragRef.current = {
+      kind: 'move',
       el: editable,
       pointerId: event.pointerId,
       start,
@@ -483,7 +692,12 @@ export function SvgVectorEditor({ svgUrl, filenameBase, versionNumber, isSaving 
     const dy = point.y - drag.start.y;
     if (!drag.moved && Math.hypot(dx, dy) < 0.5) return;
     drag.moved = true;
-    drag.el.setAttribute('transform', translatedTransform(drag.baseTransform, dx, dy));
+    if (drag.kind === 'resize') {
+      drag.el.setAttribute('transform', scaledTransform(drag.baseTransform, drag.box, drag.handle, dx, dy, event.shiftKey));
+    } else {
+      drag.el.setAttribute('transform', translatedTransform(drag.baseTransform, dx, dy));
+    }
+    renderSelectionOverlay(drag.el);
     event.preventDefault();
   }
 
@@ -494,13 +708,39 @@ export function SvgVectorEditor({ svgUrl, filenameBase, versionNumber, isSaving 
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
     if (drag.moved) syncControls(drag.el);
+    renderSelectionOverlay(drag.el);
     dragRef.current = null;
+  }
+
+  function nudgeSelected(dx: number, dy: number) {
+    const el = selectedEditable(stageRef.current);
+    if (!el) return;
+    el.setAttribute('transform', translatedTransform(el.getAttribute('transform') || '', dx, dy));
+    renderSelectionOverlay(el);
+    syncControls(el);
+  }
+
+  function handleStageKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    const step = event.shiftKey ? 10 : 1;
+    if (event.key === 'ArrowLeft') {
+      nudgeSelected(-step, 0);
+    } else if (event.key === 'ArrowRight') {
+      nudgeSelected(step, 0);
+    } else if (event.key === 'ArrowUp') {
+      nudgeSelected(0, -step);
+    } else if (event.key === 'ArrowDown') {
+      nudgeSelected(0, step);
+    } else {
+      return;
+    }
+    event.preventDefault();
   }
 
   function applyStyle(prop: string, value: string) {
     const el = selectedEditable(stageRef.current);
     if (!el) return;
     el.style.setProperty(prop, value);
+    renderSelectionOverlay(el);
     syncControls(el);
   }
 
@@ -511,6 +751,7 @@ export function SvgVectorEditor({ svgUrl, filenameBase, versionNumber, isSaving 
     if (tag !== 'text' && tag !== 'tspan') return;
     el.textContent = value;
     setTextValue(value);
+    renderSelectionOverlay(el);
     syncControls(el);
     refreshTextItems();
   }
@@ -576,7 +817,9 @@ export function SvgVectorEditor({ svgUrl, filenameBase, versionNumber, isSaving 
       marker: nextScale.marker / Math.max(0.01, currentScale.marker),
     });
     presentationScaleRef.current = nextScale;
-    syncControls(selectedEditable(stageRef.current));
+    const selected = selectedEditable(stageRef.current);
+    renderSelectionOverlay(selected);
+    syncControls(selected);
     refreshTextItems();
     toast.success('SVG resize applied');
   }
@@ -670,11 +913,13 @@ export function SvgVectorEditor({ svgUrl, filenameBase, versionNumber, isSaving 
 
             <div
               ref={stageRef}
+              tabIndex={0}
               onClick={handleStageClick}
               onPointerDown={handleStagePointerDown}
               onPointerMove={handleStagePointerMove}
               onPointerUp={finishStageDrag}
               onPointerCancel={finishStageDrag}
+              onKeyDown={handleStageKeyDown}
               data-testid="svg-editor-stage"
               className="svg-vector-editor-stage max-h-[70vh] overflow-auto rounded-md border bg-white p-3"
             />

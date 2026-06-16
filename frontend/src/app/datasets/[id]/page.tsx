@@ -30,6 +30,7 @@ const ROLE_COLORS: Record<string, string> = {
 };
 
 type ColumnShape = { name: string; role: string; dtype: string; sample_values?: unknown[] };
+type BuildEntryMode = 'manual' | 'recommendation';
 
 const COLUMN_ROLE_OPTIONS = [
   { value: 'numeric', label: 'Numeric' },
@@ -305,6 +306,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
   const [style, setStyle] = useState('nature');
   const [name, setName] = useState('');
   const [formatFigureId, setFormatFigureId] = useState('');
+  const [buildEntryMode, setBuildEntryMode] = useState<BuildEntryMode>('manual');
 
   const currentDef: PlotTypeDef | undefined = useMemo(
     () => plotTypes.find((p) => p.type === plotType), [plotTypes, plotType]);
@@ -336,6 +338,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
       setStyle(version.style_preset);
       setName(`${ds?.name ?? 'figure'} - ${source.name} format`);
       setFormatFigureId(source.id);
+      setBuildEntryMode('manual');
       setVisualizeStep('build');
       toast.success('Figure format copied');
       document.getElementById('builder')?.scrollIntoView({ behavior: 'smooth' });
@@ -343,8 +346,9 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Could not copy figure format'),
   });
 
-  function selectPlotType(pt: string, presetMapping?: Record<string, unknown>) {
+  function selectPlotType(pt: string, presetMapping?: Record<string, unknown>, entryMode: BuildEntryMode = buildEntryMode) {
     const def = plotTypes.find((p) => p.type === pt);
+    setBuildEntryMode(entryMode);
     setPlotType(pt);
     setMapping(presetMapping ? { ...presetMapping } : {});
     setOptions(defaultOptions(def));
@@ -354,7 +358,13 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
   }
 
   function applySuggestion(s: ChartSuggestion) {
-    selectPlotType(s.plot_type, (s.suggested_mapping as Record<string, unknown>) || {});
+    selectPlotType(s.plot_type, (s.suggested_mapping as Record<string, unknown>) || {}, 'recommendation');
+  }
+
+  function openManualBuild() {
+    setBuildEntryMode('manual');
+    setVisualizeStep('build');
+    window.requestAnimationFrame(() => document.getElementById('builder')?.scrollIntoView({ behavior: 'smooth' }));
   }
 
   function continueFromColumns() {
@@ -568,7 +578,10 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                     key={step.key}
                     type="button"
                     disabled={blocked}
-                    onClick={() => setVisualizeStep(step.key as 'columns' | 'recommend' | 'build')}
+                    onClick={() => {
+                      if (step.key === 'build') setBuildEntryMode('manual');
+                      setVisualizeStep(step.key as 'columns' | 'recommend' | 'build');
+                    }}
                     className={`flex items-center justify-between rounded-lg border px-3 py-2 text-left text-sm transition ${active ? 'border-primary bg-primary/5 text-primary' : 'bg-background hover:border-primary'} disabled:cursor-not-allowed disabled:opacity-50`}
                   >
                     <span className="font-medium">{step.label}</span>
@@ -755,7 +768,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                   )}
                   <div className="flex flex-col gap-2 sm:flex-row sm:justify-between">
                     <Button variant="outline" onClick={() => setVisualizeStep('columns')}>Back to columns</Button>
-                    <Button variant="secondary" onClick={() => setVisualizeStep('build')}>Build manually</Button>
+                    <Button variant="secondary" onClick={openManualBuild}>Build manually</Button>
                   </div>
                 </CardContent>
               </Card>
@@ -766,55 +779,15 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
               <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div>
                   <CardTitle className="text-base">3. Build figure</CardTitle>
-                  <p className="mt-1 text-sm text-muted-foreground">Start from a saved figure template, an AI recommendation, or a chart type.</p>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    {buildEntryMode === 'recommendation'
+                      ? 'Review the AI-filled chart type, mappings, and options before rendering.'
+                      : 'Choose a chart type manually, or copy visual settings from a saved figure.'}
+                  </p>
                 </div>
                 <Button variant="outline" onClick={() => setVisualizeStep('recommend')}>Back to recommendations</Button>
               </CardHeader>
               <CardContent className="space-y-4">
-                <div className="space-y-3 rounded-lg border bg-muted/20 p-3">
-                  <div>
-                    <p className="text-sm font-medium">Use one of my figures as a template</p>
-                    <p className="text-xs text-muted-foreground">Copies chart type, style preset, and visual settings. Column mappings are remapped to this dataset.</p>
-                  </div>
-                  {formatCopyFigures.length === 0 ? (
-                    <div className="rounded-lg border border-dashed bg-background p-4 text-sm text-muted-foreground">No saved figures available yet.</div>
-                  ) : (
-                    <div className="grid max-h-64 gap-2 overflow-y-auto pr-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
-                      {formatCopyFigures.map((figure) => {
-                        const compatible = compatiblePlotTypeSet.has(figure.plot_type);
-                        const selected = formatFigureId === figure.id;
-                        return (
-                          <button
-                            key={figure.id}
-                            type="button"
-                            data-testid="figure-format-card"
-                            aria-label={`Use figure format ${figure.name}`}
-                            disabled={applyFigureFormat.isPending}
-                            onClick={() => applyFigureFormat.mutate(figure.id)}
-                            className={`overflow-hidden rounded-lg border bg-background text-left transition ${selected ? 'border-primary ring-2 ring-primary/20' : 'hover:border-primary hover:shadow-sm'} disabled:cursor-not-allowed disabled:opacity-55`}
-                          >
-                            {figure.thumb_url ? (
-                              <img src={figure.thumb_url} alt={figure.name} className="h-20 w-full bg-white object-contain" loading="lazy" decoding="async" />
-                            ) : (
-                              <div className="flex h-20 w-full items-center justify-center bg-white text-muted-foreground">
-                                <ImageIcon className="h-5 w-5" />
-                              </div>
-                            )}
-                            <div className="space-y-1 p-2">
-                              <p className="truncate text-xs font-medium">{figure.name}</p>
-                              <div className="flex flex-wrap gap-1">
-                                <Badge variant="secondary">{figure.plot_type.replace(/_/g, ' ')}</Badge>
-                                <Badge variant="outline">{formatStylePreset(figure.style_preset)}</Badge>
-                                {figure.is_favorite && <Badge variant="default"><Star className="mr-1 h-3 w-3 fill-current" />Favorite</Badge>}
-                                {!compatible && <Badge variant="outline">check mappings</Badge>}
-                              </div>
-                            </div>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
                 <div className="grid gap-4 md:grid-cols-2">
                   <div className="space-y-1">
                     <Label>Chart type</Label>
@@ -831,6 +804,53 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                     <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="My figure" />
                   </div>
                 </div>
+
+                {buildEntryMode === 'manual' && (
+                  <div className="space-y-3 rounded-lg border bg-muted/20 p-3">
+                    <div>
+                      <p className="text-sm font-medium">Use one of my figures as a template</p>
+                      <p className="text-xs text-muted-foreground">Copies chart type, style preset, and visual settings. Column mappings are remapped to this dataset.</p>
+                    </div>
+                    {formatCopyFigures.length === 0 ? (
+                      <div className="rounded-lg border border-dashed bg-background p-4 text-sm text-muted-foreground">No saved figures available yet.</div>
+                    ) : (
+                      <div className="grid max-h-64 gap-2 overflow-y-auto pr-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+                        {formatCopyFigures.map((figure) => {
+                          const compatible = compatiblePlotTypeSet.has(figure.plot_type);
+                          const selected = formatFigureId === figure.id;
+                          return (
+                            <button
+                              key={figure.id}
+                              type="button"
+                              data-testid="figure-format-card"
+                              aria-label={`Use figure format ${figure.name}`}
+                              disabled={applyFigureFormat.isPending}
+                              onClick={() => applyFigureFormat.mutate(figure.id)}
+                              className={`overflow-hidden rounded-lg border bg-background text-left transition ${selected ? 'border-primary ring-2 ring-primary/20' : 'hover:border-primary hover:shadow-sm'} disabled:cursor-not-allowed disabled:opacity-55`}
+                            >
+                              {figure.thumb_url ? (
+                                <img src={figure.thumb_url} alt={figure.name} className="h-20 w-full bg-white object-contain" loading="lazy" decoding="async" />
+                              ) : (
+                                <div className="flex h-20 w-full items-center justify-center bg-white text-muted-foreground">
+                                  <ImageIcon className="h-5 w-5" />
+                                </div>
+                              )}
+                              <div className="space-y-1 p-2">
+                                <p className="truncate text-xs font-medium">{figure.name}</p>
+                                <div className="flex flex-wrap gap-1">
+                                  <Badge variant="secondary">{figure.plot_type.replace(/_/g, ' ')}</Badge>
+                                  <Badge variant="outline">{formatStylePreset(figure.style_preset)}</Badge>
+                                  {figure.is_favorite && <Badge variant="default"><Star className="mr-1 h-3 w-3 fill-current" />Favorite</Badge>}
+                                  {!compatible && <Badge variant="outline">check mappings</Badge>}
+                                </div>
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
 
                 {currentDef && (
                   <>
