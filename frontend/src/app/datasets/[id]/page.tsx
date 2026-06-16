@@ -30,7 +30,7 @@ const ROLE_COLORS: Record<string, string> = {
 };
 
 type ColumnShape = { name: string; role: string; dtype: string; sample_values?: unknown[] };
-type BuildEntryMode = 'manual' | 'recommendation';
+type BuildEntryMode = 'manual' | 'recommendation' | 'template';
 
 const COLUMN_ROLE_OPTIONS = [
   { value: 'numeric', label: 'Numeric' },
@@ -43,6 +43,62 @@ const COLUMN_ROLE_OPTIONS = [
   { value: 'pvalue', label: 'p-value' },
   { value: 'text', label: 'Text' },
 ];
+
+const OBJECTIVE_STOP_WORDS = new Set([
+  'a', 'an', 'and', 'are', 'as', 'at', 'be', 'by', 'can', 'for', 'from', 'how', 'i', 'in', 'into',
+  'is', 'it', 'of', 'on', 'or', 'our', 'plot', 'show', 'the', 'this', 'to', 'use', 'using', 'want',
+  'with', 'vs', 'versus',
+]);
+
+const ROLE_OBJECTIVE_HINTS: Record<string, string[]> = {
+  numeric: ['amount', 'continuous', 'intensity', 'level', 'measure', 'measurement', 'response', 'score', 'signal', 'value', 'y'],
+  log2fc: ['effect', 'fc', 'fold', 'foldchange', 'log2fc', 'logfc'],
+  pvalue: ['adjusted', 'fdr', 'p', 'padj', 'pvalue', 'qvalue', 'significance'],
+  group: ['arm', 'category', 'class', 'cohort', 'compare', 'condition', 'group', 'stratify', 'subtype', 'treatment'],
+  category: ['category', 'class', 'group', 'label', 'type'],
+  time: ['date', 'day', 'month', 'ordered', 'survival', 'time', 'timeline', 'trend', 'week', 'year'],
+  status: ['alive', 'censor', 'dead', 'event', 'status', 'survival'],
+  gene: ['gene', 'genes', 'marker', 'symbol'],
+  text: ['id', 'label', 'name', 'text'],
+};
+
+function objectiveTokens(value: string): string[] {
+  return Array.from(new Set(
+    value
+      .replace(/([a-z])([A-Z])/g, '$1 $2')
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .map((token) => token.trim())
+      .filter((token) => token && (token.length > 1 || ['x', 'y', 'z', 'p'].includes(token)) && !OBJECTIVE_STOP_WORDS.has(token)),
+  ));
+}
+
+function columnTokens(column: ColumnShape): Set<string> {
+  const sampleText = (column.sample_values ?? []).slice(0, 6).map((value) => String(value ?? '')).join(' ');
+  return new Set(objectiveTokens(`${column.name} ${column.role} ${column.dtype} ${sampleText}`));
+}
+
+function scoreColumnForObjective(column: ColumnShape, tokens: string[], objectiveText: string): number {
+  const haystack = columnTokens(column);
+  const nameLower = column.name.toLowerCase();
+  const nameCompact = nameLower.replace(/[^a-z0-9]/g, '');
+  const objectiveCompact = objectiveText.replace(/[^a-z0-9]/g, '');
+  let score = 0;
+
+  if (objectiveText.includes(nameLower) || (nameCompact.length > 1 && objectiveCompact.includes(nameCompact))) score += 8;
+  for (const token of tokens) {
+    if (haystack.has(token)) score += 4;
+    else if (nameLower.includes(token) && token.length > 2) score += 2;
+  }
+
+  const roleHints = ROLE_OBJECTIVE_HINTS[column.role] ?? [];
+  for (const hint of roleHints) {
+    if (tokens.includes(hint)) score += 2;
+  }
+  if (isNumericLikeColumn(column) && tokens.some((token) => ['correlation', 'regression', 'scatter', 'trend', 'x', 'y', 'z'].includes(token))) score += 1;
+  if (['category', 'group', 'status'].includes(column.role) && tokens.some((token) => ['bar', 'box', 'compare', 'violin'].includes(token))) score += 1;
+  return score;
+}
 
 function columnRoleSnapshot(columns: ColumnShape[]): Record<string, string> {
   return Object.fromEntries(columns.map((column) => [column.name, column.role]));
@@ -151,6 +207,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
   });
 
   const [aiSug, setAiSug] = useState<ChartSuggestion[] | null>(null);
+  const [columnObjective, setColumnObjective] = useState('');
   const [recommendPrompt, setRecommendPrompt] = useState('');
   const [referenceFile, setReferenceFile] = useState<File | null>(null);
   const [visualizeStep, setVisualizeStep] = useState<'columns' | 'recommend' | 'build'>('columns');
@@ -253,12 +310,14 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
     if (!ds || visualizeStep !== 'recommend' || !hasSelectedColumns || !savedAiSugFetched) return;
     if (savedAiSug?.cached || aiSug || aiRecommend.isPending || autoRecommendationKeyRef.current === recommendationScopeKey) return;
     autoRecommendationKeyRef.current = recommendationScopeKey;
-    aiRecommend.mutate({ silent: true });
+    const prompt = recommendPrompt.trim();
+    aiRecommend.mutate(prompt ? { silent: true, prompt } : { silent: true });
   }, [
     aiRecommend,
     aiSug,
     ds,
     hasSelectedColumns,
+    recommendPrompt,
     recommendationScopeKey,
     savedAiSug?.cached,
     savedAiSugFetched,
@@ -323,10 +382,11 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
       return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
     })
     .slice(0, 80), [formatFigures]);
+  const favoriteFormatFigures = useMemo(() => formatCopyFigures.filter((figure) => figure.is_favorite).slice(0, 10), [formatCopyFigures]);
 
   const applyFigureFormat = useMutation({
-    mutationFn: (figureId: string) => getFigure(figureId),
-    onSuccess: (source: FigureDetail) => {
+    mutationFn: (variables: { figureId: string; entryMode?: BuildEntryMode; showPicker?: boolean }) => getFigure(variables.figureId),
+    onSuccess: (source: FigureDetail, variables) => {
       const version = source.versions.find((item) => item.id === source.current_version_id) ?? source.versions[source.versions.length - 1];
       if (!version) {
         toast.error('Selected figure has no saved version');
@@ -339,8 +399,8 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
       setStyle(version.style_preset);
       setName(`${ds?.name ?? 'figure'} - ${source.name} format`);
       setFormatFigureId(source.id);
-      setBuildEntryMode('manual');
-      setShowFormatTemplatePicker(true);
+      setBuildEntryMode(variables?.entryMode ?? 'manual');
+      setShowFormatTemplatePicker(Boolean(variables?.showPicker));
       setVisualizeStep('build');
       toast.success('Figure format copied');
       document.getElementById('builder')?.scrollIntoView({ behavior: 'smooth' });
@@ -387,6 +447,24 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
       return;
     }
     setVisualizeStep('recommend');
+  }
+
+  function selectColumnsFromObjective() {
+    const objective = columnObjective.trim();
+    if (!objective) {
+      toast.error('Describe what you want to visualize first');
+      return;
+    }
+    const tokens = objectiveTokens(objective);
+    const objectiveText = objective.toLowerCase();
+    const ranked = columns
+      .map((column) => ({ column, score: scoreColumnForObjective(column, tokens, objectiveText) }))
+      .filter((item) => item.score > 0)
+      .sort((a, b) => b.score - a.score || columns.indexOf(a.column) - columns.indexOf(b.column));
+    const picks = ranked.length ? ranked.slice(0, 8).map((item) => item.column.name) : suggestedFocusColumns;
+    setFocusColumnsDraft(picks);
+    if (!recommendPrompt.trim()) setRecommendPrompt(objective);
+    toast.success(`Selected ${picks.length} column${picks.length === 1 ? '' : 's'} from your objective`);
   }
 
   function chooseReferenceFile(file: File | null) {
@@ -619,6 +697,24 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                     <CheckCircle2 className="mr-2 inline h-4 w-4 text-green-600" />
                     Start with measurement, group, time, or value columns. ID-only text columns can stay unchecked unless they should appear in the plot.
                   </div>
+                  <div className="space-y-2 rounded-lg border bg-muted/30 p-3">
+                    <Label htmlFor="column-objective">Visualization objective</Label>
+                    <div className="grid gap-2 md:grid-cols-[1fr_auto]">
+                      <Textarea
+                        id="column-objective"
+                        value={columnObjective}
+                        onChange={(e) => setColumnObjective(e.target.value)}
+                        placeholder="Example: make a scatter plot of dose and response by treatment group."
+                        className="min-h-20 bg-background"
+                        maxLength={1000}
+                      />
+                      <Button type="button" variant="secondary" onClick={selectColumnsFromObjective} className="md:self-end">
+                        <Wand2 className="mr-2 h-4 w-4" />
+                        Select columns
+                      </Button>
+                    </div>
+                    <p className="text-xs text-muted-foreground">This fills the column selection and carries the objective into AI recommendations.</p>
+                  </div>
                   <div className="flex flex-wrap gap-2">
                     <Button type="button" variant="outline" size="sm" onClick={() => setFocusColumnsDraft(suggestedFocusColumns)}>Suggested</Button>
                     <Button type="button" variant="outline" size="sm" onClick={() => setFocusColumnsDraft(columns.map((c) => c.name))}>All</Button>
@@ -779,6 +875,55 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                       Generate AI recommendations after selecting columns.
                     </div>
                   )}
+                  <div className="space-y-3 rounded-lg border bg-muted/20 p-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-medium">Favorite figure templates</p>
+                        <p className="text-xs text-muted-foreground">Copies chart type, style, size, labels, and visual options from a favorited figure. Column mappings are remapped to this dataset.</p>
+                      </div>
+                      <Badge variant="secondary">{favoriteFormatFigures.length}</Badge>
+                    </div>
+                    {favoriteFormatFigures.length === 0 ? (
+                      <div className="rounded-lg border border-dashed bg-background p-4 text-sm text-muted-foreground">
+                        Favorite a finished figure to reuse it here.
+                      </div>
+                    ) : (
+                      <div className="grid max-h-64 gap-2 overflow-y-auto pr-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+                        {favoriteFormatFigures.map((figure) => {
+                          const compatible = compatiblePlotTypeSet.has(figure.plot_type);
+                          const selected = formatFigureId === figure.id;
+                          return (
+                            <button
+                              key={figure.id}
+                              type="button"
+                              data-testid="favorite-template-card"
+                              aria-label={`Use favorite figure template ${figure.name}`}
+                              disabled={applyFigureFormat.isPending}
+                              onClick={() => applyFigureFormat.mutate({ figureId: figure.id, entryMode: 'template', showPicker: false })}
+                              className={`overflow-hidden rounded-lg border bg-background text-left transition ${selected ? 'border-primary ring-2 ring-primary/20' : 'hover:border-primary hover:shadow-sm'} disabled:cursor-not-allowed disabled:opacity-55`}
+                            >
+                              {figure.thumb_url ? (
+                                <img src={figure.thumb_url} alt={figure.name} className="h-20 w-full bg-white object-contain" loading="lazy" decoding="async" />
+                              ) : (
+                                <div className="flex h-20 w-full items-center justify-center bg-white text-muted-foreground">
+                                  <ImageIcon className="h-5 w-5" />
+                                </div>
+                              )}
+                              <div className="space-y-1 p-2">
+                                <p className="truncate text-xs font-medium">{figure.name}</p>
+                                <div className="flex flex-wrap gap-1">
+                                  <Badge variant="default"><Star className="mr-1 h-3 w-3 fill-current" />Favorite</Badge>
+                                  <Badge variant="secondary">{figure.plot_type.replace(/_/g, ' ')}</Badge>
+                                  <Badge variant="outline">{formatStylePreset(figure.style_preset)}</Badge>
+                                  {!compatible && <Badge variant="outline">check mappings</Badge>}
+                                </div>
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
                   <div className="flex flex-col gap-2 sm:flex-row sm:justify-between">
                     <Button variant="outline" onClick={() => setVisualizeStep('columns')}>Back to columns</Button>
                     <Button variant="secondary" onClick={openManualBuild}>Build manually</Button>
@@ -795,6 +940,8 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                   <p className="mt-1 text-sm text-muted-foreground">
                     {buildEntryMode === 'recommendation'
                       ? 'Review the AI-filled chart type, mappings, and options before rendering.'
+                      : buildEntryMode === 'template'
+                        ? 'Review the copied chart type, mappings, size, and visual settings before rendering.'
                       : showFormatTemplatePicker
                         ? 'Choose a chart type manually, or copy visual settings from a saved figure.'
                         : 'Choose a chart type and mappings manually before rendering.'}
@@ -806,7 +953,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                 <div className="grid gap-4 md:grid-cols-2">
                   <div className="space-y-1">
                     <Label>Chart type</Label>
-                    <select data-testid="chart-type-select" className="w-full rounded-md border px-3 py-2 text-sm" value={plotType} onChange={(e) => selectPlotType(e.target.value)}>
+                    <select data-testid="chart-type-select" className="w-full rounded-md border px-3 py-2 text-sm" value={plotType} onChange={(e) => selectPlotType(e.target.value, undefined, 'manual', showFormatTemplatePicker)}>
                       <option value="">Select a chart type…</option>
                       {plotTypes.map((p) => (
                         <option key={p.type} value={p.type}>{p.label}</option>
@@ -840,7 +987,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                               data-testid="figure-format-card"
                               aria-label={`Use figure format ${figure.name}`}
                               disabled={applyFigureFormat.isPending}
-                              onClick={() => applyFigureFormat.mutate(figure.id)}
+                              onClick={() => applyFigureFormat.mutate({ figureId: figure.id, entryMode: 'manual', showPicker: true })}
                               className={`overflow-hidden rounded-lg border bg-background text-left transition ${selected ? 'border-primary ring-2 ring-primary/20' : 'hover:border-primary hover:shadow-sm'} disabled:cursor-not-allowed disabled:opacity-55`}
                             >
                               {figure.thumb_url ? (

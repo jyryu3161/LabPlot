@@ -133,13 +133,29 @@ test('dataset upload saves purpose, auto-loads AI once, and refreshes with promp
     await expect(page.getByRole('button', { name: '1. Choose columns' })).toBeVisible();
     await page.waitForTimeout(500);
     expect(recommendBodies).toHaveLength(0);
+    await page.getByLabel('Visualization objective').fill('Make a scatter plot of dose and response by group.');
+    await page.getByRole('button', { name: 'Select columns' }).click();
+    await expect(page.getByRole('checkbox', { name: /dose/i })).toBeChecked();
+    await expect(page.getByRole('checkbox', { name: /response/i })).toBeChecked();
+    await expect(page.getByRole('checkbox', { name: /group/i })).toBeChecked();
     await page.getByRole('button', { name: 'Continue to AI recommendations' }).click();
 
     await expect(page.getByRole('button', { name: /Refresh AI recommendations|Generate AI recommendations/ })).toBeVisible();
     await expect.poll(() => recommendBodies.length, { timeout: 10_000 }).toBe(1);
     expect(recommendCalled).toBeTruthy();
-    expect(recommendBodies[0]).toBeNull();
+    expect(recommendBodies[0]).toEqual({
+      refresh: false,
+      prompt: 'Make a scatter plot of dose and response by group.',
+    });
     await expect(page.getByText('AI dose response scatter')).toBeVisible();
+    const favoriteTemplateFromRecommendations = page.getByRole('button', { name: `Use favorite figure template ${source.figureName}` });
+    await expect(favoriteTemplateFromRecommendations.getByText('Favorite')).toBeVisible();
+    await favoriteTemplateFromRecommendations.click();
+    await expect(page.locator('[data-testid="in-plot-title"]')).toHaveValue('Copied template title');
+    await expect(page.locator('[data-testid="chart-type-select"]')).toHaveValue('scatter');
+    await expect(page.getByText('Use one of my figures as a template')).toHaveCount(0);
+
+    await page.getByRole('button', { name: 'Back to recommendations' }).click();
     await page.getByLabel('Optional chart direction').fill('Prefer a scatter plot for dose and response.');
     await page.getByRole('button', { name: /Refresh AI recommendations|Generate AI recommendations/ }).click();
     await expect.poll(() => recommendBodies.length, { timeout: 10_000 }).toBe(2);
