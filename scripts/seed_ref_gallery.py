@@ -629,6 +629,162 @@ def _pathway_impact_dot() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _mutational_signature_prevalence() -> pd.DataFrame:
+    rng = random.Random(7210)
+    signatures = [f"Signature_{idx:02d}" for idx in range(1, 9)]
+    subtypes = ["Subtype A", "Subtype B", "Subtype C", "Subtype D"]
+    rows: list[dict] = []
+    for sig_idx, signature in enumerate(signatures):
+        row = {"Signature": signature}
+        for subtype_idx, subtype in enumerate(subtypes):
+            base = 24 + 46 * math.exp(-sig_idx / 5.5)
+            subtype_shift = [8, -4, 2, -8][subtype_idx]
+            if sig_idx in {1, 5} and subtype_idx in {1, 2}:
+                subtype_shift += 16
+            if sig_idx in {2, 6} and subtype_idx == 3:
+                subtype_shift += 12
+            prevalence = _clip(base + subtype_shift + rng.gauss(0, 4.2), 3, 92)
+            row[subtype] = round(prevalence, 1)
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _genomic_instability_by_subtype() -> pd.DataFrame:
+    rows = [
+        ("Overall cohort", 38.0, 35.1, 40.9),
+        ("Subtype A", 14.5, 10.8, 18.2),
+        ("Subtype B", 29.2, 25.1, 33.3),
+        ("Subtype C", 45.4, 39.2, 51.6),
+        ("Subtype D", 57.8, 51.5, 64.1),
+    ]
+    return pd.DataFrame(rows, columns=["Subtype", "Altered_Profile_pct", "CI_Lower", "CI_Upper"])
+
+
+def _dna_repair_pathway_mutations() -> pd.DataFrame:
+    rng = random.Random(7211)
+    markers = [
+        "Repair_A", "Repair_B", "Repair_C", "Repair_D", "Repair_E",
+        "Checkpoint_A", "Checkpoint_B", "Repair_F", "Replication_A", "Genome_Care",
+    ]
+    rows: list[dict] = []
+    for idx, marker in enumerate(markers):
+        count = round(34 * math.exp(-idx / 4.0) + rng.uniform(2, 8))
+        q_value = 10 ** (-rng.uniform(1.0, 4.0) + idx * 0.025)
+        rows.append({
+            "Marker": marker,
+            "Mutation_Count": int(count),
+            "Affected_Samples": int(round(count * rng.uniform(1.2, 2.4))),
+            "Q_Value": round(q_value, 7),
+        })
+    return pd.DataFrame(rows)
+
+
+def _mutation_signature_intensity() -> pd.DataFrame:
+    rows: list[dict] = []
+    for rank in range(1, 31):
+        high = _clip(4 + rank * 1.9 + 3.0 * math.sin(rank / 4), 2, 70)
+        intermediate = _clip(18 + rank * 0.35 + 2.0 * math.cos(rank / 5), 8, 36)
+        low = _clip(100 - high - intermediate, 8, 88)
+        for label, value in [
+            ("Low allele burden", low),
+            ("Intermediate allele burden", intermediate),
+            ("High allele burden", high),
+        ]:
+            rows.append({"Intensity_Rank": rank, "Burden_Group": label, "Sample_pct": round(value, 1)})
+    return pd.DataFrame(rows)
+
+
+def _sv_density_focal_locus() -> pd.DataFrame:
+    rng = random.Random(7212)
+    rows: list[dict] = []
+    for idx in range(420):
+        distance = -1000 + idx * (2000 / 419)
+        peak = math.exp(-(distance / 170) ** 2)
+        shoulder = 0.45 * math.exp(-((abs(distance) - 360) / 210) ** 2)
+        left_density = 0.16 + 0.72 * peak + shoulder + rng.gauss(0, 0.018)
+        right_density = 0.14 + 0.66 * peak + 0.33 * math.exp(-((distance - 420) / 240) ** 2) + rng.gauss(0, 0.018)
+        rows.append({"Distance_kb": round(distance, 3), "Breakpoint": "5 prime", "Density": round(max(0, left_density), 4)})
+        rows.append({"Distance_kb": round(distance, 3), "Breakpoint": "3 prime", "Density": round(max(0, right_density), 4)})
+    return pd.DataFrame(rows)
+
+
+def _permutation_distance_test() -> pd.DataFrame:
+    rng = random.Random(7213)
+    rows: list[dict] = []
+    for idx in range(1800):
+        rows.append({"Mean_Distance_Mb": round(rng.gauss(1.64, 0.09), 4), "Distribution": "Permuted"})
+    for idx in range(80):
+        rows.append({"Mean_Distance_Mb": round(rng.gauss(1.03, 0.035), 4), "Distribution": "Observed-like"})
+    return pd.DataFrame(rows)
+
+
+def _downregulated_gene_dot() -> pd.DataFrame:
+    rng = random.Random(7214)
+    rows: list[dict] = []
+    for idx in range(16):
+        lfc = -(1.25 + 2.2 * math.exp(-idx / 6.0) + rng.uniform(-0.15, 0.22))
+        q_value = 10 ** (-rng.uniform(1.1, 6.0) + idx * 0.03)
+        rows.append({
+            "Gene": f"GENE{idx + 1:03d}",
+            "Abs_Log2FC": round(abs(lfc), 3),
+            "Affected_Samples": rng.randint(10, 54),
+            "Q_Value": round(q_value, 8),
+        })
+    return pd.DataFrame(rows)
+
+
+def _genome_wide_copy_number_score() -> pd.DataFrame:
+    rng = random.Random(7215)
+    rows: list[dict] = []
+    peaks = [(3, 44, 4.4), (8, 66, 5.0), (11, 28, 3.8), (17, 52, 5.8)]
+    offset = 0.0
+    for chrom in range(1, 23):
+        for idx in range(105):
+            pos = idx * 1.3
+            score = 0.16 + rng.expovariate(1.8)
+            for peak_chrom, peak_pos, amp in peaks:
+                if chrom == peak_chrom:
+                    score += amp * math.exp(-((pos - peak_pos) / 5.5) ** 2)
+            rows.append({
+                "Chromosome": str(chrom),
+                "Genome_Position_Mb": round(offset + pos, 3),
+                "Copy_Number_Score": round(score, 4),
+            })
+        offset += 140
+    return pd.DataFrame(rows)
+
+
+def _circular_dna_frequency() -> pd.DataFrame:
+    rng = random.Random(7216)
+    markers = [
+        "Marker_A", "Marker_B", "Marker_C", "Marker_D", "Marker_E", "Marker_F",
+        "Marker_G", "Marker_H", "Marker_I", "Marker_J", "Marker_K", "Marker_L",
+    ]
+    rows: list[dict] = []
+    for idx, marker in enumerate(markers):
+        freq = 3.5 + 18.0 * math.exp(-idx / 3.4) + rng.uniform(-1.3, 1.1)
+        width = rng.uniform(1.0, 2.4)
+        rows.append({
+            "Marker": marker,
+            "Frequency_pct": round(freq, 2),
+            "CI_Lower": round(max(0.1, freq - width), 2),
+            "CI_Upper": round(min(30.0, freq + width), 2),
+        })
+    return pd.DataFrame(rows)
+
+
+def _pathologic_response_rate() -> pd.DataFrame:
+    rows = [
+        ("Biomarker high", "No focal DNA event", 63.5, 58.2, 68.8),
+        ("Biomarker high", "Focal DNA event", 47.8, 41.2, 54.5),
+        ("Biomarker intermediate", "No focal DNA event", 42.4, 36.7, 48.1),
+        ("Biomarker intermediate", "Focal DNA event", 29.6, 23.9, 35.4),
+        ("Biomarker low", "No focal DNA event", 24.2, 18.8, 29.5),
+        ("Biomarker low", "Focal DNA event", 15.4, 10.3, 20.5),
+    ]
+    return pd.DataFrame(rows, columns=["Biomarker_Status", "DNA_Event_Status", "Response_Rate_pct", "CI_Lower", "CI_Upper"])
+
+
 COMMON_OPTIONS = {
     "title": "",
     "size": "wide",
@@ -1438,6 +1594,96 @@ SEEDS = [
         plot_type="enrichment_dot",
         mapping={"term": "Pathway", "value": "Effect_Size", "size": "Samples", "color": "Q_Value"},
         options={**COMMON_OPTIONS, "x_label": "Effect size", "y_label": ""},
+    ),
+    GallerySeed(
+        key="mutational_signature_prevalence",
+        figure_name="Mutational signature prevalence",
+        dataset_name="Gallery seed - mutational signature prevalence",
+        dataframe_factory=_mutational_signature_prevalence,
+        plot_type="heatmap",
+        mapping={"columns": ["Subtype A", "Subtype B", "Subtype C", "Subtype D"], "row_label": "Signature"},
+        options={**COMMON_OPTIONS, "scale_rows": False, "palette": "viridis", "x_label": "Subtype", "y_label": "Signature"},
+    ),
+    GallerySeed(
+        key="genomic_instability_by_subtype",
+        figure_name="Genomic instability by subtype",
+        dataset_name="Gallery seed - genomic instability by subtype",
+        dataframe_factory=_genomic_instability_by_subtype,
+        plot_type="error_bar",
+        mapping={"x": "Subtype", "y": "Altered_Profile_pct", "ymin": "CI_Lower", "ymax": "CI_Upper"},
+        options={**COMMON_OPTIONS, "x_label": "Subtype", "y_label": "Altered profile (%)", "connect_points": False},
+    ),
+    GallerySeed(
+        key="dna_repair_pathway_mutations",
+        figure_name="DNA repair pathway mutations",
+        dataset_name="Gallery seed - DNA repair pathway mutations",
+        dataframe_factory=_dna_repair_pathway_mutations,
+        plot_type="enrichment_dot",
+        mapping={"term": "Marker", "value": "Mutation_Count", "size": "Affected_Samples", "color": "Q_Value"},
+        options={**COMMON_OPTIONS, "x_label": "Mutation count", "y_label": ""},
+    ),
+    GallerySeed(
+        key="mutation_signature_intensity",
+        figure_name="Mutation signature intensity",
+        dataset_name="Gallery seed - mutation signature intensity",
+        dataframe_factory=_mutation_signature_intensity,
+        plot_type="line",
+        mapping={"x": "Intensity_Rank", "y": "Sample_pct", "group": "Burden_Group"},
+        options={**COMMON_OPTIONS, "x_label": "Signature intensity rank", "y_label": "Samples (%)"},
+    ),
+    GallerySeed(
+        key="sv_density_focal_locus",
+        figure_name="Structural variant density around focal locus",
+        dataset_name="Gallery seed - structural variant density around focal locus",
+        dataframe_factory=_sv_density_focal_locus,
+        plot_type="line",
+        mapping={"x": "Distance_kb", "y": "Density", "group": "Breakpoint"},
+        options={**COMMON_OPTIONS, "x_label": "Distance from locus (kb)", "y_label": "Breakpoint density"},
+    ),
+    GallerySeed(
+        key="permutation_distance_test",
+        figure_name="Permutation distance test",
+        dataset_name="Gallery seed - permutation distance test",
+        dataframe_factory=_permutation_distance_test,
+        plot_type="density",
+        mapping={"value": "Mean_Distance_Mb", "group": "Distribution"},
+        options={**COMMON_OPTIONS, "x_label": "Mean distance (Mb)", "show_rug": False},
+    ),
+    GallerySeed(
+        key="downregulated_gene_dot",
+        figure_name="Downregulated gene dot plot",
+        dataset_name="Gallery seed - downregulated gene dot plot",
+        dataframe_factory=_downregulated_gene_dot,
+        plot_type="enrichment_dot",
+        mapping={"term": "Gene", "value": "Abs_Log2FC", "size": "Affected_Samples", "color": "Q_Value"},
+        options={**COMMON_OPTIONS, "x_label": "Absolute log2 fold change", "y_label": ""},
+    ),
+    GallerySeed(
+        key="genome_wide_copy_number_score",
+        figure_name="Genome-wide copy-number score",
+        dataset_name="Gallery seed - genome-wide copy-number score",
+        dataframe_factory=_genome_wide_copy_number_score,
+        plot_type="line",
+        mapping={"x": "Genome_Position_Mb", "y": "Copy_Number_Score"},
+        options={**COMMON_OPTIONS, "x_label": "Genome position (Mb)", "y_label": "Copy-number score", "hide_legend": True},
+    ),
+    GallerySeed(
+        key="circular_dna_frequency",
+        figure_name="Circular DNA marker frequency",
+        dataset_name="Gallery seed - circular DNA marker frequency",
+        dataframe_factory=_circular_dna_frequency,
+        plot_type="error_bar",
+        mapping={"x": "Marker", "y": "Frequency_pct", "ymin": "CI_Lower", "ymax": "CI_Upper"},
+        options={**COMMON_OPTIONS, "x_label": "Marker", "y_label": "Frequency (%)", "connect_points": False, "flip_coords": True},
+    ),
+    GallerySeed(
+        key="pathologic_response_rate",
+        figure_name="Pathologic response rate by biomarker status",
+        dataset_name="Gallery seed - pathologic response rate by biomarker status",
+        dataframe_factory=_pathologic_response_rate,
+        plot_type="error_bar",
+        mapping={"x": "Biomarker_Status", "y": "Response_Rate_pct", "group": "DNA_Event_Status", "ymin": "CI_Lower", "ymax": "CI_Upper"},
+        options={**COMMON_OPTIONS, "x_label": "Biomarker status", "y_label": "Response rate (%)", "connect_points": False},
     ),
 ]
 
