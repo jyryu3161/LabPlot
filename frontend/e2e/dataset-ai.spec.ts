@@ -152,6 +152,10 @@ test('dataset upload saves purpose, auto-loads AI once, and refreshes with promp
 
     await expect(page.locator('[data-testid="chart-type-select"] option[value="scatter"]')).toHaveJSProperty('disabled', false);
     await expect(page.locator('[data-testid="chart-type-select"] option[value="line"]')).toHaveJSProperty('disabled', false);
+    await expect(page.getByText('Use one of my figures as a template')).toHaveCount(0);
+
+    await page.getByRole('button', { name: 'Back to recommendations' }).click();
+    await page.getByRole('button', { name: 'Build manually' }).click();
     const sourceTemplate = page.getByRole('button', { name: `Use figure format ${source.figureName}` });
     await expect(sourceTemplate.getByText('Favorite')).toBeVisible();
     await sourceTemplate.click();

@@ -487,6 +487,8 @@ export function SvgVectorEditor({ svgUrl, filenameBase, versionNumber, isSaving 
   const presentationScaleRef = useRef({ font: 1, stroke: 1, marker: 1 });
   const baselineWidthMmRef = useRef<number | null>(null);
   const dragRef = useRef<DragState | null>(null);
+  const suppressNextClickRef = useRef(false);
+  const suppressClickTimerRef = useRef<number | null>(null);
   const [svgMarkup, setSvgMarkup] = useState('');
   const [originalMarkup, setOriginalMarkup] = useState('');
   const [loading, setLoading] = useState(false);
@@ -553,6 +555,15 @@ export function SvgVectorEditor({ svgUrl, filenameBase, versionNumber, isSaving 
     syncControls(el);
   }, [syncControls]);
 
+  const suppressNextStageClick = useCallback(() => {
+    suppressNextClickRef.current = true;
+    if (suppressClickTimerRef.current !== null) window.clearTimeout(suppressClickTimerRef.current);
+    suppressClickTimerRef.current = window.setTimeout(() => {
+      suppressNextClickRef.current = false;
+      suppressClickTimerRef.current = null;
+    }, 350);
+  }, []);
+
   const syncSvgSize = useCallback((resetBaseline = false) => {
     const svg = stageRef.current?.querySelector('svg') as SVGSVGElement | null;
     if (!svg) return;
@@ -600,7 +611,10 @@ export function SvgVectorEditor({ svgUrl, filenameBase, versionNumber, isSaving 
 
     void loadSvg();
 
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      if (suppressClickTimerRef.current !== null) window.clearTimeout(suppressClickTimerRef.current);
+    };
   }, [svgUrl, syncControls]);
 
   useEffect(() => {
@@ -613,6 +627,12 @@ export function SvgVectorEditor({ svgUrl, filenameBase, versionNumber, isSaving 
   }, [svgMarkup, refreshTextItems, syncSvgSize]);
 
   function handleStageClick(event: MouseEvent<HTMLDivElement>) {
+    if (suppressNextClickRef.current) {
+      suppressNextClickRef.current = false;
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
     if (resizeHandleFromTarget(event.target as Element | null)) {
       event.preventDefault();
       event.stopPropagation();
@@ -637,6 +657,7 @@ export function SvgVectorEditor({ svgUrl, filenameBase, versionNumber, isSaving 
     host?.focus();
     const handle = resizeHandleFromTarget(event.target as Element | null);
     if (handle) {
+      suppressNextStageClick();
       const selected = selectedEditable(host);
       const parent = selected ? parentGraphicsElement(selected) : null;
       if (!selected || !parent) return;
@@ -664,6 +685,7 @@ export function SvgVectorEditor({ svgUrl, filenameBase, versionNumber, isSaving 
 
     const editable = editableFromTarget(event.target as Element | null, host);
     if (!editable) return;
+    suppressNextStageClick();
     const start = pointerToLocalPoint(editable, event.clientX, event.clientY);
     if (!start) return;
     selectElement(editable);

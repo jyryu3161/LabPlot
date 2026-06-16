@@ -153,6 +153,10 @@
 }
 
 .svg-vector-editor-stage [data-labplot-editor-overlay="true"] {
+  pointer-events: visiblePainted;
+}
+
+.svg-vector-editor-stage [data-labplot-editor-overlay="true"] > rect:not([data-labplot-resize-handle]) {
   pointer-events: none;
 }
 
