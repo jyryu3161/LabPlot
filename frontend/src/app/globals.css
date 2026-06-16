@@ -138,28 +138,14 @@
 }
 
 .svg-vector-editor-stage [data-labplot-editable="true"]:hover {
-  outline: 1px dashed oklch(0.623 0.214 259.815);
+  outline: 1px dashed oklch(0.7 0 0 / 0.65);
   outline-offset: 2px;
 }
 
 .svg-vector-editor-stage [data-labplot-selected="true"] {
-  outline: 2px solid oklch(0.623 0.214 259.815);
-  outline-offset: 2px;
   cursor: grab;
 }
 
 .svg-vector-editor-stage [data-labplot-selected="true"]:active {
   cursor: grabbing;
-}
-
-.svg-vector-editor-stage [data-labplot-editor-overlay="true"] {
-  pointer-events: visiblePainted;
-}
-
-.svg-vector-editor-stage [data-labplot-editor-overlay="true"] > rect:not([data-labplot-resize-handle]) {
-  pointer-events: none;
-}
-
-.svg-vector-editor-stage [data-labplot-resize-handle] {
-  pointer-events: all;
 }

@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test';
 
-test('SVG editor keeps selection and supports live move, resize, and keyboard nudge', async ({ page }) => {
+test('SVG editor keeps selection and supports component edits without resize handles', async ({ page }) => {
   test.setTimeout(120_000);
   const email = process.env.E2E_EMAIL;
   const password = process.env.E2E_PASSWORD;
@@ -82,7 +82,8 @@ test('SVG editor keeps selection and supports live move, resize, and keyboard nu
     await expect(page.getByTestId('svg-selected-element')).not.toContainText('No element selected');
     await page.waitForTimeout(150);
     await expect(selected).toHaveCount(1);
-    await expect(stage.locator('[data-labplot-resize-handle]')).toHaveCount(8);
+    await expect(stage.locator('[data-labplot-resize-handle]')).toHaveCount(0);
+    await expect(stage.locator('[data-labplot-editor-overlay="true"]')).toHaveCount(0);
 
     const beforeMove = await selected.first().getAttribute('transform') ?? '';
     await page.mouse.move(target!.x, target!.y);
@@ -94,18 +95,6 @@ test('SVG editor keeps selection and supports live move, resize, and keyboard nu
     const afterMove = await selected.first().getAttribute('transform') ?? '';
     await stage.press('ArrowRight');
     await expect.poll(async () => await selected.first().getAttribute('transform') ?? '').not.toBe(afterMove);
-
-    const handle = stage.locator('[data-labplot-resize-handle="se"]');
-    await expect(handle).toBeVisible();
-    const handleBox = await handle.boundingBox();
-    expect(handleBox).toBeTruthy();
-    const beforeResize = await selected.first().getAttribute('transform') ?? '';
-    await page.mouse.move(handleBox!.x + handleBox!.width / 2, handleBox!.y + handleBox!.height / 2);
-    await page.mouse.down();
-    await page.mouse.move(handleBox!.x + handleBox!.width / 2 + 24, handleBox!.y + handleBox!.height / 2 + 20, { steps: 5 });
-    await page.mouse.up();
-    await expect.poll(async () => await selected.first().getAttribute('transform') ?? '').not.toBe(beforeResize);
-    await expect.poll(async () => await selected.first().getAttribute('transform') ?? '').toContain('scale');
   } finally {
     if (figureId) {
       await page.evaluate(async ({ figureId, headers }) => {
