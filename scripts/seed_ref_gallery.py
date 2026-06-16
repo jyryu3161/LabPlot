@@ -442,11 +442,198 @@ def _advanced_ma_plot() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _clip(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+def _clinical_signature_heatmap() -> pd.DataFrame:
+    rng = random.Random(7201)
+    processes = [f"Process_{idx:02d}" for idx in range(1, 13)]
+    values: list[list[float]] = [[0.0 for _ in processes] for _ in processes]
+    for i in range(len(processes)):
+        for j in range(i, len(processes)):
+            if i == j:
+                value = 1.0
+            else:
+                same_family = i // 4 == j // 4
+                distance = abs(i - j)
+                base = 0.58 * math.exp(-distance / 2.4) + (0.18 if same_family else -0.05)
+                value = _clip(base + rng.gauss(0, 0.12), -0.35, 0.86)
+            values[i][j] = values[j][i] = round(value, 3)
+    rows = []
+    for name, row in zip(processes, values):
+        rows.append({"Signature": name, **{proc: row[idx] for idx, proc in enumerate(processes)}})
+    return pd.DataFrame(rows)
+
+
+def _clinical_score_density() -> pd.DataFrame:
+    rng = random.Random(7202)
+    rows: list[dict] = []
+    for group, center, sd, n in [
+        ("Reference-like", 0.24, 0.08, 360),
+        ("Intermediate", 0.47, 0.10, 330),
+        ("Altered profile", 0.69, 0.11, 310),
+    ]:
+        for idx in range(n):
+            score = _clip(rng.gauss(center, sd), 0.02, 0.98)
+            rows.append({"Sample": f"{group[:3].upper()}-{idx + 1:03d}", "Genomic_Score": round(score, 4), "Profile": group})
+    return pd.DataFrame(rows)
+
+
+def _dna_repair_frequency() -> pd.DataFrame:
+    rng = random.Random(7203)
+    markers = [
+        "Repair_A", "Repair_B", "Repair_C", "Repair_D", "Repair_E",
+        "Checkpoint_A", "Checkpoint_B", "Replication_A", "Replication_B", "Genome_Care",
+    ]
+    rows: list[dict] = []
+    for idx, marker in enumerate(markers):
+        freq = 4.5 + 18.0 * math.exp(-idx / 3.2) + rng.uniform(-1.6, 1.5)
+        half_width = rng.uniform(1.1, 2.6)
+        rows.append({
+            "Marker": marker,
+            "Alteration_Frequency_pct": round(freq, 2),
+            "CI_Lower": round(max(0.1, freq - half_width), 2),
+            "CI_Upper": round(min(35.0, freq + half_width), 2),
+        })
+    return pd.DataFrame(rows)
+
+
+def _clinical_risk_survival() -> pd.DataFrame:
+    rng = random.Random(7204)
+    rows: list[dict] = []
+    for group, hazard, censor_low, censor_high in [
+        ("Low risk", 0.018, 28, 84),
+        ("Intermediate risk", 0.030, 24, 78),
+        ("High risk", 0.050, 18, 72),
+    ]:
+        for idx in range(110):
+            event_time = -math.log(max(1e-6, rng.random())) / hazard
+            censor_time = rng.uniform(censor_low, censor_high)
+            time = min(event_time, censor_time)
+            event = int(event_time <= censor_time)
+            rows.append({"Subject": f"{group[:3].upper()}-{idx + 1:03d}", "Time_months": round(time, 2), "Event": event, "Risk_Group": group})
+    return pd.DataFrame(rows)
+
+
+def _clinical_covariate_forest() -> pd.DataFrame:
+    rows = [
+        ("Genomic instability score", 1.74, 1.31, 2.30),
+        ("Advanced clinical stage", 1.58, 1.18, 2.10),
+        ("High proliferation index", 1.42, 1.08, 1.86),
+        ("Immune-low subtype", 1.36, 1.02, 1.82),
+        ("Treatment intensification", 0.72, 0.55, 0.94),
+        ("Complete response", 0.48, 0.33, 0.69),
+        ("Age per decade", 1.10, 0.96, 1.27),
+        ("High tumor fraction", 1.29, 0.98, 1.70),
+    ]
+    return pd.DataFrame(rows, columns=["Variable", "Hazard_Ratio", "CI_Lower", "CI_Upper"])
+
+
+def _structural_variant_volcano() -> pd.DataFrame:
+    rng = random.Random(7205)
+    rows: list[dict] = []
+    for idx in range(260):
+        lfc = rng.gauss(0, 0.48)
+        q_value = 10 ** (-rng.uniform(0.25, 1.2))
+        if idx < 14:
+            lfc = rng.choice([-1, 1]) * rng.uniform(1.25, 2.85)
+            q_value = 10 ** (-rng.uniform(1.35, 3.2))
+        rows.append({
+            "Gene": f"GENE{idx + 1:03d}",
+            "Log2_Fold_Change": round(lfc, 4),
+            "Q_Value": round(q_value, 7),
+        })
+    return pd.DataFrame(rows)
+
+
+def _variant_burden_violin() -> pd.DataFrame:
+    rng = random.Random(7206)
+    rows: list[dict] = []
+    for group, center, spread, n in [
+        ("No focal event", 0.18, 0.06, 210),
+        ("Single focal event", 0.34, 0.09, 245),
+        ("Multiple focal events", 0.54, 0.12, 220),
+    ]:
+        for _ in range(n):
+            rows.append({"Event_Group": group, "Cellular_Fraction": round(_clip(rng.gauss(center, spread), 0.01, 0.98), 4)})
+    return pd.DataFrame(rows)
+
+
+def _genome_wide_focal_events() -> pd.DataFrame:
+    rng = random.Random(7207)
+    rows: list[dict] = []
+    peak_regions = {(3, 42), (8, 66), (11, 24), (17, 54)}
+    for chrom in range(1, 23):
+        for idx in range(110):
+            pos_mb = idx * 1.2 + rng.uniform(0, 0.9)
+            score = rng.expovariate(0.8)
+            if any(chrom == peak_chrom and abs(pos_mb - peak_pos) < 6 for peak_chrom, peak_pos in peak_regions):
+                score += rng.uniform(3.0, 5.2)
+            p_value = 10 ** (-_clip(score, 0.05, 8.0))
+            rows.append({"Chromosome": chrom, "Position_bp": int(pos_mb * 1_000_000), "P_Value": p_value})
+    return pd.DataFrame(rows)
+
+
+def _therapy_response_by_marker() -> pd.DataFrame:
+    rows = [
+        ("Standard therapy", "Marker low", 18.2, 13.5, 23.8),
+        ("Standard therapy", "Marker high", 27.6, 21.0, 34.3),
+        ("Combination therapy", "Marker low", 31.4, 25.2, 38.0),
+        ("Combination therapy", "Marker high", 48.8, 41.5, 55.6),
+        ("Targeted regimen", "Marker low", 24.1, 18.2, 30.5),
+        ("Targeted regimen", "Marker high", 57.3, 49.0, 64.8),
+    ]
+    return pd.DataFrame(rows, columns=["Treatment", "Marker_Status", "Response_Rate_pct", "CI_Lower", "CI_Upper"])
+
+
+def _treatment_biomarker_scores() -> pd.DataFrame:
+    rng = random.Random(7208)
+    rows: list[dict] = []
+    biomarker_specs = [
+        ("Composite score", 0.76, 0.34, 0.15),
+        ("Expression panel", 0.68, 0.39, 0.17),
+        ("Genomic score", 0.72, 0.36, 0.16),
+    ]
+    labels = [rng.random() < 0.42 for _ in range(180)]
+    for patient_idx, is_responder in enumerate(labels, start=1):
+        for biomarker, pos_mean, neg_mean, sd in biomarker_specs:
+            mean = pos_mean if is_responder else neg_mean
+            score = _clip(rng.gauss(mean, sd), 0.001, 0.999)
+            rows.append({
+                "Patient": f"P{patient_idx:03d}",
+                "Biomarker": biomarker,
+                "Score": round(score, 4),
+                "Outcome": "positive" if is_responder else "negative",
+            })
+    return pd.DataFrame(rows)
+
+
+def _pathway_impact_dot() -> pd.DataFrame:
+    rng = random.Random(7209)
+    pathways = [
+        "DNA repair", "Cell-cycle checkpoint", "Immune activation", "Hypoxia response",
+        "Chromatin remodeling", "Apoptosis", "Metabolic stress", "Replication stress",
+        "Inflammatory signaling", "Extracellular matrix", "Growth factor signaling", "RNA processing",
+    ]
+    rows: list[dict] = []
+    for idx, pathway in enumerate(pathways):
+        effect = 0.35 + 1.9 * math.exp(-idx / 6.0) + rng.uniform(-0.12, 0.18)
+        q_value = 10 ** (-rng.uniform(1.2, 4.5) + idx * 0.035)
+        rows.append({
+            "Pathway": pathway,
+            "Effect_Size": round(effect, 3),
+            "Samples": rng.randint(14, 68),
+            "Q_Value": round(q_value, 7),
+        })
+    return pd.DataFrame(rows)
+
+
 COMMON_OPTIONS = {
     "title": "",
     "size": "wide",
     "palette_name": "okabe_ito",
-    "font_scale": 0.95,
+    "font_scale": 1.0,
 }
 
 
@@ -1152,6 +1339,105 @@ SEEDS = [
         plot_type="ma_plot",
         mapping={"mean": "Mean_Expression", "log2fc": "Log2FC", "gene_label": "Gene"},
         options={**COMMON_OPTIONS, "x_label": "Mean expression", "y_label": "log2 fold change", "log_x": True, "fc_threshold": 1.0, "label_top": 8},
+    ),
+    GallerySeed(
+        key="signature_correlation_heatmap",
+        figure_name="Signature correlation heatmap",
+        dataset_name="Gallery seed - signature correlation heatmap",
+        dataframe_factory=_clinical_signature_heatmap,
+        plot_type="heatmap",
+        mapping={"columns": [f"Process_{idx:02d}" for idx in range(1, 13)], "row_label": "Signature"},
+        options={**COMMON_OPTIONS, "scale_rows": False, "palette": "viridis", "x_label": "", "y_label": ""},
+    ),
+    GallerySeed(
+        key="genomic_score_density",
+        figure_name="Genomic score density plot",
+        dataset_name="Gallery seed - genomic score density plot",
+        dataframe_factory=_clinical_score_density,
+        plot_type="density",
+        mapping={"value": "Genomic_Score", "group": "Profile"},
+        options={**COMMON_OPTIONS, "x_label": "Genomic score", "show_rug": False},
+    ),
+    GallerySeed(
+        key="dna_repair_frequency",
+        figure_name="DNA repair alteration frequency",
+        dataset_name="Gallery seed - DNA repair alteration frequency",
+        dataframe_factory=_dna_repair_frequency,
+        plot_type="error_bar",
+        mapping={"x": "Marker", "y": "Alteration_Frequency_pct", "ymin": "CI_Lower", "ymax": "CI_Upper"},
+        options={**COMMON_OPTIONS, "x_label": "Marker", "y_label": "Alteration frequency (%)", "connect_points": False, "flip_coords": True},
+    ),
+    GallerySeed(
+        key="clinical_risk_survival",
+        figure_name="Clinical risk survival curve",
+        dataset_name="Gallery seed - clinical risk survival curve",
+        dataframe_factory=_clinical_risk_survival,
+        plot_type="kaplan_meier",
+        mapping={"time": "Time_months", "status": "Event", "group": "Risk_Group"},
+        options={**COMMON_OPTIONS, "x_label": "Time (months)", "y_label": "Event-free probability"},
+    ),
+    GallerySeed(
+        key="clinical_covariate_forest",
+        figure_name="Clinical covariate forest plot",
+        dataset_name="Gallery seed - clinical covariate forest plot",
+        dataframe_factory=_clinical_covariate_forest,
+        plot_type="error_bar",
+        mapping={"x": "Variable", "y": "Hazard_Ratio", "ymin": "CI_Lower", "ymax": "CI_Upper"},
+        options={**COMMON_OPTIONS, "x_label": "Clinical covariate", "y_label": "Hazard ratio", "connect_points": False, "flip_coords": True},
+    ),
+    GallerySeed(
+        key="structural_variant_volcano",
+        figure_name="Structural variant volcano plot",
+        dataset_name="Gallery seed - structural variant volcano plot",
+        dataframe_factory=_structural_variant_volcano,
+        plot_type="volcano",
+        mapping={"log2fc": "Log2_Fold_Change", "pvalue": "Q_Value", "gene_label": "Gene"},
+        options={**COMMON_OPTIONS, "fc_threshold": 1.0, "p_threshold": 0.05, "label_top": 8},
+    ),
+    GallerySeed(
+        key="variant_burden_violin",
+        figure_name="Variant burden violin plot",
+        dataset_name="Gallery seed - variant burden violin plot",
+        dataframe_factory=_variant_burden_violin,
+        plot_type="violin",
+        mapping={"x": "Event_Group", "y": "Cellular_Fraction"},
+        options={**COMMON_OPTIONS, "x_label": "Focal event group", "y_label": "Cellular fraction", "show_box": True},
+    ),
+    GallerySeed(
+        key="genome_wide_focal_event_map",
+        figure_name="Genome-wide focal event map",
+        dataset_name="Gallery seed - genome-wide focal event map",
+        dataframe_factory=_genome_wide_focal_events,
+        plot_type="manhattan",
+        mapping={"chrom": "Chromosome", "pos": "Position_bp", "pvalue": "P_Value"},
+        options={**COMMON_OPTIONS, "x_label": "Chromosome", "y_label": "-log10(q)", "sig_threshold": 1e-4},
+    ),
+    GallerySeed(
+        key="therapy_response_marker_status",
+        figure_name="Therapy response by marker status",
+        dataset_name="Gallery seed - therapy response by marker status",
+        dataframe_factory=_therapy_response_by_marker,
+        plot_type="error_bar",
+        mapping={"x": "Treatment", "y": "Response_Rate_pct", "group": "Marker_Status", "ymin": "CI_Lower", "ymax": "CI_Upper"},
+        options={**COMMON_OPTIONS, "x_label": "Treatment", "y_label": "Response rate (%)", "connect_points": False},
+    ),
+    GallerySeed(
+        key="treatment_biomarker_roc_pr",
+        figure_name="Treatment biomarker ROC and PR curves",
+        dataset_name="Gallery seed - treatment biomarker ROC and PR curves",
+        dataframe_factory=_treatment_biomarker_scores,
+        plot_type="roc_pr_curve",
+        mapping={"score": "Score", "label": "Outcome", "group": "Biomarker"},
+        options={**COMMON_OPTIONS, "x_label": "False positive rate / recall", "y_label": "True positive rate / precision"},
+    ),
+    GallerySeed(
+        key="pathway_impact_dot",
+        figure_name="Pathway impact dot plot",
+        dataset_name="Gallery seed - pathway impact dot plot",
+        dataframe_factory=_pathway_impact_dot,
+        plot_type="enrichment_dot",
+        mapping={"term": "Pathway", "value": "Effect_Size", "size": "Samples", "color": "Q_Value"},
+        options={**COMMON_OPTIONS, "x_label": "Effect size", "y_label": ""},
     ),
 ]
 
