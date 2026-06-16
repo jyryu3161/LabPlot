@@ -129,7 +129,7 @@
 }
 
 .svg-vector-editor-stage [data-labplot-editable="true"] {
-  cursor: pointer;
+  cursor: move;
 }
 
 .svg-vector-editor-stage [data-labplot-editable="true"]:hover {
@@ -140,4 +140,9 @@
 .svg-vector-editor-stage [data-labplot-selected="true"] {
   outline: 2px solid oklch(0.623 0.214 259.815);
   outline-offset: 2px;
+  cursor: grab;
+}
+
+.svg-vector-editor-stage [data-labplot-selected="true"]:active {
+  cursor: grabbing;
 }

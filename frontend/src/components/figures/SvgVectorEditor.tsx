@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState, type MouseEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type MouseEvent, type PointerEvent } from 'react';
 import { toast } from 'sonner';
 import { AlertTriangle, Download, Loader2, Maximize2, MousePointer2, RefreshCw, Ruler, Save, SlidersHorizontal, Type } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
@@ -35,6 +35,19 @@ interface SvgDimensions {
   width: number;
   height: number;
   unit: string;
+}
+
+interface SvgPoint {
+  x: number;
+  y: number;
+}
+
+interface DragState {
+  el: SVGElement;
+  pointerId: number;
+  start: SvgPoint;
+  baseTransform: string;
+  moved: boolean;
 }
 
 interface SvgVectorEditorProps {
@@ -249,6 +262,36 @@ function scaleSvgPresentation(svg: SVGSVGElement, scales: { font: number; stroke
   });
 }
 
+function editableFromTarget(target: Element | null, host: HTMLDivElement | null): SVGElement | null {
+  if (!target || !host) return null;
+  const editable = target.closest('[data-labplot-editable="true"]') as SVGElement | null;
+  if (!editable || !host.contains(editable)) return null;
+  if (editable.tagName.toLowerCase() === 'tspan') {
+    const parentText = editable.closest('text') as SVGElement | null;
+    if (parentText && host.contains(parentText)) return parentText;
+  }
+  return editable;
+}
+
+function pointerToLocalPoint(el: SVGElement, clientX: number, clientY: number): SvgPoint | null {
+  const svg = el.ownerSVGElement;
+  if (!svg) return null;
+  const point = svg.createSVGPoint();
+  point.x = clientX;
+  point.y = clientY;
+  const parent = el.parentElement as SVGGraphicsElement | null;
+  const ctm = typeof parent?.getScreenCTM === 'function' ? parent.getScreenCTM() : svg.getScreenCTM();
+  if (!ctm) return null;
+  const local = point.matrixTransform(ctm.inverse());
+  return { x: local.x, y: local.y };
+}
+
+function translatedTransform(baseTransform: string, dx: number, dy: number): string {
+  const translate = `translate(${formatLengthNumber(dx)} ${formatLengthNumber(dy)})`;
+  const base = baseTransform.trim();
+  return base ? `${base} ${translate}` : translate;
+}
+
 function selectedEditable(host: HTMLDivElement | null): SVGElement | null {
   return host?.querySelector('[data-labplot-selected="true"]') as SVGElement | null;
 }
@@ -270,6 +313,7 @@ export function SvgVectorEditor({ svgUrl, filenameBase, versionNumber, isSaving 
   const stageRef = useRef<HTMLDivElement>(null);
   const presentationScaleRef = useRef({ font: 1, stroke: 1, marker: 1 });
   const baselineWidthMmRef = useRef<number | null>(null);
+  const dragRef = useRef<DragState | null>(null);
   const [svgMarkup, setSvgMarkup] = useState('');
   const [originalMarkup, setOriginalMarkup] = useState('');
   const [loading, setLoading] = useState(false);
@@ -397,14 +441,60 @@ export function SvgVectorEditor({ svgUrl, filenameBase, versionNumber, isSaving 
     const target = event.target as Element | null;
     const host = stageRef.current;
     if (!target || !host) return;
-    const editable = target.closest('[data-labplot-editable="true"]') as SVGElement | null;
-    if (!editable || !host.contains(editable)) {
+    const editable = editableFromTarget(target, host);
+    if (!editable) {
       selectElement(null);
       return;
     }
     event.preventDefault();
     event.stopPropagation();
     selectElement(editable);
+  }
+
+  function handleStagePointerDown(event: PointerEvent<HTMLDivElement>) {
+    if (event.button !== 0) return;
+    const host = stageRef.current;
+    const editable = editableFromTarget(event.target as Element | null, host);
+    if (!editable) return;
+    const start = pointerToLocalPoint(editable, event.clientX, event.clientY);
+    if (!start) return;
+    selectElement(editable);
+    dragRef.current = {
+      el: editable,
+      pointerId: event.pointerId,
+      start,
+      baseTransform: editable.getAttribute('transform') || '',
+      moved: false,
+    };
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // Pointer capture can fail if the browser has already cancelled the pointer.
+    }
+    event.preventDefault();
+  }
+
+  function handleStagePointerMove(event: PointerEvent<HTMLDivElement>) {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    const point = pointerToLocalPoint(drag.el, event.clientX, event.clientY);
+    if (!point) return;
+    const dx = point.x - drag.start.x;
+    const dy = point.y - drag.start.y;
+    if (!drag.moved && Math.hypot(dx, dy) < 0.5) return;
+    drag.moved = true;
+    drag.el.setAttribute('transform', translatedTransform(drag.baseTransform, dx, dy));
+    event.preventDefault();
+  }
+
+  function finishStageDrag(event: PointerEvent<HTMLDivElement>) {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    if (drag.moved) syncControls(drag.el);
+    dragRef.current = null;
   }
 
   function applyStyle(prop: string, value: string) {
@@ -581,6 +671,10 @@ export function SvgVectorEditor({ svgUrl, filenameBase, versionNumber, isSaving 
             <div
               ref={stageRef}
               onClick={handleStageClick}
+              onPointerDown={handleStagePointerDown}
+              onPointerMove={handleStagePointerMove}
+              onPointerUp={finishStageDrag}
+              onPointerCancel={finishStageDrag}
               data-testid="svg-editor-stage"
               className="svg-vector-editor-stage max-h-[70vh] overflow-auto rounded-md border bg-white p-3"
             />
