@@ -172,6 +172,13 @@ def _gemini_usage(payload: dict) -> dict:
     input_tokens = _as_int(raw.get("promptTokenCount"))
     output_tokens = _as_int(raw.get("candidatesTokenCount"))
     total_tokens = _as_int(raw.get("totalTokenCount")) or (input_tokens + output_tokens)
+    if total_tokens > input_tokens + output_tokens:
+        # Gemini bills thinking tokens as output tokens. Some responses report
+        # them only in totalTokenCount, so store billable output, not visible text
+        # output only.
+        output_tokens = max(0, total_tokens - input_tokens)
+    else:
+        total_tokens = input_tokens + output_tokens
     return {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,

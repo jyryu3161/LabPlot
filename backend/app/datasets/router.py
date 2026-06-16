@@ -70,6 +70,18 @@ def _focus_columns_from_form(raw: str | None) -> list[str]:
     return [part.strip() for part in raw.split(",") if part.strip()]
 
 
+def _column_roles_from_form(raw: str | None) -> dict[str, str]:
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {str(name): str(role) for name, role in parsed.items() if isinstance(name, str) and isinstance(role, str)}
+
+
 @router.post("/preview", response_model=DatasetPreviewResponse)
 async def preview_dataset_upload(
     file: UploadFile = File(...),
@@ -102,6 +114,7 @@ async def upload_dataset(
     start_col: int | None = Form(None),
     end_col: int | None = Form(None),
     focus_columns: str | None = Form(None),
+    column_roles: str | None = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     _: None = Depends(rate_limit("dataset_upload", 30, 3600)),
@@ -114,9 +127,10 @@ async def upload_dataset(
     enforce_storage_quota(db, current_user, len(content))
     options = _ingest_options_from_form(sheet_name, header_row, data_start_row, end_row, start_col, end_col)
     focus = _focus_columns_from_form(focus_columns)
+    roles = _column_roles_from_form(column_roles)
     ds = service.create_dataset(db, current_user.id, file.filename, content,
                                 name=name, project_id=project_id, description=description,
-                                ingest_options=options, focus_columns=focus)
+                                ingest_options=options, focus_columns=focus, column_roles=roles)
     audit_service.log_event(
         db,
         actor_id=current_user.id,

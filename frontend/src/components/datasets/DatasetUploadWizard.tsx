@@ -32,9 +32,33 @@ const ACCEPT = {
   'application/vnd.ms-excel': ['.xls'],
 };
 
+const COLUMN_ROLE_OPTIONS = [
+  { value: 'numeric', label: 'Numeric' },
+  { value: 'category', label: 'Category' },
+  { value: 'group', label: 'Group' },
+  { value: 'time', label: 'Time' },
+  { value: 'status', label: 'Status' },
+  { value: 'gene', label: 'Gene' },
+  { value: 'log2fc', label: 'log2FC' },
+  { value: 'pvalue', label: 'p-value' },
+  { value: 'text', label: 'Text' },
+];
+
 function likelyFocusColumns(columns: ColumnProfile[]): string[] {
   const preferred = columns.filter((c) => c.role !== 'text').map((c) => c.name);
   return (preferred.length ? preferred : columns.map((c) => c.name)).slice(0, 8);
+}
+
+function initialColumnRoles(columns: ColumnProfile[]): Record<string, string> {
+  return Object.fromEntries(columns.map((column) => [column.name, column.role]));
+}
+
+function changedColumnRoles(columns: ColumnProfile[], roles: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(
+    columns
+      .filter((column) => roles[column.name] && roles[column.name] !== column.role)
+      .map((column) => [column.name, roles[column.name]]),
+  );
 }
 
 function cellText(value: unknown): string {
@@ -61,6 +85,7 @@ export function DatasetUploadWizard({
   const [name, setName] = useState('');
   const [localDescription, setLocalDescription] = useState(description ?? '');
   const [focusColumns, setFocusColumns] = useState<string[]>([]);
+  const [columnRoles, setColumnRoles] = useState<Record<string, string>>({});
   const [previewing, setPreviewing] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [previewDirty, setPreviewDirty] = useState(false);
@@ -73,6 +98,7 @@ export function DatasetUploadWizard({
       setPreview(result);
       setOptions(result.ingest_options);
       setFocusColumns(likelyFocusColumns(result.column_profile));
+      setColumnRoles(initialColumnRoles(result.column_profile));
       setPreviewDirty(false);
       if (!name) setName(result.filename.replace(/\.[^.]+$/, ''));
     } catch (e) {
@@ -89,6 +115,7 @@ export function DatasetUploadWizard({
     setPreview(null);
     setOptions({});
     setFocusColumns([]);
+    setColumnRoles({});
     setName(nextFile.name.replace(/\.[^.]+$/, ''));
     await loadPreview(nextFile, {});
   }, [loadPreview]);
@@ -131,12 +158,14 @@ export function DatasetUploadWizard({
         name || undefined,
         preview.ingest_options,
         focusColumns,
+        changedColumnRoles(preview.column_profile, columnRoles),
       );
       toast.success('Dataset uploaded');
       setFile(null);
       setPreview(null);
       setOptions({});
       setFocusColumns([]);
+      setColumnRoles({});
       setName('');
       if (!onDescriptionChange) setLocalDescription('');
       await onUploaded(dataset);
@@ -172,7 +201,7 @@ export function DatasetUploadWizard({
             </CardTitle>
             <p className="mt-1 text-sm text-muted-foreground">Confirm the sheet, table header, data range, and columns that matter for recommendations.</p>
           </div>
-          <Button variant="ghost" size="sm" onClick={() => { setFile(null); setPreview(null); }} disabled={uploading || previewing}>
+          <Button variant="ghost" size="sm" onClick={() => { setFile(null); setPreview(null); setColumnRoles({}); }} disabled={uploading || previewing}>
             <X className="mr-1 h-4 w-4" /> Cancel
           </Button>
         </div>
@@ -195,7 +224,7 @@ export function DatasetUploadWizard({
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
               <Label htmlFor="dataset-purpose">Dataset purpose</Label>
-              <p className="mt-1 text-xs text-muted-foreground">Used by Ask AI to choose chart types, mappings, labels, and rationale.</p>
+              <p className="mt-1 text-xs text-muted-foreground">Used by AI recommendations to choose chart types, mappings, labels, and rationale.</p>
             </div>
             {descriptionAction}
           </div>
@@ -315,7 +344,7 @@ export function DatasetUploadWizard({
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <h3 className="flex items-center gap-2 text-sm font-medium"><Columns3 className="h-4 w-4 text-primary" /> Focus columns</h3>
-                  <p className="text-xs text-muted-foreground">Recommendations will prioritize these columns. You can still use any column later.</p>
+                  <p className="text-xs text-muted-foreground">Choose the columns to prioritize and correct any detected role before upload.</p>
                 </div>
                 <div className="flex gap-2">
                   <Button type="button" variant="outline" size="sm" onClick={() => setFocusColumns(likelyFocusColumns(parsedColumns))}>Suggested</Button>
@@ -327,25 +356,35 @@ export function DatasetUploadWizard({
                 {parsedColumns.map((column) => {
                   const checked = focusSet.has(column.name);
                   return (
-                    <label key={column.name} className="flex cursor-pointer items-center gap-2 rounded-lg border bg-background p-2 text-sm">
-                      <Checkbox
-                        checked={checked}
-                        onCheckedChange={(next) => {
-                          setFocusColumns((current) => next
-                            ? [...current, column.name].filter((value, index, arr) => arr.indexOf(value) === index)
-                            : current.filter((value) => value !== column.name));
-                        }}
-                      />
-                      <span className="min-w-0 flex-1 truncate">{column.name}</span>
-                      <Badge variant="secondary" className="shrink-0">{column.role}</Badge>
-                    </label>
+                    <div key={column.name} className="space-y-2 rounded-lg border bg-background p-2 text-sm">
+                      <label className="flex cursor-pointer items-center gap-2">
+                        <Checkbox
+                          checked={checked}
+                          onCheckedChange={(next) => {
+                            setFocusColumns((current) => next
+                              ? [...current, column.name].filter((value, index, arr) => arr.indexOf(value) === index)
+                              : current.filter((value) => value !== column.name));
+                          }}
+                        />
+                        <span className="min-w-0 flex-1 truncate font-medium">{column.name}</span>
+                        <Badge variant="secondary" className="shrink-0">{column.dtype}</Badge>
+                      </label>
+                      <select
+                        aria-label={`Column role ${column.name}`}
+                        className="h-9 w-full rounded-md border bg-background px-2 text-xs"
+                        value={columnRoles[column.name] ?? column.role}
+                        onChange={(e) => setColumnRoles((current) => ({ ...current, [column.name]: e.target.value }))}
+                      >
+                        {COLUMN_ROLE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                      </select>
+                    </div>
                   );
                 })}
               </div>
             </section>
 
             <div className="flex flex-col gap-2 border-t pt-4 sm:flex-row sm:justify-end">
-              <Button variant="outline" onClick={() => { setFile(null); setPreview(null); }} disabled={uploading}>Choose another file</Button>
+              <Button variant="outline" onClick={() => { setFile(null); setPreview(null); setColumnRoles({}); }} disabled={uploading}>Choose another file</Button>
               <Button onClick={submit} disabled={!preview || uploading || previewing || previewDirty}>
                 {uploading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <UploadCloud className="mr-2 h-4 w-4" />}
                 Upload and continue

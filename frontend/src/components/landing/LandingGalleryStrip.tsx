@@ -109,7 +109,7 @@ export function LandingGalleryStrip() {
         {figures.length > 0 && (
           <div className="mt-8">
             <div className="mb-4 flex items-center justify-between gap-3">
-              <h3 className="text-sm font-semibold text-slate-900">Recent gallery figures</h3>
+              <h3 className="text-sm font-semibold text-slate-900">Classic gallery examples</h3>
               <Link href="/gallery">
                 <Button variant="ghost" size="sm">View all</Button>
               </Link>

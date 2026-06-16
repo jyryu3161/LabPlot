@@ -5,8 +5,8 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { ArrowLeft, ImageIcon, Loader2, Wand2 } from 'lucide-react';
-import { createFigure, getPlotTypes, getPublicGalleryTemplate, listProjects } from '@/lib/api';
+import { ArrowLeft, Download, ImageIcon, Loader2, TableProperties, Wand2 } from 'lucide-react';
+import { createFigure, getPlotTypes, getPublicGalleryTemplate, listProjects, publicGalleryExampleDataUrl } from '@/lib/api';
 import type { ColumnProfile, DatasetDetail, PlotTypeDef } from '@/lib/types';
 import { AppHeader } from '@/components/layout/AppHeader';
 import { DatasetUploadWizard } from '@/components/datasets/DatasetUploadWizard';
@@ -39,6 +39,107 @@ function suggestedMapping(def: PlotTypeDef | undefined, columns: ColumnProfile[]
     }
   }
   return next;
+}
+
+function formatMappingValue(value: unknown): string {
+  if (Array.isArray(value)) return value.join(', ');
+  if (typeof value === 'string') return value;
+  return '';
+}
+
+function ExampleDataGuide({ template, plotDef }: {
+  template: NonNullable<Awaited<ReturnType<typeof getPublicGalleryTemplate>>>;
+  plotDef?: PlotTypeDef;
+}) {
+  const example = template.example_data;
+  const preview = example?.preview ?? [];
+  const previewColumns = preview.length ? Object.keys(preview[0]).slice(0, 8) : [];
+  const hiddenColumnCount = preview.length ? Math.max(0, Object.keys(preview[0]).length - previewColumns.length) : 0;
+  const fields = plotDef ? [...plotDef.required.map((field) => ({ ...field, required: true })), ...plotDef.optional.map((field) => ({ ...field, required: false }))] : [];
+
+  if (!example) return null;
+
+  return (
+    <div className="mt-6 space-y-4 border-t pt-5">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h3 className="flex items-center gap-2 text-sm font-semibold">
+            <TableProperties className="h-4 w-4" />
+            Example data for this template
+          </h3>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Use this as a column layout reference before uploading your own file.
+          </p>
+        </div>
+        <a href={publicGalleryExampleDataUrl(template.id)} download={example.filename}>
+          <Button type="button" variant="outline" size="sm">
+            <Download className="mr-2 h-4 w-4" />
+            Download CSV
+          </Button>
+        </a>
+      </div>
+
+      {fields.length > 0 && (
+        <div className="rounded-lg border bg-muted/25 p-3">
+          <div className="mb-2 text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">Template mapping</div>
+          <div className="grid gap-2 sm:grid-cols-2">
+            {fields.map((field) => {
+              const value = formatMappingValue(template.source_mapping[field.key]);
+              if (!field.required && !value) return null;
+              return (
+                <div key={field.key} className="rounded-md bg-background px-3 py-2 text-sm">
+                  <div className="font-medium">
+                    {field.label}{field.required && <span className="text-red-500"> *</span>}
+                  </div>
+                  <div className="mt-0.5 text-muted-foreground">
+                    {value || 'Optional'} <span className="text-xs">({field.roles.join(' / ')})</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      <div className="rounded-lg border bg-white">
+        <div className="flex flex-col gap-2 border-b px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
+          <div className="text-sm font-medium">{example.filename}</div>
+          <div className="text-xs text-muted-foreground">{example.n_rows} rows x {example.n_cols} columns</div>
+        </div>
+        <div className="flex flex-wrap gap-2 border-b px-3 py-2">
+          {example.columns.slice(0, 12).map((column) => (
+            <span key={column.name} className="rounded-md border bg-muted/30 px-2 py-1 text-xs">
+              <span className="font-medium">{column.name}</span>
+              <span className="ml-1 text-muted-foreground">{column.role}</span>
+            </span>
+          ))}
+          {example.columns.length > 12 && <span className="px-2 py-1 text-xs text-muted-foreground">+{example.columns.length - 12} more</span>}
+        </div>
+        <div className="overflow-x-auto">
+          <table className="min-w-full text-left text-xs">
+            <thead className="bg-muted/30 text-muted-foreground">
+              <tr>
+                {previewColumns.map((column) => <th key={column} className="whitespace-nowrap px-3 py-2 font-medium">{column}</th>)}
+                {hiddenColumnCount > 0 && <th className="whitespace-nowrap px-3 py-2 font-medium">+{hiddenColumnCount} more</th>}
+              </tr>
+            </thead>
+            <tbody>
+              {preview.slice(0, 5).map((row, idx) => (
+                <tr key={idx} className="border-t">
+                  {previewColumns.map((column) => (
+                    <td key={column} className="max-w-[180px] truncate px-3 py-2 text-muted-foreground">
+                      {row[column] == null ? '' : String(row[column])}
+                    </td>
+                  ))}
+                  {hiddenColumnCount > 0 && <td className="px-3 py-2 text-muted-foreground">...</td>}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 export default function GalleryTemplatePage({ params }: { params: Promise<{ id: string }> }) {
@@ -158,6 +259,7 @@ export default function GalleryTemplatePage({ params }: { params: Promise<{ id: 
                       helper="Preview the sheet and select focus columns before mapping."
                       onUploaded={handleUploaded}
                     />
+                    <ExampleDataGuide template={template} plotDef={plotDef} />
                   </CardContent>
                 </Card>
               )}

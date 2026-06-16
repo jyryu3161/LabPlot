@@ -788,6 +788,403 @@ draw_plot <- function() {{
 """
 
 
+def _sankey(m, o):
+    src, tgt = m["source"], m["target"]
+    value = m.get("value") or m.get("weight")
+    value_expr = f"suppressWarnings(as.numeric({_col(value)}))" if value else "1"
+    return f"""
+.flows <- data.frame(
+  source = as.character({_col(src)}),
+  target = as.character({_col(tgt)}),
+  value = {value_expr},
+  stringsAsFactors = FALSE
+)
+.flows$value[is.na(.flows$value) | .flows$value <= 0] <- 1
+.flows <- .flows %>%
+  dplyr::group_by(source, target) %>%
+  dplyr::summarise(value = sum(value, na.rm = TRUE), .groups = "drop")
+.sources <- .flows %>% dplyr::group_by(source) %>% dplyr::summarise(total = sum(value), .groups = "drop") %>% dplyr::arrange(desc(total), source)
+.targets <- .flows %>% dplyr::group_by(target) %>% dplyr::summarise(total = sum(value), .groups = "drop") %>% dplyr::arrange(desc(total), target)
+.sources$y <- seq_len(nrow(.sources))
+.targets$y <- seq_len(nrow(.targets))
+.flows <- .flows %>%
+  dplyr::left_join(.sources[, c("source", "y")], by = "source") %>%
+  dplyr::rename(y_source = y) %>%
+  dplyr::left_join(.targets[, c("target", "y")], by = "target") %>%
+  dplyr::rename(y_target = y)
+.nodes <- rbind(
+  data.frame(x = 0, y = .sources$y, label = .sources$source, total = .sources$total, side = "source"),
+  data.frame(x = 1, y = .targets$y, label = .targets$target, total = .targets$total, side = "target")
+)
+p <- ggplot() +
+  geom_curve(data = .flows, aes(x = 0.08, xend = 0.92, y = y_source, yend = y_target,
+                                linewidth = value, colour = source),
+             curvature = 0.45, alpha = 0.42, lineend = "round") +
+  geom_point(data = .nodes, aes(x = x, y = y, size = total), shape = 21, fill = "white",
+             colour = "grey20", stroke = 0.35) +
+  geom_text(data = .nodes, aes(x = x, y = y, label = label, hjust = ifelse(x < 0.5, 1.05, -0.05)),
+            size = 2.8) +
+  scale_colour_manual(values = labplot_palette(), guide = "none") +
+  scale_linewidth(range = c(0.5, 5.2), guide = "none") +
+  scale_size(range = c(2.5, 6), guide = "none") +
+  scale_x_continuous(limits = c(-0.35, 1.35), breaks = c(0, 1), labels = c({rq(src)}, {rq(tgt)})) +
+  {_labs(o, "", "Flow")} +
+  theme(axis.text.y = element_blank(), axis.ticks.y = element_blank(), panel.grid = element_blank())
+"""
+
+
+def _upset(m, o):
+    cols = m["sets"]
+    if not isinstance(cols, list) or len(cols) < 2:
+        raise ValueError("UpSet plot requires at least two set columns")
+    col_vec = "c(" + ", ".join(rq(c) for c in cols) + ")"
+    return f"""
+suppressMessages(library(gridExtra))
+.cols <- {col_vec}
+.raw <- df[, .cols, drop = FALSE]
+.bin <- as.data.frame(lapply(.raw, function(x) {{
+  if (is.logical(x)) return(ifelse(is.na(x), FALSE, x))
+  if (is.numeric(x)) return(ifelse(is.na(x), FALSE, x != 0))
+  tolower(trimws(as.character(x))) %in% c("1", "true", "yes", "y", "present", "detected", "positive")
+}}), check.names = FALSE)
+.combo <- apply(.bin, 1, paste0, collapse = "")
+.none <- paste(rep("0", length(.cols)), collapse = "")
+.tab <- as.data.frame(table(.combo), stringsAsFactors = FALSE)
+colnames(.tab) <- c("combo", "count")
+.tab <- .tab[.tab$combo != .none & .tab$count > 0, , drop = FALSE]
+if (nrow(.tab) == 0) stop("No non-empty intersections found")
+.tab <- .tab[order(-.tab$count, .tab$combo), , drop = FALSE]
+.tab <- .tab[seq_len(min(20, nrow(.tab))), , drop = FALSE]
+.tab$ix <- seq_len(nrow(.tab))
+.long <- do.call(rbind, lapply(seq_len(nrow(.tab)), function(i) {{
+  data.frame(ix = .tab$ix[i], combo = .tab$combo[i], set = .cols,
+             present = substring(.tab$combo[i], seq_along(.cols), seq_along(.cols)) == "1",
+             count = .tab$count[i], stringsAsFactors = FALSE)
+}}))
+.long$set <- factor(.long$set, levels = rev(.cols))
+.tab$ix_f <- factor(.tab$ix, levels = .tab$ix)
+.long$ix_f <- factor(.long$ix, levels = .tab$ix)
+.segments <- .long %>% dplyr::filter(present) %>% dplyr::group_by(ix_f) %>%
+  dplyr::summarise(ymin = min(as.numeric(set)), ymax = max(as.numeric(set)), .groups = "drop")
+.bar <- ggplot(.tab, aes(x = ix_f, y = count)) +
+  geom_col(fill = "#3C5488", width = 0.72) +
+  labs(x = NULL, y = "Intersection size") +
+  theme_minimal(base_size = 10) +
+  theme(axis.text.x = element_blank(), panel.grid.major.x = element_blank())
+.mat <- ggplot(.long, aes(x = ix_f, y = set)) +
+  geom_segment(data = .segments, aes(x = ix_f, xend = ix_f, y = ymin, yend = ymax),
+               inherit.aes = FALSE, linewidth = 0.35, colour = "grey35") +
+  geom_point(aes(fill = present), shape = 21, size = 2.6, colour = "grey35", stroke = 0.25) +
+  scale_fill_manual(values = c(`TRUE` = "#E64B35", `FALSE` = "white"), guide = "none") +
+  labs(x = "Intersection", y = NULL) +
+  theme_minimal(base_size = 10) +
+  theme(panel.grid = element_blank(), axis.text.x = element_blank(), axis.ticks.x = element_blank())
+draw_plot <- function() {{
+  gridExtra::grid.arrange(.bar, .mat, ncol = 1, heights = c(2, 1.25))
+}}
+"""
+
+
+def _surface_3d(m, o):
+    x, y, z = m["x"], m["y"], m["z"]
+    return f"""
+.plot <- data.frame(.x = suppressWarnings(as.numeric({_col(x)})),
+                    .y = suppressWarnings(as.numeric({_col(y)})),
+                    .z = suppressWarnings(as.numeric({_col(z)})))
+.plot <- .plot[stats::complete.cases(.plot), ]
+.xv <- sort(unique(.plot$.x)); .yv <- sort(unique(.plot$.y))
+if (length(.xv) < 2 || length(.yv) < 2) stop("3D surface needs a grid with at least two x and y values")
+.zmat <- matrix(NA_real_, nrow = length(.xv), ncol = length(.yv), dimnames = list(.xv, .yv))
+for (i in seq_len(nrow(.plot))) .zmat[as.character(.plot$.x[i]), as.character(.plot$.y[i])] <- .plot$.z[i]
+if (anyNA(.zmat)) stop("3D surface requires a complete x/y grid")
+draw_plot <- function() {{
+  .pal <- viridisLite::viridis(100)
+  .zfacet <- (.zmat[-1, -1] + .zmat[-1, -ncol(.zmat)] + .zmat[-nrow(.zmat), -1] + .zmat[-nrow(.zmat), -ncol(.zmat)]) / 4
+  .idx <- cut(.zfacet, breaks = 100, labels = FALSE, include.lowest = TRUE)
+  graphics::persp(.xv, .yv, .zmat, theta = 38, phi = 28, expand = 0.62,
+                  col = .pal[.idx], border = "grey45", lwd = 0.25,
+                  xlab = {rq(o.get("x_label") or x)}, ylab = {rq(o.get("y_label") or y)}, zlab = {rq(z)},
+                  ticktype = "detailed", shade = 0.35)
+}}
+"""
+
+
+def _wireframe_3d(m, o):
+    x, y, z = m["x"], m["y"], m["z"]
+    return f"""
+suppressMessages(library(lattice))
+.plot <- data.frame(.x = suppressWarnings(as.numeric({_col(x)})),
+                    .y = suppressWarnings(as.numeric({_col(y)})),
+                    .z = suppressWarnings(as.numeric({_col(z)})))
+.plot <- .plot[stats::complete.cases(.plot), ]
+if (length(unique(.plot$.x)) < 2 || length(unique(.plot$.y)) < 2) stop("3D wireframe needs at least two x and y values")
+.wf <- lattice::wireframe(.z ~ .x * .y, data = .plot, drape = FALSE,
+                          screen = list(z = 35, x = -60), lwd = 0.45,
+                          xlab = {rq(o.get("x_label") or x)}, ylab = {rq(o.get("y_label") or y)}, zlab = {rq(z)},
+                          scales = list(arrows = FALSE, cex = 0.65))
+draw_plot <- function() print(.wf)
+"""
+
+
+def _scatter_3d(m, o):
+    x, y, z = m["x"], m["y"], m["z"]
+    group = m.get("group")
+    grp_line = f'.plot$.grp <- factor({_col(group)})' if group else '.plot$.grp <- factor("All")'
+    return f"""
+suppressMessages(library(lattice))
+.plot <- data.frame(.x = suppressWarnings(as.numeric({_col(x)})),
+                    .y = suppressWarnings(as.numeric({_col(y)})),
+                    .z = suppressWarnings(as.numeric({_col(z)})))
+{grp_line}
+.plot <- .plot[stats::complete.cases(.plot[, c(".x", ".y", ".z")]), ]
+.cloud <- lattice::cloud(.z ~ .x * .y, data = .plot, groups = .grp,
+                         auto.key = list(columns = 2, cex = 0.75),
+                         pch = 16, cex = 0.7, alpha = 0.75,
+                         col = rep(viridisLite::viridis(max(3, length(levels(.plot$.grp)))), length.out = length(levels(.plot$.grp))),
+                         screen = list(z = 40, x = -65),
+                         xlab = {rq(o.get("x_label") or x)}, ylab = {rq(o.get("y_label") or y)}, zlab = {rq(z)},
+                         scales = list(arrows = FALSE, cex = 0.65))
+draw_plot <- function() print(.cloud)
+"""
+
+
+def _contour_3d(m, o):
+    x, y, z = m["x"], m["y"], m["z"]
+    return f"""
+.plot <- data.frame(.x = suppressWarnings(as.numeric({_col(x)})),
+                    .y = suppressWarnings(as.numeric({_col(y)})),
+                    .z = suppressWarnings(as.numeric({_col(z)})))
+.plot <- .plot[stats::complete.cases(.plot), ]
+.xv <- sort(unique(.plot$.x)); .yv <- sort(unique(.plot$.y))
+if (length(.xv) < 2 || length(.yv) < 2) stop("3D contour needs a complete x/y grid")
+.zmat <- matrix(NA_real_, nrow = length(.xv), ncol = length(.yv), dimnames = list(.xv, .yv))
+for (i in seq_len(nrow(.plot))) .zmat[as.character(.plot$.x[i]), as.character(.plot$.y[i])] <- .plot$.z[i]
+if (anyNA(.zmat)) stop("3D contour requires a complete x/y grid")
+draw_plot <- function() {{
+  .pal <- viridisLite::viridis(100)
+  .zlim <- range(.zmat, finite = TRUE)
+  .zfacet <- (.zmat[-1, -1] + .zmat[-1, -ncol(.zmat)] + .zmat[-nrow(.zmat), -1] + .zmat[-nrow(.zmat), -ncol(.zmat)]) / 4
+  .idx <- cut(.zfacet, breaks = 100, labels = FALSE, include.lowest = TRUE)
+  .pm <- graphics::persp(.xv, .yv, .zmat, theta = 38, phi = 28, expand = 0.62,
+                         col = .pal[.idx], border = "grey60", lwd = 0.2,
+                         xlab = {rq(o.get("x_label") or x)}, ylab = {rq(o.get("y_label") or y)}, zlab = {rq(z)},
+                         zlim = .zlim, ticktype = "detailed", shade = 0.25)
+  .levels <- pretty(.zlim, n = 8)
+  .contours <- grDevices::contourLines(.xv, .yv, .zmat, levels = .levels)
+  for (.cl in .contours) {{
+    .xy <- grDevices::trans3d(.cl$x, .cl$y, .zlim[1], .pm)
+    graphics::lines(.xy, col = "#1F1F1F", lwd = 0.9)
+  }}
+}}
+"""
+
+
+def _calibration_curve(m, o):
+    predicted, observed = m["predicted"], m["observed"]
+    group = m.get("group")
+    if group:
+        aes = f"aes(x = .pred, y = .obs, colour = factor({_col(group)}))"
+        scale = "  scale_colour_manual(values = labplot_palette()) +\n"
+        guide = f" + guides(colour = guide_legend(title = {rq(group)}))"
+    else:
+        aes = "aes(x = .pred, y = .obs)"
+        scale = ""
+        guide = ""
+    return f"""
+.plot <- df %>% dplyr::mutate(.pred = suppressWarnings(as.numeric({_col(predicted)})),
+                              .obs = suppressWarnings(as.numeric({_col(observed)})))
+.plot <- .plot[stats::complete.cases(.plot[, c(".pred", ".obs")]), ]
+p <- ggplot(.plot, {aes}) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", colour = "grey45", linewidth = 0.3) +
+  geom_point(size = 2.0, alpha = 0.8) +
+  geom_smooth(method = "lm", se = TRUE, linewidth = 0.35, alpha = 0.18) +
+{scale}  {_labs(o, o.get("x_label") or "Predicted", o.get("y_label") or "Observed")}{guide}
+"""
+
+
+def _chord_diagram(m, o):
+    src, tgt = m["source"], m["target"]
+    value = m.get("value") or m.get("weight")
+    value_expr = f"suppressWarnings(as.numeric({_col(value)}))" if value else "1"
+    return f"""
+suppressMessages({{library(circlize); library(grid)}})
+.matdf <- data.frame(from = as.character({_col(src)}), to = as.character({_col(tgt)}),
+                     value = {value_expr}, stringsAsFactors = FALSE)
+.matdf$value[is.na(.matdf$value) | .matdf$value <= 0] <- 1
+.matdf <- .matdf %>% dplyr::group_by(from, to) %>% dplyr::summarise(value = sum(value), .groups = "drop")
+draw_plot <- function() {{
+  circlize::circos.clear()
+  grid::grid.newpage()
+  .nodes <- unique(c(.matdf$from, .matdf$to))
+  .cols <- setNames(rep(viridisLite::viridis(max(3, length(.nodes))), length.out = length(.nodes)), .nodes)
+  circlize::chordDiagram(.matdf, directional = 1, direction.type = c("arrows", "diffHeight"),
+                         grid.col = .cols, transparency = 0.35,
+                         annotationTrack = c("grid"), preAllocateTracks = 1)
+  circlize::circos.trackPlotRegion(track.index = 1, panel.fun = function(x, y) {{
+    .sector <- circlize::get.cell.meta.data("sector.index")
+    .xlim <- circlize::get.cell.meta.data("xlim")
+    .ylim <- circlize::get.cell.meta.data("ylim")
+    circlize::circos.text(mean(.xlim), .ylim[1] + 0.1, .sector, facing = "clockwise",
+                          niceFacing = TRUE, adj = c(0, 0.5), cex = 0.62)
+  }}, bg.border = NA)
+  circlize::circos.clear()
+}}
+"""
+
+
+def _parallel_coordinates(m, o):
+    cols = m["columns"]
+    if not isinstance(cols, list) or len(cols) < 2:
+        raise ValueError("Parallel coordinates requires at least two numeric columns")
+    col_vec = "c(" + ", ".join(rq(c) for c in cols) + ")"
+    group = m.get("group")
+    id_col = m.get("id")
+    grp_expr = f"factor({_col(group)})" if group else 'factor("All")'
+    id_expr = f"as.character({_col(id_col)})" if id_col else "as.character(seq_len(nrow(df)))"
+    guide = f" + guides(colour = guide_legend(title = {rq(group)}))" if group else ' + guides(colour = "none")'
+    return f"""
+.cols <- {col_vec}
+.wide <- df[, .cols, drop = FALSE]
+.wide <- as.data.frame(lapply(.wide, function(x) suppressWarnings(as.numeric(x))), check.names = FALSE)
+.scaled <- as.data.frame(lapply(.wide, function(x) {{
+  .rng <- range(x, finite = TRUE)
+  if (!all(is.finite(.rng)) || diff(.rng) == 0) return(rep(0.5, length(x)))
+  (x - .rng[1]) / diff(.rng)
+}}), check.names = FALSE)
+.scaled$.id <- {id_expr}
+.scaled$.grp <- {grp_expr}
+.long <- tidyr::pivot_longer(.scaled, dplyr::all_of(.cols), names_to = "metric", values_to = "value")
+.long$metric <- factor(.long$metric, levels = .cols)
+p <- ggplot(.long, aes(x = metric, y = value, group = .id, colour = .grp)) +
+  geom_line(alpha = 0.35, linewidth = 0.25) +
+  geom_point(alpha = 0.55, size = 0.8) +
+  scale_colour_manual(values = labplot_palette()) +
+  {_labs(o, "", "Scaled value")}{guide} +
+  theme(axis.text.x = element_text(angle = 35, hjust = 1), panel.grid.minor = element_blank())
+"""
+
+
+def _confusion_matrix(m, o):
+    actual, predicted = m["actual"], m["predicted"]
+    return f"""
+.tab <- as.data.frame(table(Actual = as.character({_col(actual)}), Predicted = as.character({_col(predicted)})),
+                      stringsAsFactors = FALSE)
+.tab$Actual <- factor(.tab$Actual, levels = rev(sort(unique(.tab$Actual))))
+.tab$Predicted <- factor(.tab$Predicted, levels = sort(unique(.tab$Predicted)))
+p <- ggplot(.tab, aes(x = Predicted, y = Actual, fill = Freq)) +
+  geom_tile(colour = "white", linewidth = 0.35) +
+  geom_text(aes(label = Freq), size = 3.0, colour = "grey10") +
+  scale_fill_gradient(low = "grey95", high = "#3C5488", name = "Count") +
+  coord_equal() +
+  {_labs(o, "Predicted", "Actual")} +
+  theme(panel.grid = element_blank())
+"""
+
+
+def _tri_surface(m, o):
+    x, y, z = m["x"], m["y"], m["z"]
+    return f"""
+.plot <- data.frame(.x = suppressWarnings(as.numeric({_col(x)})),
+                    .y = suppressWarnings(as.numeric({_col(y)})),
+                    .z = suppressWarnings(as.numeric({_col(z)})))
+.plot <- .plot[stats::complete.cases(.plot), ]
+.xv <- sort(unique(.plot$.x)); .yv <- sort(unique(.plot$.y))
+if (length(.xv) < 2 || length(.yv) < 2) stop("Tri-surface needs a complete x/y grid")
+.zmat <- matrix(NA_real_, nrow = length(.xv), ncol = length(.yv), dimnames = list(.xv, .yv))
+for (i in seq_len(nrow(.plot))) .zmat[as.character(.plot$.x[i]), as.character(.plot$.y[i])] <- .plot$.z[i]
+if (anyNA(.zmat)) stop("Tri-surface requires a complete x/y grid")
+.triangles <- list()
+for (i in seq_len(length(.xv) - 1)) for (j in seq_len(length(.yv) - 1)) {{
+  .triangles[[length(.triangles) + 1]] <- data.frame(x = c(.xv[i], .xv[i + 1], .xv[i + 1]),
+                                                     y = c(.yv[j], .yv[j], .yv[j + 1]),
+                                                     z = c(.zmat[i, j], .zmat[i + 1, j], .zmat[i + 1, j + 1]))
+  .triangles[[length(.triangles) + 1]] <- data.frame(x = c(.xv[i], .xv[i + 1], .xv[i]),
+                                                     y = c(.yv[j], .yv[j + 1], .yv[j + 1]),
+                                                     z = c(.zmat[i, j], .zmat[i + 1, j + 1], .zmat[i, j + 1]))
+}}
+draw_plot <- function() {{
+  .pal <- viridisLite::viridis(100)
+  .zlim <- range(.zmat, finite = TRUE)
+  .pm <- graphics::persp(.xv, .yv, .zmat, theta = 38, phi = 28, expand = 0.62,
+                         col = NA, border = NA,
+                         xlab = {rq(o.get("x_label") or x)}, ylab = {rq(o.get("y_label") or y)}, zlab = {rq(z)},
+                         zlim = .zlim, ticktype = "detailed")
+  .ord <- order(vapply(.triangles, function(d) mean(d$z), numeric(1)))
+  for (.idx in .ord) {{
+    .tri <- .triangles[[.idx]]
+    .xy <- grDevices::trans3d(.tri$x, .tri$y, .tri$z, .pm)
+    .ci <- cut(mean(.tri$z), breaks = seq(.zlim[1], .zlim[2], length.out = 101), labels = FALSE, include.lowest = TRUE)
+    graphics::polygon(.xy, col = .pal[.ci], border = "grey55", lwd = 0.25)
+  }}
+}}
+"""
+
+
+def _roc_pr_curve(m, o):
+    score, label = m["score"], m["label"]
+    group = m.get("group")
+    grp_expr = f"as.character({_col(group)})" if group else 'rep("Model", nrow(df))'
+    return f"""
+.scores <- suppressWarnings(as.numeric({_col(score)}))
+.lab_raw <- tolower(trimws(as.character({_col(label)})))
+.label <- .lab_raw %in% c("1", "1.0", "true", "yes", "positive", "case", "disease", "event")
+.grp <- {grp_expr}
+.base <- data.frame(score = .scores, label = .label, group = .grp)
+.base <- .base[stats::complete.cases(.base[, c("score", "group")]), ]
+curve_one <- function(d) {{
+  d <- d[order(-d$score), , drop = FALSE]
+  P <- max(sum(d$label), 1); N <- max(sum(!d$label), 1)
+  tp <- c(0, cumsum(d$label)); fp <- c(0, cumsum(!d$label))
+  roc <- data.frame(metric = "ROC", x = fp / N, y = tp / P)
+  recall <- tp / P
+  precision <- ifelse(tp + fp == 0, 1, tp / pmax(tp + fp, 1))
+  pr <- data.frame(metric = "PR", x = recall, y = precision)
+  rbind(roc, pr)
+}}
+.curves <- do.call(rbind, lapply(split(.base, .base$group), function(d) {{
+  out <- curve_one(d)
+  out$group <- unique(d$group)[1]
+  out
+}}))
+.curves$metric <- factor(.curves$metric, levels = c("ROC", "PR"))
+p <- ggplot(.curves, aes(x = x, y = y, colour = factor(group))) +
+  geom_abline(data = data.frame(metric = "ROC"), aes(intercept = 0, slope = 1),
+              inherit.aes = FALSE, linetype = "dashed", colour = "grey70", linewidth = 0.25) +
+  geom_line(linewidth = 0.45) +
+  facet_wrap(~metric, nrow = 1) +
+  coord_equal(xlim = c(0, 1), ylim = c(0, 1)) +
+  scale_colour_manual(values = labplot_palette()) +
+  {_labs(o, "False positive rate / recall", "True positive rate / precision")} +
+  guides(colour = guide_legend(title = {rq(group) if group else 'NULL'}))
+"""
+
+
+def _ma_plot(m, o):
+    mean_col, lfc = m["mean"], m["log2fc"]
+    gene = m.get("gene_label")
+    fc_t = _num(o.get("fc_threshold", 1.0), 1.0)
+    label_top = int(o.get("label_top", 0) or 0)
+    label_block = ""
+    if gene and label_top > 0:
+        label_block = f"""
+.top <- .plot[order(-abs(.plot$.lfc)), , drop = FALSE]
+.top <- .top[seq_len(min({label_top}, nrow(.top))), , drop = FALSE]
+p <- p + geom_text(data = .top, aes(label = {_data(gene)}), size = 2.6, vjust = -0.55, show.legend = FALSE)
+"""
+    return f"""
+.plot <- df %>% dplyr::mutate(.mean = suppressWarnings(as.numeric({_col(mean_col)})),
+                              .lfc = suppressWarnings(as.numeric({_col(lfc)})))
+.plot <- .plot[stats::complete.cases(.plot[, c(".mean", ".lfc")]), ]
+.plot$.sig <- ifelse(abs(.plot$.lfc) >= {fc_t}, ifelse(.plot$.lfc > 0, "Up", "Down"), "Stable")
+.plot$.sig <- factor(.plot$.sig, levels = c("Down", "Stable", "Up"))
+p <- ggplot(.plot, aes(x = .mean, y = .lfc, colour = .sig)) +
+  geom_point(alpha = 0.72, size = 1.45) +
+  geom_hline(yintercept = c(-{fc_t}, {fc_t}), linetype = "dashed", linewidth = 0.25, colour = "grey45") +
+  scale_colour_manual(values = c(Down = "#4DBBD5", Stable = "grey70", Up = "#E64B35"), name = NULL) +
+  {_labs(o, o.get("x_label") or "Mean expression", o.get("y_label") or "log2 fold change")}
+{label_block}"""
+
+
 _BUILDERS.update({
     "enrichment_dot": _enrichment_dot,
     "enrichment_bar": _enrichment_bar,
@@ -795,11 +1192,24 @@ _BUILDERS.update({
     "chemical_space": _chemical_space,
     "network": _network,
     "annotated_heatmap": _annotated_heatmap,
+    "sankey": _sankey,
+    "upset": _upset,
+    "surface_3d": _surface_3d,
+    "scatter_3d": _scatter_3d,
+    "contour_3d": _contour_3d,
+    "calibration_curve": _calibration_curve,
+    "chord_diagram": _chord_diagram,
+    "parallel_coordinates": _parallel_coordinates,
+    "confusion_matrix": _confusion_matrix,
+    "tri_surface": _tri_surface,
+    "wireframe_3d": _wireframe_3d,
+    "roc_pr_curve": _roc_pr_curve,
+    "ma_plot": _ma_plot,
 })
 
 # plot types that render via base-graphics devices (not ggsave) / skip ggplot theme
-DEVICE_TYPES = {"annotated_heatmap"}
-NO_THEME_TYPES = {"network", "annotated_heatmap"}
+DEVICE_TYPES = {"annotated_heatmap", "upset", "surface_3d", "scatter_3d", "contour_3d", "chord_diagram", "tri_surface", "wireframe_3d"}
+NO_THEME_TYPES = {"network", "annotated_heatmap", "upset", "surface_3d", "scatter_3d", "contour_3d", "chord_diagram", "tri_surface", "wireframe_3d"}
 
 PLOT_TYPES += [
     {"type": "annotated_heatmap", "label": "Annotated heatmap (cohort)",
@@ -836,6 +1246,68 @@ PLOT_TYPES += [
      "optional": [{"key": "color", "label": "Class / activity", "roles": ["group", "category", "status"]},
                   {"key": "size", "label": "Size by", "roles": ["numeric"]}],
      "options": []},
+    {"type": "sankey", "label": "Sankey diagram",
+     "required": [{"key": "source", "label": "Source", "roles": ["category", "group", "text", "gene"]},
+                  {"key": "target", "label": "Target", "roles": ["category", "group", "text", "gene"]}],
+     "optional": [{"key": "value", "label": "Flow value", "roles": ["numeric"]},
+                  {"key": "weight", "label": "Flow weight", "roles": ["numeric"]}],
+     "options": []},
+    {"type": "upset", "label": "UpSet plot",
+     "required": [{"key": "sets", "label": "Set membership columns", "roles": ["numeric", "status", "category"], "multi": True}],
+     "optional": [],
+     "options": []},
+    {"type": "surface_3d", "label": "3D surface / plane plot",
+     "required": [{"key": "x", "label": "X coordinate", "roles": ["numeric"]},
+                  {"key": "y", "label": "Y coordinate", "roles": ["numeric"]},
+                  {"key": "z", "label": "Response / Z", "roles": ["numeric"]}],
+     "optional": [], "options": []},
+    {"type": "scatter_3d", "label": "3D scatter plot",
+     "required": [{"key": "x", "label": "X coordinate", "roles": ["numeric"]},
+                  {"key": "y", "label": "Y coordinate", "roles": ["numeric"]},
+                  {"key": "z", "label": "Z coordinate", "roles": ["numeric"]}],
+     "optional": [{"key": "group", "label": "Group", "roles": ["group", "category", "status"]}], "options": []},
+    {"type": "contour_3d", "label": "3D contour projection",
+     "required": [{"key": "x", "label": "X coordinate", "roles": ["numeric"]},
+                  {"key": "y", "label": "Y coordinate", "roles": ["numeric"]},
+                  {"key": "z", "label": "Response / Z", "roles": ["numeric"]}],
+     "optional": [], "options": []},
+    {"type": "calibration_curve", "label": "Calibration curve",
+     "required": [{"key": "predicted", "label": "Predicted / expected", "roles": ["numeric"]},
+                  {"key": "observed", "label": "Observed / measured", "roles": ["numeric"]}],
+     "optional": [{"key": "group", "label": "Group", "roles": ["group", "category", "status"]}], "options": []},
+    {"type": "chord_diagram", "label": "Chord diagram",
+     "required": [{"key": "source", "label": "Source", "roles": ["category", "group", "text", "gene"]},
+                  {"key": "target", "label": "Target", "roles": ["category", "group", "text", "gene"]}],
+     "optional": [{"key": "value", "label": "Value", "roles": ["numeric"]},
+                  {"key": "weight", "label": "Weight", "roles": ["numeric"]}], "options": []},
+    {"type": "parallel_coordinates", "label": "Parallel coordinates plot",
+     "required": [{"key": "columns", "label": "Numeric dimensions", "roles": ["numeric"], "multi": True}],
+     "optional": [{"key": "group", "label": "Group", "roles": ["group", "category", "status"]},
+                  {"key": "id", "label": "Sample ID", "roles": ["text", "category", "gene"]}], "options": []},
+    {"type": "confusion_matrix", "label": "Confusion matrix heatmap",
+     "required": [{"key": "actual", "label": "Actual class", "roles": ["category", "status", "group", "text"]},
+                  {"key": "predicted", "label": "Predicted class", "roles": ["category", "status", "group", "text"]}],
+     "optional": [], "options": []},
+    {"type": "tri_surface", "label": "Tri-surface plot",
+     "required": [{"key": "x", "label": "X coordinate", "roles": ["numeric"]},
+                  {"key": "y", "label": "Y coordinate", "roles": ["numeric"]},
+                  {"key": "z", "label": "Response / Z", "roles": ["numeric"]}],
+     "optional": [], "options": []},
+    {"type": "wireframe_3d", "label": "3D wireframe plot",
+     "required": [{"key": "x", "label": "X coordinate", "roles": ["numeric"]},
+                  {"key": "y", "label": "Y coordinate", "roles": ["numeric"]},
+                  {"key": "z", "label": "Response / Z", "roles": ["numeric"]}],
+     "optional": [], "options": []},
+    {"type": "roc_pr_curve", "label": "ROC / PR curve",
+     "required": [{"key": "score", "label": "Prediction score", "roles": ["numeric"]},
+                  {"key": "label", "label": "Binary label", "roles": ["status", "category", "group", "numeric"]}],
+     "optional": [{"key": "group", "label": "Model / group", "roles": ["group", "category", "status"]}], "options": []},
+    {"type": "ma_plot", "label": "MA plot",
+     "required": [{"key": "mean", "label": "Mean expression", "roles": ["numeric"]},
+                  {"key": "log2fc", "label": "log2 fold-change", "roles": ["log2fc", "numeric"]}],
+     "optional": [{"key": "gene_label", "label": "Gene label", "roles": ["gene", "text", "category"]}],
+     "options": [{"key": "fc_threshold", "label": "log2FC threshold", "type": "number", "default": 1.0},
+                 {"key": "label_top", "label": "Label top N", "type": "number", "default": 0}]},
 ]
 
 PLOT_DOMAINS = {
@@ -848,12 +1320,18 @@ PLOT_DOMAINS = {
     "enrichment_dot": "enrichment", "enrichment_bar": "enrichment",
     "manhattan": "genomics",
     "chemical_space": "cheminformatics",
+    "sankey": "advanced", "upset": "advanced", "surface_3d": "advanced",
+    "scatter_3d": "advanced", "contour_3d": "advanced", "calibration_curve": "advanced",
+    "chord_diagram": "advanced", "parallel_coordinates": "advanced",
+    "confusion_matrix": "advanced", "tri_surface": "advanced", "wireframe_3d": "advanced",
+    "roc_pr_curve": "advanced", "ma_plot": "advanced",
 }
 DOMAIN_LABELS = {
     "basic": "Basic statistics", "omics": "Omics", "clinical": "Clinical / cohort",
     "systems_biology": "Systems biology", "enrichment": "Functional enrichment",
     "genomics": "Genomics", "cheminformatics": "Cheminformatics",
     "engineering": "Engineering / physical science",
+    "advanced": "Advanced & specialized",
 }
 for _p in PLOT_TYPES:
     _p["domain"] = PLOT_DOMAINS.get(_p["type"], "basic")

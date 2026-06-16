@@ -7,7 +7,6 @@ from typing import Any
 import pandas as pd
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
-from sqlalchemy.orm.attributes import set_committed_value
 
 from app.common import storage
 from app.config import settings
@@ -26,6 +25,10 @@ _FORMATS = {
 }
 
 _EXCEL_FORMATS = {"xlsx", "xls"}
+
+_ALLOWED_COLUMN_ROLES = {"numeric", "category", "group", "time", "status", "gene", "log2fc", "pvalue", "text"}
+_NUMERIC_OVERRIDE_ROLES = {"numeric", "time", "log2fc", "pvalue"}
+_CATEGORICAL_OVERRIDE_ROLES = {"category", "group", "gene"}
 
 
 def _detect_format(filename: str) -> str:
@@ -268,6 +271,41 @@ def _sample_values_numeric_like(values: Any) -> bool:
     return True
 
 
+def _apply_column_role_overrides(
+    column_profile: list[dict[str, Any]],
+    column_roles: dict[str, str] | None,
+) -> list[dict[str, Any]]:
+    if not column_roles:
+        return [dict(column) for column in column_profile]
+    clean_roles = {
+        str(name): str(role)
+        for name, role in column_roles.items()
+        if str(role) in _ALLOWED_COLUMN_ROLES
+    }
+    if not clean_roles:
+        return [dict(column) for column in column_profile]
+
+    updated: list[dict[str, Any]] = []
+    for column in column_profile:
+        item = dict(column)
+        role = clean_roles.get(str(item.get("name")))
+        if not role:
+            updated.append(item)
+            continue
+        item["role"] = role
+        numeric_like = item.get("dtype") == "numeric" or _sample_values_numeric_like(item.get("sample_values"))
+        if role in _NUMERIC_OVERRIDE_ROLES and numeric_like:
+            item["dtype"] = "numeric"
+        elif role == "status":
+            item["dtype"] = "numeric" if numeric_like else "categorical"
+        elif role in _CATEGORICAL_OVERRIDE_ROLES:
+            item["dtype"] = "categorical"
+        elif role == "text":
+            item["dtype"] = "text"
+        updated.append(item)
+    return updated
+
+
 def normalized_column_profile(column_profile: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
     for column in column_profile or []:
@@ -279,10 +317,32 @@ def normalized_column_profile(column_profile: list[dict[str, Any]] | None) -> li
     return normalized
 
 
-def _apply_normalized_column_profile(dataset: Dataset) -> Dataset:
+def _statistics_match_profile(statistics: dict[str, Any] | None, column_profile: list[dict[str, Any]]) -> bool:
+    numeric_names = {c.get("name") for c in column_profile if c.get("dtype") == "numeric"}
+    if not numeric_names:
+        return True
+    descriptive = (statistics or {}).get("descriptive") or []
+    described_names = {item.get("column") for item in descriptive if isinstance(item, dict)}
+    return numeric_names.issubset(described_names)
+
+
+def _recompute_statistics(dataset: Dataset, column_profile: list[dict[str, Any]]) -> dict[str, Any]:
+    try:
+        return compute_statistics(load_dataframe(dataset), column_profile)
+    except Exception:
+        return {"descriptive": [], "comparisons": []}
+
+
+def _apply_normalized_column_profile(db: Session, dataset: Dataset) -> Dataset:
     normalized = normalized_column_profile(dataset.column_profile)
-    if normalized != (dataset.column_profile or []):
-        set_committed_value(dataset, "column_profile", normalized)
+    profile_changed = normalized != (dataset.column_profile or [])
+    stats_stale = not _statistics_match_profile(dataset.statistics, normalized)
+    if profile_changed:
+        dataset.column_profile = normalized
+    if profile_changed or stats_stale:
+        dataset.statistics = _recompute_statistics(dataset, normalized)
+        db.commit()
+        db.refresh(dataset)
     return dataset
 
 
@@ -299,16 +359,18 @@ def create_dataset(db: Session, owner_id: uuid.UUID, filename: str, content: byt
                    name: str | None = None, project_id: uuid.UUID | None = None,
                    description: str | None = None,
                    ingest_options: dict[str, Any] | None = None,
-                   focus_columns: list[str] | None = None) -> Dataset:
+                   focus_columns: list[str] | None = None,
+                   column_roles: dict[str, str] | None = None) -> Dataset:
     max_bytes = settings.max_upload_size_mb * 1024 * 1024
     if len(content) > max_bytes:
         raise FileTooLargeError(settings.max_upload_size_mb)
 
     fmt, df, normalized_options, _, _ = _parse_content(filename, content, ingest_options)
     prof = profile_dataframe(df)
-    focus = _clean_focus_columns(focus_columns, prof["columns"])
+    column_profile = _apply_column_role_overrides(prof["columns"], column_roles)
+    focus = _clean_focus_columns(focus_columns, column_profile)
     try:
-        stats = compute_statistics(df, prof["columns"])
+        stats = compute_statistics(df, column_profile)
     except Exception:
         stats = {"descriptive": [], "comparisons": []}
 
@@ -336,7 +398,7 @@ def create_dataset(db: Session, owner_id: uuid.UUID, filename: str, content: byt
         format=fmt,
         n_rows=prof["n_rows"],
         n_cols=prof["n_cols"],
-        column_profile=prof["columns"],
+        column_profile=column_profile,
         preview=prof["preview"],
         statistics=stats,
         ingest_options=normalized_options,
@@ -370,7 +432,7 @@ def get_dataset(db: Session, dataset_id: uuid.UUID, owner_id: uuid.UUID) -> Data
     )
     if not ds or (ds.owner_id != owner_id and not project_service.can_access_project(db, ds.project_id, owner_id)):
         raise NotFoundError("Dataset", str(dataset_id))
-    return _apply_normalized_column_profile(ds)
+    return _apply_normalized_column_profile(db, ds)
 
 
 def update_dataset(db: Session, dataset_id: uuid.UUID, owner_id: uuid.UUID, data: dict) -> Dataset:
@@ -390,6 +452,12 @@ def update_dataset(db: Session, dataset_id: uuid.UUID, owner_id: uuid.UUID, data
         if next_focus != (ds.focus_columns or []):
             clear_recommendations = True
         ds.focus_columns = next_focus
+    if "column_roles" in data and data["column_roles"] is not None:
+        next_profile = _apply_column_role_overrides(normalized_column_profile(ds.column_profile), data["column_roles"])
+        if next_profile != (ds.column_profile or []):
+            clear_recommendations = True
+            ds.column_profile = next_profile
+            ds.statistics = _recompute_statistics(ds, next_profile)
     if clear_recommendations:
         from app.figures.models import Recommendation
 

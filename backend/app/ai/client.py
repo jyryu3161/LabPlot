@@ -20,7 +20,9 @@ from app.database import SessionLocal
 _PLOT_TYPES = [
     "box", "violin", "scatter", "bar", "line", "histogram", "density", "correlation_heatmap",
     "heatmap", "error_bar", "ribbon", "contour", "radar", "volcano", "pca", "kaplan_meier", "annotated_heatmap", "network", "enrichment_dot",
-    "enrichment_bar", "manhattan", "chemical_space",
+    "enrichment_bar", "manhattan", "chemical_space", "sankey", "upset", "surface_3d", "scatter_3d", "contour_3d",
+    "calibration_curve", "chord_diagram", "parallel_coordinates", "confusion_matrix", "tri_surface",
+    "wireframe_3d", "roc_pr_curve", "ma_plot",
 ]
 _MAPPING_PATCH_SCHEMA = {
     "type": "object",
@@ -32,9 +34,12 @@ _MAPPING_PATCH_SCHEMA = {
         "ymin": {"type": "string"}, "ymax": {"type": "string"}, "error": {"type": "string"},
         "log2fc": {"type": "string"}, "pvalue": {"type": "string"}, "gene_label": {"type": "string"},
         "row_label": {"type": "string"}, "columns": {"type": "array", "items": {"type": "string"}},
+        "sets": {"type": "array", "items": {"type": "string"}},
         "annotations": {"type": "array", "items": {"type": "string"}},
         "source": {"type": "string"}, "target": {"type": "string"}, "weight": {"type": "string"},
         "term": {"type": "string"}, "chrom": {"type": "string"}, "pos": {"type": "string"},
+        "observed": {"type": "string"}, "predicted": {"type": "string"}, "actual": {"type": "string"},
+        "score": {"type": "string"}, "label": {"type": "string"}, "mean": {"type": "string"}, "id": {"type": "string"},
     },
 }
 _OPTIONS_PATCH_SCHEMA = {
@@ -73,9 +78,12 @@ def _mapping_schema() -> dict:
             "ymin": {"type": "string"}, "ymax": {"type": "string"}, "error": {"type": "string"},
             "log2fc": {"type": "string"}, "pvalue": {"type": "string"}, "gene_label": {"type": "string"},
             "row_label": {"type": "string"}, "columns": {"type": "array", "items": {"type": "string"}},
+            "sets": {"type": "array", "items": {"type": "string"}},
             "annotations": {"type": "array", "items": {"type": "string"}},
             "source": {"type": "string"}, "target": {"type": "string"}, "weight": {"type": "string"},
             "term": {"type": "string"}, "chrom": {"type": "string"}, "pos": {"type": "string"},
+            "observed": {"type": "string"}, "predicted": {"type": "string"}, "actual": {"type": "string"},
+            "score": {"type": "string"}, "label": {"type": "string"}, "mean": {"type": "string"}, "id": {"type": "string"},
         },
     }
 
@@ -103,8 +111,16 @@ def _rates_per_million(provider: str, model: str) -> tuple[float, float] | None:
         if "haiku" in name:
             return 1.00, 5.00
         if "opus" in name:
-            return 15.00, 75.00
+            return 5.00, 25.00
     if provider == "gemini":
+        if "3.5" in name and "flash" in name:
+            return 1.50, 9.00
+        if "3.1" in name and "flash-lite" in name:
+            return 0.25, 1.50
+        if "3.1" in name and "pro" in name:
+            return 2.00, 12.00
+        if "3.1" in name and "flash" in name:
+            return 0.50, 3.00
         if "flash-lite" in name or "flash_lite" in name:
             return 0.10, 0.40
         if "flash" in name:

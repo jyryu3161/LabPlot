@@ -15,6 +15,7 @@ frontend/.next/
 npm-debug.log*
 
 # data / generated figures
+ref_data/
 backend/static/uploads/
 backend/static/figures/
 backend/private/

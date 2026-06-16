@@ -31,6 +31,30 @@ const ROLE_COLORS: Record<string, string> = {
 
 type ColumnShape = { name: string; role: string; dtype: string; sample_values?: unknown[] };
 
+const COLUMN_ROLE_OPTIONS = [
+  { value: 'numeric', label: 'Numeric' },
+  { value: 'category', label: 'Category' },
+  { value: 'group', label: 'Group' },
+  { value: 'time', label: 'Time' },
+  { value: 'status', label: 'Status' },
+  { value: 'gene', label: 'Gene' },
+  { value: 'log2fc', label: 'log2FC' },
+  { value: 'pvalue', label: 'p-value' },
+  { value: 'text', label: 'Text' },
+];
+
+function columnRoleSnapshot(columns: ColumnShape[]): Record<string, string> {
+  return Object.fromEntries(columns.map((column) => [column.name, column.role]));
+}
+
+function changedColumnRoles(columns: ColumnShape[], roles: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(
+    columns
+      .filter((column) => roles[column.name] && roles[column.name] !== column.role)
+      .map((column) => [column.name, roles[column.name]]),
+  );
+}
+
 function isNumericLikeColumn(column: ColumnShape) {
   if (column.dtype === 'numeric' || ['numeric', 'log2fc', 'pvalue'].includes(column.role)) return true;
   const values = (column.sample_values ?? []).filter((value) => value !== null && value !== undefined && String(value).trim() !== '');
@@ -129,7 +153,6 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
   const [recommendPrompt, setRecommendPrompt] = useState('');
   const [referenceFile, setReferenceFile] = useState<File | null>(null);
   const [visualizeStep, setVisualizeStep] = useState<'columns' | 'recommend' | 'build'>('columns');
-  const autoEnteredDatasetIdRef = useRef<string | null>(null);
   const autoRecommendationKeyRef = useRef<string | null>(null);
   const aiRecommend = useMutation<ChartSuggestion[], Error, { silent?: boolean; refresh?: boolean; prompt?: string } | undefined>({
     mutationFn: (variables) => {
@@ -155,6 +178,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
 
   const [dsDesc, setDsDesc] = useState<string | null>(null);
   const [focusColumnsDraft, setFocusColumnsDraft] = useState<string[] | null>(null);
+  const [columnRolesDraft, setColumnRolesDraft] = useState<Record<string, string> | null>(null);
   const dsDescValue = dsDesc ?? ds?.description ?? '';
   const saveDsDesc = useMutation({
     mutationFn: () => updateDataset(id, { description: dsDescValue }),
@@ -172,6 +196,10 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
   const plotTypes = useMemo(() => plotTypesData?.plot_types ?? [], [plotTypesData?.plot_types]);
   const styles = useMemo(() => stylesData?.styles ?? [], [stylesData?.styles]);
   const columns = useMemo(() => (ds?.column_profile ?? []) as ColumnShape[], [ds?.column_profile]);
+  const savedColumnRoles = useMemo(() => columnRoleSnapshot(columns), [columns]);
+  const columnRoles = columnRolesDraft ?? savedColumnRoles;
+  const columnRoleOverrides = useMemo(() => changedColumnRoles(columns, columnRoles), [columns, columnRoles]);
+  const columnRolesChanged = Object.keys(columnRoleOverrides).length > 0;
   const canEditDataset = ds?.project_id ? project?.role === 'owner' || project?.role === 'editor' : true;
   const savedFocusColumns = useMemo(() => ds?.focus_columns ?? [], [ds?.focus_columns]);
   const focusColumns = focusColumnsDraft ?? savedFocusColumns;
@@ -221,16 +249,6 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
   }, [recommendationScopeKey]);
 
   useEffect(() => {
-    if (!ds || autoEnteredDatasetIdRef.current === id) return;
-    autoEnteredDatasetIdRef.current = id;
-    if (savedFocusColumns.length > 0) {
-      window.setTimeout(() => {
-        setVisualizeStep((current) => (current === 'columns' ? 'recommend' : current));
-      }, 0);
-    }
-  }, [ds, id, savedFocusColumns.length]);
-
-  useEffect(() => {
     if (!ds || visualizeStep !== 'recommend' || !hasSelectedColumns || !savedAiSugFetched) return;
     if (savedAiSug?.cached || aiSug || aiRecommend.isPending || autoRecommendationKeyRef.current === recommendationScopeKey) return;
     autoRecommendationKeyRef.current = recommendationScopeKey;
@@ -263,6 +281,19 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
       qc.invalidateQueries({ queryKey: ['ai-recommendations', id] });
       setVisualizeStep('recommend');
       router.replace(`/datasets/${id}`);
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Save failed'),
+  });
+
+  const saveColumnRoles = useMutation({
+    mutationFn: () => updateDataset(id, { column_roles: columnRoleOverrides }),
+    onSuccess: (next) => {
+      toast.success('Column roles saved');
+      setAiSug(null);
+      setColumnRolesDraft(null);
+      qc.setQueryData(['dataset', id], next);
+      qc.invalidateQueries({ queryKey: ['ai-recommendations', id] });
+      qc.invalidateQueries({ queryKey: ['dataset', id] });
     },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Save failed'),
   });
@@ -354,6 +385,10 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
         ? [...base, name].filter((value, index, arr) => arr.indexOf(value) === index)
         : base.filter((value) => value !== name);
     });
+  }
+
+  function updateColumnRole(name: string, role: string) {
+    setColumnRolesDraft((current) => ({ ...(current ?? savedColumnRoles), [name]: role }));
   }
 
   function handleReferencePaste(e: React.ClipboardEvent<HTMLDivElement>) {
@@ -453,16 +488,52 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
               </CardContent>
             </Card>
             <Card>
-              <CardHeader><CardTitle className="text-base">Column profile</CardTitle></CardHeader>
-              <CardContent>
+              <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div>
+                  <CardTitle className="text-base">Column profile</CardTitle>
+                  <p className="mt-1 text-sm text-muted-foreground">Detected automatically. Change roles when numeric codes are categories or text values should be treated as numeric.</p>
+                </div>
+                {canEditDataset ? (
+                  <div className="flex shrink-0 gap-2">
+                    {columnRolesChanged && (
+                      <Button type="button" size="sm" variant="outline" onClick={() => setColumnRolesDraft(null)} disabled={saveColumnRoles.isPending}>
+                        Reset
+                      </Button>
+                    )}
+                    <Button type="button" size="sm" onClick={() => saveColumnRoles.mutate()} disabled={!columnRolesChanged || saveColumnRoles.isPending}>
+                      {saveColumnRoles.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                      Save roles
+                    </Button>
+                  </div>
+                ) : null}
+              </CardHeader>
+              <CardContent className="space-y-3">
                 <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
                   {columns.map((c) => (
-                    <div key={c.name} className="flex items-center justify-between rounded border p-2 text-sm">
-                      <span className="font-medium">{c.name}</span>
-                      <span className={`rounded px-2 py-0.5 text-xs ${ROLE_COLORS[c.role] ?? 'bg-gray-100 text-gray-600'}`}>{c.role}</span>
+                    <div key={c.name} className="space-y-2 rounded border p-2 text-sm">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="min-w-0 truncate font-medium">{c.name}</span>
+                        <Badge variant="secondary" className="shrink-0">{c.dtype}</Badge>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <select
+                          aria-label={`Column role ${c.name}`}
+                          className="h-9 w-full rounded-md border bg-background px-2 text-xs disabled:opacity-70"
+                          value={columnRoles[c.name] ?? c.role}
+                          onChange={(e) => updateColumnRole(c.name, e.target.value)}
+                          disabled={!canEditDataset || saveColumnRoles.isPending}
+                        >
+                          {COLUMN_ROLE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                        </select>
+                        {(columnRoles[c.name] ?? c.role) !== c.role && <Badge variant="outline">changed</Badge>}
+                      </div>
+                      <span className={`inline-flex rounded px-2 py-0.5 text-xs ${ROLE_COLORS[columnRoles[c.name] ?? c.role] ?? 'bg-gray-100 text-gray-600'}`}>
+                        {columnRoles[c.name] ?? c.role}
+                      </span>
                     </div>
                   ))}
                 </div>
+                {!canEditDataset && <p className="text-xs text-muted-foreground">Viewer access is read-only.</p>}
               </CardContent>
             </Card>
             <Card>
@@ -487,7 +558,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
             <div className="grid gap-2 md:grid-cols-3">
               {[
                 { key: 'columns', label: '1. Choose columns', done: hasSelectedColumns },
-                { key: 'recommend', label: '2. Ask AI', done: Boolean(activeAiSuggestions?.length) },
+                { key: 'recommend', label: '2. AI recommendations', done: Boolean(activeAiSuggestions?.length) },
                 { key: 'build', label: '3. Build figure', done: Boolean(plotType) },
               ].map((step) => {
                 const active = visualizeStep === step.key;
@@ -514,7 +585,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                     <Columns3 className="h-4 w-4 text-primary" /> 1. Choose columns
                   </CardTitle>
                   <p className="mt-1 text-sm text-muted-foreground">
-                    Select the columns you want this figure workflow to use before asking AI for chart ideas.
+                    Select the columns you want this figure workflow to use before generating chart recommendations.
                   </p>
                 </CardHeader>
                 <CardContent className="space-y-4">
@@ -563,12 +634,12 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
               <Card>
                 <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                   <div>
-                    <CardTitle className="text-base flex items-center gap-2"><Sparkles className="h-4 w-4 text-primary" /> 2. Ask AI for charts</CardTitle>
+                    <CardTitle className="text-base flex items-center gap-2"><Sparkles className="h-4 w-4 text-primary" /> 2. AI recommendations</CardTitle>
                     <p className="mt-1 text-sm text-muted-foreground">Recommendations are saved after the first run and reused when you reopen this dataset.</p>
                   </div>
                   <Button size="lg" className="h-11 px-5 text-sm font-semibold shadow-sm" onClick={() => aiRecommend.mutate({ silent: false, refresh: true, prompt: recommendPrompt })} disabled={aiRecommend.isPending || !hasSelectedColumns}>
                     {aiRecommend.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Wand2 className="mr-2 h-4 w-4" />}
-                    {activeAiSuggestions ? 'Refresh AI recommendations' : 'Ask AI for charts'}
+                    {activeAiSuggestions ? 'Refresh AI recommendations' : 'Generate AI recommendations'}
                   </Button>
                 </CardHeader>
                 <CardContent className="space-y-4">
@@ -679,7 +750,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                   ) : (
                     <div className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
                       <ImageIcon className="mx-auto mb-2 h-5 w-5" />
-                      Click Ask AI for charts after selecting columns.
+                      Generate AI recommendations after selecting columns.
                     </div>
                   )}
                   <div className="flex flex-col gap-2 sm:flex-row sm:justify-between">

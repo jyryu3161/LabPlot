@@ -8,6 +8,27 @@ test('public gallery exposes template actions', async ({ page }) => {
   await page.goto('/gallery');
   await expect(page.getByRole('heading', { name: 'Gallery' })).toBeVisible();
   await expect(page.getByRole('link', { name: 'Use as template' }).first()).toBeVisible();
+
+  const gallery = await page.evaluate(async () => {
+    const res = await fetch('/api/public/gallery?limit=1');
+    if (!res.ok) throw new Error(await res.text());
+    return res.json() as Promise<{ figures: { id: string }[] }>;
+  });
+  expect(gallery.figures.length).toBeGreaterThan(0);
+
+  const template = await page.evaluate(async (id) => {
+    const res = await fetch(`/api/public/gallery/${id}/template`);
+    if (!res.ok) throw new Error(await res.text());
+    return res.json() as Promise<{ example_data?: { download_url: string; preview: unknown[] } }>;
+  }, gallery.figures[0].id);
+  expect(template.example_data?.preview.length).toBeGreaterThan(0);
+
+  const downloadStatus = await page.evaluate(async (url) => {
+    const res = await fetch(url);
+    return { status: res.status, contentType: res.headers.get('content-type') };
+  }, template.example_data!.download_url);
+  expect(downloadStatus.status).toBe(200);
+  expect(downloadStatus.contentType).toContain('text/csv');
 });
 
 test('authenticated user can open the gallery template flow', async ({ page }) => {
@@ -26,6 +47,7 @@ test('authenticated user can open the gallery template flow', async ({ page }) =
   await expect(page.getByText('Selected template')).toBeVisible();
   await expect(page.getByText('1. Choose project')).toBeVisible();
   await expect(page.getByText('2. Upload data for this template')).toBeVisible();
+  await expect(page.getByText('Example data for this template')).toBeVisible();
 });
 
 test('authenticated user can create a figure from a gallery template with a complex Excel file', async ({ page }, testInfo) => {

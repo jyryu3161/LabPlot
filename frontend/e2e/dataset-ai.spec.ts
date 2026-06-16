@@ -122,19 +122,26 @@ test('dataset upload saves purpose, auto-loads AI once, and refreshes with promp
 
     await expect(page.getByText('Dataset purpose')).toBeVisible();
     await page.getByLabel('Dataset purpose').fill('Dose response experiment comparing treatment groups.');
+    await expect(page.getByLabel('Column role dose')).toHaveValue('numeric');
+    await expect(page.getByLabel('Column role group')).toHaveValue('group');
     await page.getByRole('button', { name: 'Upload and continue' }).click();
 
     await expect(page).toHaveURL(/\/datasets\/[0-9a-f-]+\?setup=1/i);
     datasetId = page.url().match(/\/datasets\/([0-9a-f-]+)/i)?.[1] ?? null;
     expect(datasetId).toBeTruthy();
 
-    await expect(page.getByRole('button', { name: /Refresh AI recommendations|Ask AI for charts/ })).toBeVisible();
+    await expect(page.getByRole('button', { name: '1. Choose columns' })).toBeVisible();
+    await page.waitForTimeout(500);
+    expect(recommendBodies).toHaveLength(0);
+    await page.getByRole('button', { name: 'Continue to AI recommendations' }).click();
+
+    await expect(page.getByRole('button', { name: /Refresh AI recommendations|Generate AI recommendations/ })).toBeVisible();
     await expect.poll(() => recommendBodies.length, { timeout: 10_000 }).toBe(1);
     expect(recommendCalled).toBeTruthy();
     expect(recommendBodies[0]).toBeNull();
     await expect(page.getByText('AI dose response scatter')).toBeVisible();
     await page.getByLabel('Optional chart direction').fill('Prefer a scatter plot for dose and response.');
-    await page.getByRole('button', { name: /Refresh AI recommendations|Ask AI for charts/ }).click();
+    await page.getByRole('button', { name: /Refresh AI recommendations|Generate AI recommendations/ }).click();
     await expect.poll(() => recommendBodies.length, { timeout: 10_000 }).toBe(2);
     expect(recommendBodies[1]).toEqual({
       refresh: true,
@@ -154,9 +161,10 @@ test('dataset upload saves purpose, auto-loads AI once, and refreshes with promp
     const saved = await page.evaluate(async ({ datasetId, headers }) => {
       const res = await fetch(`/api/datasets/${datasetId}`, { headers });
       if (!res.ok) throw new Error(await res.text());
-      return res.json() as Promise<{ description?: string }>;
+      return res.json() as Promise<{ description?: string; statistics?: { descriptive?: Array<{ column: string }> } }>;
     }, { datasetId, headers });
     expect(saved.description).toContain('Dose response experiment');
+    expect(saved.statistics?.descriptive?.map((item) => item.column)).toEqual(expect.arrayContaining(['dose', 'response']));
   } finally {
     if (sourceFigureId) {
       await page.evaluate(async ({ sourceFigureId, headers }) => {

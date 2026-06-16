@@ -112,7 +112,7 @@ export default function AdminPage() {
   return (
     <div className="min-h-screen bg-muted/20">
       <AppHeader />
-      <main className="mx-auto max-w-6xl px-4 py-8">
+      <main className="mx-auto max-w-7xl px-4 py-8">
         <h1 className="mb-6 flex items-center gap-2 text-2xl font-bold"><Shield className="h-6 w-6 text-primary" /> Admin</h1>
 
         <Card className="mb-6">
@@ -193,12 +193,12 @@ export default function AdminPage() {
             {isLoading ? <div className="flex justify-center py-8"><Loader2 className="h-6 w-6 animate-spin" /></div>
               : error ? <p className="py-4 text-sm text-red-600">Admin access required.</p>
               : (
-                <table className="w-full text-sm">
+                <table className="w-full min-w-[1360px] text-sm">
                   <thead><tr className="border-b text-left text-muted-foreground">
                     <th className="px-2 py-2">Email</th><th className="px-2 py-2">Name</th><th className="px-2 py-2">Organizations</th><th className="px-2 py-2">Role</th>
-                    <th className="px-2 py-2">Approval</th><th className="px-2 py-2">Active</th><th className="px-2 py-2">Data</th><th className="px-2 py-2">Figs</th>
-                    <th className="px-2 py-2">AI Calls</th><th className="px-2 py-2">Renders</th><th className="px-2 py-2">Storage</th>
-                    <th className="px-2 py-2">Tokens</th><th className="px-2 py-2">Est. Cost</th><th className="px-2 py-2">Actions</th>
+                    <th className="whitespace-nowrap px-2 py-2">Approval</th><th className="px-2 py-2">Active</th><th className="px-2 py-2">Data</th><th className="px-2 py-2">Figs</th>
+                    <th className="w-36 min-w-36 whitespace-nowrap px-2 py-2">AI Calls</th><th className="w-32 min-w-32 whitespace-nowrap px-2 py-2">Renders</th><th className="w-36 min-w-36 whitespace-nowrap px-2 py-2">Storage</th>
+                    <th className="w-36 min-w-36 whitespace-nowrap px-2 py-2">Tokens (mo)</th><th className="w-40 min-w-40 whitespace-nowrap px-2 py-2">Est. Cost (mo)</th><th className="px-2 py-2">Actions</th>
                   </tr></thead>
                   <tbody>
                     {users?.map((u) => (
@@ -238,25 +238,33 @@ export default function AdminPage() {
                         </td>
                         <td className="px-2 py-2 text-muted-foreground">{u.dataset_count}</td>
                         <td className="px-2 py-2 text-muted-foreground">{u.figure_count}</td>
-                        <td className="px-2 py-2 text-muted-foreground">
+                        <td className="w-36 min-w-36 whitespace-nowrap px-2 py-2 text-muted-foreground">
                           <button className="text-left hover:underline" onClick={() => updateLimit(u.id, 'ai_monthly_limit', u.ai_monthly_limit)}>
                             {numberFmt.format(u.ai_monthly_used)} / {u.ai_monthly_limit || 'unlimited'}
                           </button>
                         </td>
-                        <td className="px-2 py-2 text-muted-foreground">
+                        <td className="w-32 min-w-32 whitespace-nowrap px-2 py-2 text-muted-foreground">
                           <button className="text-left hover:underline" onClick={() => updateLimit(u.id, 'render_monthly_limit', u.render_monthly_limit)}>
                             {numberFmt.format(u.render_monthly_used)} / {u.render_monthly_limit || 'unlimited'}
                           </button>
                         </td>
-                        <td className="px-2 py-2 text-muted-foreground">
+                        <td className="w-36 min-w-36 whitespace-nowrap px-2 py-2 text-muted-foreground">
                           <button className="text-left hover:underline" onClick={() => updateLimit(u.id, 'storage_limit_mb', u.storage_limit_mb)}>
                             {u.storage_used_mb} / {u.storage_limit_mb || 'unlimited'} MB
                           </button>
                         </td>
-                        <td className="px-2 py-2 text-muted-foreground" title={`${numberFmt.format(u.ai_input_tokens)} input / ${numberFmt.format(u.ai_output_tokens)} output`}>
-                          {numberFmt.format(u.ai_total_tokens)}
+                        <td
+                          className="w-36 min-w-36 whitespace-nowrap px-2 py-2 text-muted-foreground"
+                          title={`This month: ${numberFmt.format(u.ai_monthly_input_tokens)} input / ${numberFmt.format(u.ai_monthly_output_tokens)} billable output. All-time: ${numberFmt.format(u.ai_total_tokens)} total.`}
+                        >
+                          {numberFmt.format(u.ai_monthly_total_tokens)}
                         </td>
-                        <td className="px-2 py-2 text-muted-foreground">{usdFmt.format(u.ai_estimated_cost_usd)}</td>
+                        <td
+                          className="w-40 min-w-40 whitespace-nowrap px-2 py-2 text-muted-foreground"
+                          title={`All-time estimated cost: ${usdFmt.format(u.ai_estimated_cost_usd)}`}
+                        >
+                          {usdFmt.format(u.ai_monthly_estimated_cost_usd)}
+                        </td>
                         <td className="px-2 py-2">
                           <div className="flex gap-1">
                             <Button variant="ghost" size="sm" title="Reset password"

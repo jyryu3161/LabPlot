@@ -5,6 +5,7 @@ frontend/node_modules
 frontend/npm-debug.log*
 backend/**/__pycache__
 backend/**/*.pyc
+ref_data
 backend/static/uploads
 backend/static/figures
 scripts/*.log

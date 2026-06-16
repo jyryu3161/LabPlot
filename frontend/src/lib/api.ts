@@ -210,7 +210,10 @@ export async function listDatasets(projectId?: string): Promise<DatasetListItem[
 }
 export async function getDataset(id: string): Promise<DatasetDetail> { return fetcher(`/api/datasets/${id}`); }
 export async function deleteDataset(id: string): Promise<void> { return fetcher(`/api/datasets/${id}`, { method: 'DELETE' }); }
-export async function updateDataset(id: string, data: { name?: string; description?: string; focus_columns?: string[] }): Promise<DatasetDetail> {
+export async function updateDataset(
+  id: string,
+  data: { name?: string; description?: string; focus_columns?: string[]; column_roles?: Record<string, string> },
+): Promise<DatasetDetail> {
   return fetcher(`/api/datasets/${id}`, { method: 'PATCH', body: JSON.stringify(data) });
 }
 export async function getPublicGallery(limit = 12): Promise<{ figures: import('./types').PublicFigure[] }> {
@@ -218,6 +221,9 @@ export async function getPublicGallery(limit = 12): Promise<{ figures: import('.
 }
 export async function getPublicGalleryTemplate(figureId: string): Promise<GalleryTemplate> {
   return fetcher(`/api/public/gallery/${figureId}/template`);
+}
+export function publicGalleryExampleDataUrl(figureId: string): string {
+  return `${BASE_URL}/api/public/gallery/${figureId}/example-data`;
 }
 export async function enhancePrompt(draft: string, kind: string, context?: string): Promise<{ enhanced: string }> {
   return fetcher('/api/ai/enhance-prompt', { method: 'POST', body: JSON.stringify({ draft, kind, context }) });
@@ -248,6 +254,7 @@ export async function uploadDataset(
   name?: string,
   ingestOptions?: DatasetIngestOptions,
   focusColumns?: string[],
+  columnRoles?: Record<string, string>,
 ): Promise<DatasetDetail> {
   const fd = new FormData();
   fd.append('file', file);
@@ -256,6 +263,7 @@ export async function uploadDataset(
   if (name) fd.append('name', name);
   appendDatasetIngestOptions(fd, ingestOptions);
   if (focusColumns?.length) fd.append('focus_columns', JSON.stringify(focusColumns));
+  if (columnRoles && Object.keys(columnRoles).length) fd.append('column_roles', JSON.stringify(columnRoles));
   const headers: Record<string, string> = {};
   const token = getAccessToken();
   if (token) headers['Authorization'] = `Bearer ${token}`;

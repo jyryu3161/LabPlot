@@ -236,6 +236,14 @@ export interface GalleryTemplate {
   domain_label?: string;
   source_mapping: Record<string, unknown>;
   options: Record<string, unknown>;
+  example_data?: {
+    download_url: string;
+    filename: string;
+    n_rows: number;
+    n_cols: number;
+    columns: ColumnProfile[];
+    preview: Record<string, unknown>[];
+  } | null;
 }
 
 export interface FigureVersion {
@@ -358,6 +366,10 @@ export interface AdminUser {
   ai_output_tokens: number;
   ai_total_tokens: number;
   ai_estimated_cost_usd: number;
+  ai_monthly_input_tokens: number;
+  ai_monthly_output_tokens: number;
+  ai_monthly_total_tokens: number;
+  ai_monthly_estimated_cost_usd: number;
   ai_monthly_limit: number;
   render_monthly_limit: number;
   storage_limit_mb: number;

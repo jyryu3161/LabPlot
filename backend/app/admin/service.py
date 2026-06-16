@@ -1,6 +1,7 @@
 import os
 import shutil
 import uuid
+from datetime import datetime, timezone
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -26,6 +27,38 @@ from app.figures.models import Figure, FigureCodeArtifact
 from app.organizations.models import Organization, OrganizationMembership
 
 
+def _month_start() -> datetime:
+    now = datetime.now(timezone.utc)
+    return datetime(now.year, now.month, 1, tzinfo=timezone.utc)
+
+
+def _usage_by_user(db: Session, *, since: datetime | None = None) -> dict[uuid.UUID, dict]:
+    query = (
+        db.query(
+            AIUsage.user_id,
+            func.count(AIUsage.id),
+            func.coalesce(func.sum(AIUsage.input_tokens), 0),
+            func.coalesce(func.sum(AIUsage.output_tokens), 0),
+            func.coalesce(func.sum(AIUsage.total_tokens), 0),
+            func.coalesce(func.sum(AIUsage.estimated_cost_usd), 0.0),
+        )
+        .filter(AIUsage.user_id.isnot(None))
+    )
+    if since is not None:
+        query = query.filter(AIUsage.created_at >= since)
+    rows = query.group_by(AIUsage.user_id).all()
+    return {
+        user_id: {
+            "request_count": int(request_count or 0),
+            "input_tokens": int(input_tokens or 0),
+            "output_tokens": int(output_tokens or 0),
+            "total_tokens": int(total_tokens or 0),
+            "estimated_cost_usd": float(estimated_cost or 0.0),
+        }
+        for user_id, request_count, input_tokens, output_tokens, total_tokens, estimated_cost in rows
+    }
+
+
 def list_users(db: Session) -> list[dict]:
     users = db.query(User).order_by(User.created_at.asc()).all()
     if not users:
@@ -36,29 +69,8 @@ def list_users(db: Session) -> list[dict]:
     fig_counts = dict(
         db.query(Figure.owner_id, func.count(Figure.id)).group_by(Figure.owner_id).all()
     )
-    usage_rows = (
-        db.query(
-            AIUsage.user_id,
-            func.count(AIUsage.id),
-            func.coalesce(func.sum(AIUsage.input_tokens), 0),
-            func.coalesce(func.sum(AIUsage.output_tokens), 0),
-            func.coalesce(func.sum(AIUsage.total_tokens), 0),
-            func.coalesce(func.sum(AIUsage.estimated_cost_usd), 0.0),
-        )
-        .filter(AIUsage.user_id.isnot(None))
-        .group_by(AIUsage.user_id)
-        .all()
-    )
-    usage = {
-        user_id: {
-            "ai_request_count": int(request_count or 0),
-            "ai_input_tokens": int(input_tokens or 0),
-            "ai_output_tokens": int(output_tokens or 0),
-            "ai_total_tokens": int(total_tokens or 0),
-            "ai_estimated_cost_usd": float(estimated_cost or 0.0),
-        }
-        for user_id, request_count, input_tokens, output_tokens, total_tokens, estimated_cost in usage_rows
-    }
+    usage = _usage_by_user(db)
+    monthly_usage = _usage_by_user(db, since=_month_start())
     memberships_by_user: dict[uuid.UUID, list[dict]] = {}
     org_rows = (
         db.query(OrganizationMembership, Organization)
@@ -96,13 +108,15 @@ def list_users(db: Session) -> list[dict]:
             "dataset_count": ds_counts.get(u.id, 0),
             "figure_count": fig_counts.get(u.id, 0),
             "organizations": memberships,
-            **usage.get(u.id, {
-                "ai_request_count": 0,
-                "ai_input_tokens": 0,
-                "ai_output_tokens": 0,
-                "ai_total_tokens": 0,
-                "ai_estimated_cost_usd": 0.0,
-            }),
+            "ai_request_count": usage.get(u.id, {}).get("request_count", 0),
+            "ai_input_tokens": usage.get(u.id, {}).get("input_tokens", 0),
+            "ai_output_tokens": usage.get(u.id, {}).get("output_tokens", 0),
+            "ai_total_tokens": usage.get(u.id, {}).get("total_tokens", 0),
+            "ai_estimated_cost_usd": usage.get(u.id, {}).get("estimated_cost_usd", 0.0),
+            "ai_monthly_input_tokens": monthly_usage.get(u.id, {}).get("input_tokens", 0),
+            "ai_monthly_output_tokens": monthly_usage.get(u.id, {}).get("output_tokens", 0),
+            "ai_monthly_total_tokens": monthly_usage.get(u.id, {}).get("total_tokens", 0),
+            "ai_monthly_estimated_cost_usd": monthly_usage.get(u.id, {}).get("estimated_cost_usd", 0.0),
         })
     return out
 

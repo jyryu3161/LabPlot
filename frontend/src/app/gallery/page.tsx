@@ -12,8 +12,12 @@ import { Loader2, Images } from 'lucide-react';
 
 // preferred display order of domains
 const DOMAIN_ORDER = [
-  'Basic statistics', 'Omics', 'Clinical / cohort', 'Systems biology',
-  'Functional enrichment', 'Genomics', 'Cheminformatics', 'Engineering / physical science',
+  'Basic Statistics',
+  'Biology & Medicine',
+  'Chemistry',
+  'Biotechnology',
+  'Engineering',
+  'Advanced & Specialized',
 ];
 
 function FigureCard({ f }: { f: PublicFigure }) {
@@ -35,7 +39,7 @@ function FigureCard({ f }: { f: PublicFigure }) {
 
 export default function GalleryPage() {
   const { isAuthenticated } = useAuthContext();
-  const { data, isLoading } = useQuery({ queryKey: ['public-gallery', 60], queryFn: () => getPublicGallery(60) });
+  const { data, isLoading } = useQuery({ queryKey: ['public-gallery', 120], queryFn: () => getPublicGallery(120) });
   const figures = data?.figures ?? [];
 
   // group by domain

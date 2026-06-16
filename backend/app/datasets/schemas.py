@@ -19,6 +19,7 @@ class DatasetUpdate(BaseModel):
     name: str | None = None
     description: str | None = None
     focus_columns: list[str] | None = None
+    column_roles: dict[str, str] | None = None
 
 
 class DatasetPreviewResponse(BaseModel):

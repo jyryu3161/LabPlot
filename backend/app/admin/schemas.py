@@ -31,6 +31,10 @@ class AdminUserItem(BaseModel):
     ai_output_tokens: int = 0
     ai_total_tokens: int = 0
     ai_estimated_cost_usd: float = 0.0
+    ai_monthly_input_tokens: int = 0
+    ai_monthly_output_tokens: int = 0
+    ai_monthly_total_tokens: int = 0
+    ai_monthly_estimated_cost_usd: float = 0.0
     ai_monthly_limit: int = 0
     render_monthly_limit: int = 0
     storage_limit_mb: int = 0
