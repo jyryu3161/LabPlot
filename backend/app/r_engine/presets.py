@@ -15,11 +15,11 @@ PALETTES = {
 }
 
 _BASE = {
-    "nature":     {"size": 12, "base": "theme_classic", "grid": False},
-    "science":    {"size": 12, "base": "theme_bw",      "grid": True},
-    "cell":       {"size": 13, "base": "theme_classic", "grid": False},
-    "minimal":    {"size": 12, "base": "theme_minimal", "grid": True},
-    "colorblind": {"size": 12, "base": "theme_classic", "grid": False},
+    "nature":     {"size": 7, "base": "theme_classic", "grid": False},
+    "science":    {"size": 7, "base": "theme_bw",      "grid": True},
+    "cell":       {"size": 7, "base": "theme_classic", "grid": False},
+    "minimal":    {"size": 7, "base": "theme_minimal", "grid": True},
+    "colorblind": {"size": 7, "base": "theme_classic", "grid": False},
 }
 
 PRESETS = list(_BASE.keys())
@@ -88,15 +88,20 @@ labplot_palette <- function(n = 100) {{
 labplot_theme <- function() {{
   {cfg['base']}(base_size = {size}) +
   theme(
-    plot.title = element_text(face = "bold", hjust = 0.5, size = {size + 2}),
+    text = element_text(size = {size}),
+    plot.title = element_text(face = "bold", hjust = 0.5, size = {size}),
     plot.subtitle = element_text(size = {size}, colour = "grey30", hjust = 0.5),
-    axis.title = element_text(face = "bold", colour = "black"),
-    axis.text = element_text(colour = "black"),
+    plot.caption = element_text(size = {size}, colour = "grey35"),
+    axis.title = element_text(face = "bold", colour = "black", size = {size}),
+    axis.text = element_text(colour = "black", size = {size}),
     axis.line = element_line(colour = "black", linewidth = 0.3),
     axis.ticks = element_line(colour = "black", linewidth = 0.3),
     axis.ticks.length = grid::unit(2.2, "pt"),
     legend.position = "right",
+    legend.title = element_text(face = "bold", colour = "black", size = {size}),
+    legend.text = element_text(colour = "black", size = {size}),
     legend.key = element_blank(),
+    strip.text = element_text(face = "bold", colour = "black", size = {size}),
     {grid_line}
     plot.background = element_rect(fill = "white", colour = NA),
     panel.background = element_rect(fill = "white", colour = NA),

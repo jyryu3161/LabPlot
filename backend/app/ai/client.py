@@ -441,7 +441,7 @@ def improve_figure(db: Session, plot_type: str, mapping: dict, options: dict, st
 
 
 def _fallback_improvements(options: dict, style_preset: str) -> list[dict]:
-    patch = {"options": {"size": "wide", "dpi": 300, "font_scale": 1.1}}
+    patch = {"options": {"size": "wide", "dpi": 300, "font_scale": 1.0}}
     if not options.get("palette_name"):
         patch["options"]["palette_name"] = "okabe_ito"
     if style_preset not in ("nature", "science", "cell", "colorblind"):
@@ -449,7 +449,7 @@ def _fallback_improvements(options: dict, style_preset: str) -> list[dict]:
     return [{
         "suggestion_type": "Publication export settings",
         "current": "The AI provider returned an incomplete improvement payload.",
-        "recommended": "Apply conservative publication defaults: wide export, 300 dpi, slightly larger text, and a colorblind-safe palette when no palette is set.",
+        "recommended": "Apply conservative publication defaults: wide export, 300 dpi, 7 pt text, and a colorblind-safe palette when no palette is set.",
         "priority": "medium",
         "param_patch": patch,
     }]

@@ -63,10 +63,10 @@ def build_script(plot_type: str, mapping: dict, options: dict, preset: str,
     # ---- device-rendered plots (ComplexHeatmap etc.): template defines draw_plot() ----
     if plot_type in DEVICE_TYPES:
         export = f"""
-png("figure.png", width = {w} * {dpi}, height = {h} * {dpi}, res = {dpi}, bg = "white"); draw_plot(); invisible(dev.off())
-svglite::svglite("figure.svg", width = {w}, height = {h}, bg = "white"); draw_plot(); invisible(dev.off())
-tiff("figure.tiff", width = {w} * {dpi}, height = {h} * {dpi}, res = {dpi}, compression = "lzw", bg = "white"); draw_plot(); invisible(dev.off())
-pdf("figure.pdf", width = {w}, height = {h}); draw_plot(); invisible(dev.off())
+png("figure.png", width = {w} * {dpi}, height = {h} * {dpi}, res = {dpi}, pointsize = 7, bg = "white"); draw_plot(); invisible(dev.off())
+svglite::svglite("figure.svg", width = {w}, height = {h}, pointsize = 7, bg = "white"); draw_plot(); invisible(dev.off())
+tiff("figure.tiff", width = {w} * {dpi}, height = {h} * {dpi}, res = {dpi}, pointsize = 7, compression = "lzw", bg = "white"); draw_plot(); invisible(dev.off())
+pdf("figure.pdf", width = {w}, height = {h}, pointsize = 7); draw_plot(); invisible(dev.off())
 """
         return head + plot_r + export
 

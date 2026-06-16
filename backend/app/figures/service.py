@@ -628,8 +628,8 @@ def improve_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, ow
             figure_version_id=version_id,
             suggestion_type="Publication export settings",
             current_state="Current figure settings may not specify final export defaults.",
-            recommended="Use a stable wide export with 300 dpi and slightly larger type for review readability.",
-            param_patch={"options": {"size": "wide", "dpi": 300, "font_scale": 1.1}},
+            recommended="Use a stable wide export with 300 dpi and 7 pt type for publication layout.",
+            param_patch={"options": {"size": "wide", "dpi": 300, "font_scale": 1.0}},
             priority="medium",
         )
         db.add(imp)

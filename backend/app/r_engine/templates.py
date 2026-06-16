@@ -31,6 +31,7 @@ def _num(v, default):
 
 _VIRIDIS_OPTIONS = ("viridis", "magma", "inferno", "plasma", "cividis")
 _GRAPH_LAYOUTS = ("fr", "kk", "circle", "stress")
+_GEOM_TEXT_SIZE_7PT = 2.46
 
 
 def _choice(value, allowed: tuple[str, ...], default: str) -> str:
@@ -221,7 +222,7 @@ p <- ggplot(.long, aes(x = x, y = y, fill = value)) +
   theme(axis.text.x = element_text(angle = 45, hjust = 1),
         panel.grid = element_blank())
 if ({show_values}) {{
-  p <- p + geom_text(aes(label = sprintf("%.2f", value)), size = 2.6, colour = "grey20")
+  p <- p + geom_text(aes(label = sprintf("%.2f", value)), size = {_GEOM_TEXT_SIZE_7PT}, colour = "grey20")
 }}
 """
 
@@ -274,7 +275,7 @@ def _volcano(m, o):
 .top <- .d[.d$.sig != "NS", ]
 .top <- .top[order(-.top$.neglogp), ]
 if (nrow(.top) > {label_top}) .top <- .top[1:{label_top}, ]
-p <- p + geom_text(data = .top, aes(label = {_data(gene)}), size = 2.8, vjust = -0.6, show.legend = FALSE)
+p <- p + geom_text(data = .top, aes(label = {_data(gene)}), size = {_GEOM_TEXT_SIZE_7PT}, vjust = -0.6, show.legend = FALSE)
 """
     return f"""
 .d <- df
@@ -725,7 +726,7 @@ def _network(m, o):
     weight = m.get("weight")
     layout = _choice(o.get("layout"), _GRAPH_LAYOUTS, "fr")
     label = o.get("show_labels", True)
-    label_block = "  geom_node_text(aes(label = name), repel = TRUE, size = 2.6, colour = \"grey20\") +\n" if label else ""
+    label_block = f"  geom_node_text(aes(label = name), repel = TRUE, size = {_GEOM_TEXT_SIZE_7PT}, colour = \"grey20\") +\n" if label else ""
     edge_w = f"aes(width = {_data(weight)}), " if weight else ""
     edge_width_scale = "  ggraph::scale_edge_width(range = c(0.25, 1.1), guide = \"none\") +\n" if weight else ""
     return f"""
@@ -739,8 +740,8 @@ p <- ggraph(.g, layout = {rq(layout)}) +
 {edge_width_scale}  geom_node_point(aes(size = deg), colour = "#E64B35", alpha = 0.9) +
 {label_block}  scale_size(range = c(2, 9), guide = "none") +
   labs(title = {rq(o.get('title')) if o.get('title') else 'NULL'}) +
-  theme_void(base_size = 12) +
-  theme(plot.title = element_text(face = "bold", hjust = 0.5))
+  theme_void(base_size = 7) +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5, size = 7))
 """
 
 
@@ -775,14 +776,23 @@ rownames(.mat) <- {rowname}
 if (length(.annvars) > 0) {{
   .anndf <- df[, .annvars, drop = FALSE]
   for (nm in names(.anndf)) .anndf[[nm]] <- as.factor(.anndf[[nm]])
-  .ra <- ComplexHeatmap::rowAnnotation(df = .anndf)
+  .ann_legend <- stats::setNames(
+    lapply(names(.anndf), function(nm) list(title_gp = grid::gpar(fontsize = 7), labels_gp = grid::gpar(fontsize = 7))),
+    names(.anndf)
+  )
+  .ra <- ComplexHeatmap::rowAnnotation(
+    df = .anndf,
+    annotation_name_gp = grid::gpar(fontsize = 7),
+    annotation_legend_param = .ann_legend
+  )
 }}
 draw_plot <- function() {{
   ht <- ComplexHeatmap::Heatmap(.mat, name = "z-score", col = {colmap},
     cluster_rows = {cluster_rows}, cluster_columns = {cluster_cols},
     show_row_names = {show_rn}, row_names_gp = grid::gpar(fontsize = 7),
-    column_names_gp = grid::gpar(fontsize = 9), right_annotation = .ra,
-    column_title = {title})
+    column_names_gp = grid::gpar(fontsize = 7), right_annotation = .ra,
+    column_title = {title}, column_title_gp = grid::gpar(fontsize = 7),
+    heatmap_legend_param = list(title_gp = grid::gpar(fontsize = 7), labels_gp = grid::gpar(fontsize = 7)))
   ComplexHeatmap::draw(ht, merge_legends = TRUE)
 }}
 """
@@ -823,7 +833,7 @@ p <- ggplot() +
   geom_point(data = .nodes, aes(x = x, y = y, size = total), shape = 21, fill = "white",
              colour = "grey20", stroke = 0.35) +
   geom_text(data = .nodes, aes(x = x, y = y, label = label, hjust = ifelse(x < 0.5, 1.05, -0.05)),
-            size = 2.8) +
+            size = {_GEOM_TEXT_SIZE_7PT}) +
   scale_colour_manual(values = labplot_palette(), guide = "none") +
   scale_linewidth(range = c(0.5, 5.2), guide = "none") +
   scale_size(range = c(2.5, 6), guide = "none") +
@@ -869,7 +879,7 @@ if (nrow(.tab) == 0) stop("No non-empty intersections found")
 .bar <- ggplot(.tab, aes(x = ix_f, y = count)) +
   geom_col(fill = "#3C5488", width = 0.72) +
   labs(x = NULL, y = "Intersection size") +
-  theme_minimal(base_size = 10) +
+  theme_minimal(base_size = 7) +
   theme(axis.text.x = element_blank(), panel.grid.major.x = element_blank())
 .mat <- ggplot(.long, aes(x = ix_f, y = set)) +
   geom_segment(data = .segments, aes(x = ix_f, xend = ix_f, y = ymin, yend = ymax),
@@ -877,7 +887,7 @@ if (nrow(.tab) == 0) stop("No non-empty intersections found")
   geom_point(aes(fill = present), shape = 21, size = 2.6, colour = "grey35", stroke = 0.25) +
   scale_fill_manual(values = c(`TRUE` = "#E64B35", `FALSE` = "white"), guide = "none") +
   labs(x = "Intersection", y = NULL) +
-  theme_minimal(base_size = 10) +
+  theme_minimal(base_size = 7) +
   theme(panel.grid = element_blank(), axis.text.x = element_blank(), axis.ticks.x = element_blank())
 draw_plot <- function() {{
   gridExtra::grid.arrange(.bar, .mat, ncol = 1, heights = c(2, 1.25))
@@ -921,7 +931,7 @@ if (length(unique(.plot$.x)) < 2 || length(unique(.plot$.y)) < 2) stop("3D wiref
 .wf <- lattice::wireframe(.z ~ .x * .y, data = .plot, drape = FALSE,
                           screen = list(z = 35, x = -60), lwd = 0.45,
                           xlab = {rq(o.get("x_label") or x)}, ylab = {rq(o.get("y_label") or y)}, zlab = {rq(z)},
-                          scales = list(arrows = FALSE, cex = 0.65))
+                          scales = list(arrows = FALSE, cex = 1.0))
 draw_plot <- function() print(.wf)
 """
 
@@ -938,12 +948,12 @@ suppressMessages(library(lattice))
 {grp_line}
 .plot <- .plot[stats::complete.cases(.plot[, c(".x", ".y", ".z")]), ]
 .cloud <- lattice::cloud(.z ~ .x * .y, data = .plot, groups = .grp,
-                         auto.key = list(columns = 2, cex = 0.75),
+                         auto.key = list(columns = 2, cex = 1.0),
                          pch = 16, cex = 0.7, alpha = 0.75,
                          col = rep(viridisLite::viridis(max(3, length(levels(.plot$.grp)))), length.out = length(levels(.plot$.grp))),
                          screen = list(z = 40, x = -65),
                          xlab = {rq(o.get("x_label") or x)}, ylab = {rq(o.get("y_label") or y)}, zlab = {rq(z)},
-                         scales = list(arrows = FALSE, cex = 0.65))
+                         scales = list(arrows = FALSE, cex = 1.0))
 draw_plot <- function() print(.cloud)
 """
 
@@ -1025,7 +1035,7 @@ draw_plot <- function() {{
     .xlim <- circlize::get.cell.meta.data("xlim")
     .ylim <- circlize::get.cell.meta.data("ylim")
     circlize::circos.text(mean(.xlim), .ylim[1] + 0.1, .sector, facing = "clockwise",
-                          niceFacing = TRUE, adj = c(0, 0.5), cex = 0.62)
+                          niceFacing = TRUE, adj = c(0, 0.5), cex = 1.0)
   }}, bg.border = NA)
   circlize::circos.clear()
 }}
@@ -1073,7 +1083,7 @@ def _confusion_matrix(m, o):
 .tab$Predicted <- factor(.tab$Predicted, levels = sort(unique(.tab$Predicted)))
 p <- ggplot(.tab, aes(x = Predicted, y = Actual, fill = Freq)) +
   geom_tile(colour = "white", linewidth = 0.35) +
-  geom_text(aes(label = Freq), size = 3.0, colour = "grey10") +
+  geom_text(aes(label = Freq), size = {_GEOM_TEXT_SIZE_7PT}, colour = "grey10") +
   scale_fill_gradient(low = "grey95", high = "#3C5488", name = "Count") +
   coord_equal() +
   {_labs(o, "Predicted", "Actual")} +
@@ -1169,7 +1179,7 @@ def _ma_plot(m, o):
         label_block = f"""
 .top <- .plot[order(-abs(.plot$.lfc)), , drop = FALSE]
 .top <- .top[seq_len(min({label_top}, nrow(.top))), , drop = FALSE]
-p <- p + geom_text(data = .top, aes(label = {_data(gene)}), size = 2.6, vjust = -0.55, show.legend = FALSE)
+p <- p + geom_text(data = .top, aes(label = {_data(gene)}), size = {_GEOM_TEXT_SIZE_7PT}, vjust = -0.55, show.legend = FALSE)
 """
     return f"""
 .plot <- df %>% dplyr::mutate(.mean = suppressWarnings(as.numeric({_col(mean_col)})),
