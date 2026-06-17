@@ -78,6 +78,17 @@ function columnTokens(column: ColumnShape): Set<string> {
   return new Set(objectiveTokens(`${column.name} ${column.role} ${column.dtype} ${sampleText}`));
 }
 
+function explicitlyMentionsColumn(column: ColumnShape, tokens: string[], objectiveText: string): boolean {
+  const name = column.name.trim().toLowerCase();
+  if (!name) return false;
+  const nameTokens = objectiveTokens(name);
+  if (nameTokens.length === 1 && tokens.includes(nameTokens[0])) return true;
+  if (nameTokens.length > 1 && nameTokens.every((token) => tokens.includes(token))) return true;
+
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(^|[^a-z0-9])${escaped}($|[^a-z0-9])`, 'i').test(objectiveText);
+}
+
 function scoreColumnForObjective(column: ColumnShape, tokens: string[], objectiveText: string): number {
   const haystack = columnTokens(column);
   const nameLower = column.name.toLowerCase();
@@ -457,13 +468,20 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
     }
     const tokens = objectiveTokens(objective);
     const objectiveText = objective.toLowerCase();
+    const explicitPicks = columns.filter((column) => explicitlyMentionsColumn(column, tokens, objectiveText)).map((column) => column.name);
+    if (explicitPicks.length > 0) {
+      setFocusColumnsDraft(explicitPicks);
+      setRecommendPrompt(objective);
+      toast.success(`Selected ${explicitPicks.length} column${explicitPicks.length === 1 ? '' : 's'} from your objective`);
+      return;
+    }
     const ranked = columns
       .map((column) => ({ column, score: scoreColumnForObjective(column, tokens, objectiveText) }))
       .filter((item) => item.score > 0)
       .sort((a, b) => b.score - a.score || columns.indexOf(a.column) - columns.indexOf(b.column));
     const picks = ranked.length ? ranked.slice(0, 8).map((item) => item.column.name) : suggestedFocusColumns;
     setFocusColumnsDraft(picks);
-    if (!recommendPrompt.trim()) setRecommendPrompt(objective);
+    setRecommendPrompt(objective);
     toast.success(`Selected ${picks.length} column${picks.length === 1 ? '' : 's'} from your objective`);
   }
 

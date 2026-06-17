@@ -117,7 +117,7 @@ test('dataset upload saves purpose, auto-loads AI once, and refreshes with promp
 
     await page.goto('/datasets');
     const csvPath = testInfo.outputPath('ai-purpose-data.csv');
-    await fs.writeFile(csvPath, 'dose,response,group\n1,4,A\n2,5,A\n3,8,B\n4,9,B\n', 'utf8');
+    await fs.writeFile(csvPath, 'dose,response,group,x,y,z\n1,4,A,10,2,30\n2,5,A,11,3,34\n3,8,B,14,6,41\n4,9,B,16,7,44\n', 'utf8');
     await page.locator('input[type="file"]').setInputFiles(csvPath);
 
     await expect(page.getByText('Dataset purpose')).toBeVisible();
@@ -133,6 +133,12 @@ test('dataset upload saves purpose, auto-loads AI once, and refreshes with promp
     await expect(page.getByRole('button', { name: '1. Choose columns' })).toBeVisible();
     await page.waitForTimeout(500);
     expect(recommendBodies).toHaveLength(0);
+    await page.getByLabel('Visualization objective').fill('x와 z 컬럼의 관계 파악.');
+    await page.getByRole('button', { name: 'Select columns' }).click();
+    await expect(page.getByRole('checkbox', { name: /^x\b/i })).toBeChecked();
+    await expect(page.getByRole('checkbox', { name: /^z\b/i })).toBeChecked();
+    await expect(page.getByRole('checkbox', { name: /^y\b/i })).not.toBeChecked();
+
     await page.getByLabel('Visualization objective').fill('Make a scatter plot of dose and response by group.');
     await page.getByRole('button', { name: 'Select columns' }).click();
     await expect(page.getByRole('checkbox', { name: /dose/i })).toBeChecked();
