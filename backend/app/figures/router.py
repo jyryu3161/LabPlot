@@ -21,6 +21,7 @@ from app.figures.schemas import (
     GalleryFigureItem,
     ImprovementRequest,
     ImprovementResponse,
+    LegendRequest,
     LegendResponse,
     RecommendationCacheResponse,
     RecommendationItem,
@@ -167,8 +168,17 @@ def remove_template_favorite(figure_id: uuid.UUID, db: Session = Depends(get_db)
 
 @router.post("/{figure_id}/versions/{version_id}/legend", response_model=LegendResponse,
              dependencies=[Depends(rate_limit("ai_legend", 60, 3600))])
-def generate_legend(figure_id: uuid.UUID, version_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    return service.generate_legend(db, figure_id, version_id, current_user.id)
+def generate_legend(figure_id: uuid.UUID, version_id: uuid.UUID, data: LegendRequest | None = None,
+                    db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    req = data or LegendRequest()
+    return service.generate_legend(
+        db,
+        figure_id,
+        version_id,
+        current_user.id,
+        prompt=req.prompt,
+        current_legend=req.current_legend,
+    )
 
 
 @router.delete("/{figure_id}", status_code=204)

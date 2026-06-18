@@ -45,6 +45,7 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
   const [description, setDescription] = useState<string | null>(null);
   const [legend, setLegend] = useState<string | null>(null);
   const [improvePrompt, setImprovePrompt] = useState('');
+  const [legendPrompt, setLegendPrompt] = useState('');
 
   const plotTypes = plotTypesData?.plot_types ?? [];
   const styles = stylesData?.styles ?? [];
@@ -94,8 +95,29 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
   });
   const applyImp = useMutation({
     mutationFn: (impId: string) => applyImprovement(id, impId),
-    onSuccess: (v) => { toast.success(`Applied (v${v.version_number})`); setSelectedVid(v.id); setReview(null); setImprovements(null); qc.invalidateQueries({ queryKey: ['figure', id] }); },
+    onSuccess: (v) => { toast.success(`Applied as v${v.version_number}; R script regenerated`); setSelectedVid(v.id); setReview(null); setImprovements(null); qc.invalidateQueries({ queryKey: ['figure', id] }); },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Apply failed'),
+  });
+  const directAiEdit = useMutation({
+    mutationFn: async () => {
+      const prompt = improvePrompt.trim();
+      if (!prompt) throw new Error('Describe the edit you want first');
+      if (!effectiveSelectedVid) throw new Error('No figure version selected');
+      const suggestions = await improveVersion(id, effectiveSelectedVid, prompt);
+      const first = suggestions.find((item) => item.param_patch && Object.keys(item.param_patch).length > 0);
+      if (!first) throw new Error('AI did not return an applicable visual edit');
+      const version = await applyImprovement(id, first.id);
+      return { suggestions, appliedId: first.id, version };
+    },
+    onSuccess: ({ suggestions, appliedId, version }) => {
+      toast.success(`AI edit applied as v${version.version_number}; R script regenerated`);
+      setImprovements(suggestions.map((item) => item.id === appliedId ? { ...item, applied: true } : item));
+      setSelectedVid(version.id);
+      setReview(null);
+      qc.invalidateQueries({ queryKey: ['figure', id] });
+      qc.invalidateQueries({ queryKey: ['figures'] });
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'AI edit failed'),
   });
   const saveDesc = useMutation({
     mutationFn: () => updateFigure(id, { description: descriptionValue }),
@@ -111,8 +133,16 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
     onSuccess: () => { toast.success('Legend saved'); qc.invalidateQueries({ queryKey: ['figure', id] }); },
   });
   const aiLegend = useMutation({
-    mutationFn: () => generateLegend(id, effectiveSelectedVid!),
-    onSuccess: (r) => { setLegend(r.legend); toast.success('AI legend generated'); },
+    mutationFn: () => generateLegend(id, effectiveSelectedVid!, {
+      prompt: legendPrompt,
+      current_legend: legendValue,
+    }),
+    onSuccess: (r) => {
+      setLegend(r.legend);
+      setLegendPrompt('');
+      toast.success(legendPrompt.trim() ? 'AI legend revised' : 'AI legend generated');
+      qc.invalidateQueries({ queryKey: ['figure', id] });
+    },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Legend failed'),
   });
   const deleteVersion = useMutation({
@@ -242,18 +272,32 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
 
             {/* AI figure legend (for the manuscript) */}
             <Card>
-              <CardHeader className="pb-2 flex flex-row items-center justify-between">
+              <CardHeader className="pb-2">
                 <CardTitle className="flex items-center gap-2 text-base"><FileText className="h-4 w-4" /> Figure legend</CardTitle>
-                {canEditFigure && (
-                  <Button size="sm" variant="outline" onClick={() => aiLegend.mutate()} disabled={aiLegend.isPending || !effectiveSelectedVid}>
-                    {aiLegend.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Sparkles className="mr-2 h-4 w-4" />} AI generate
-                  </Button>
-                )}
               </CardHeader>
               <CardContent className="space-y-2">
                 <Textarea value={legendValue} onChange={(e) => setLegend(e.target.value)} rows={4} readOnly={!canEditFigure} placeholder="AI-generated or hand-written figure legend for your manuscript…" />
                 {canEditFigure ? (
-                  <Button size="sm" variant="secondary" onClick={() => saveLegend.mutate()} disabled={saveLegend.isPending}>Save legend</Button>
+                  <>
+                    <div className="space-y-1">
+                      <Label htmlFor="legend-revision-request" className="text-xs">Optional AI revision request</Label>
+                      <Textarea
+                        id="legend-revision-request"
+                        value={legendPrompt}
+                        onChange={(e) => setLegendPrompt(e.target.value)}
+                        rows={2}
+                        maxLength={1500}
+                        placeholder="Example: make it shorter, clarify the groups, and avoid interpreting the result."
+                      />
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <Button size="sm" variant="outline" onClick={() => aiLegend.mutate()} disabled={aiLegend.isPending || !effectiveSelectedVid}>
+                        {aiLegend.isPending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Sparkles className="mr-1 h-4 w-4" />}
+                        {legendPrompt.trim() ? 'Revise with AI' : 'AI generate'}
+                      </Button>
+                      <Button size="sm" variant="secondary" onClick={() => saveLegend.mutate()} disabled={saveLegend.isPending}>Save legend</Button>
+                    </div>
+                  </>
                 ) : (
                   <p className="text-xs text-muted-foreground">Editor access is required to change the legend.</p>
                 )}
@@ -488,12 +532,17 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
                         onChange={(e) => setImprovePrompt(e.target.value)}
                         rows={3}
                         maxLength={1500}
-                        placeholder="Example: make the colors colorblind-safe, simplify the legend, and use clearer axis labels."
+                        placeholder="Example: make this bar plot more restrained for a manuscript, use muted colors, and simplify the axis labels."
                       />
                     </div>
-                    <Button size="sm" variant="outline" className="w-full" onClick={() => runImprove.mutate()} disabled={runImprove.isPending || !effectiveSelectedVid}>
-                      {runImprove.isPending ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Thinking…</> : improvePrompt.trim() ? 'Ask AI to improve' : 'Suggest improvements'}
-                    </Button>
+                    <div className="grid gap-2">
+                      <Button size="sm" className="w-full" onClick={() => directAiEdit.mutate()} disabled={directAiEdit.isPending || runImprove.isPending || applyImp.isPending || !effectiveSelectedVid || !improvePrompt.trim()}>
+                        {directAiEdit.isPending ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Applying…</> : 'Apply prompt directly (new R version)'}
+                      </Button>
+                      <Button size="sm" variant="outline" className="w-full" onClick={() => runImprove.mutate()} disabled={runImprove.isPending || directAiEdit.isPending || !effectiveSelectedVid}>
+                        {runImprove.isPending ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Thinking…</> : improvePrompt.trim() ? 'Suggest from prompt' : 'Suggest improvements'}
+                      </Button>
+                    </div>
                   </>
                 ) : (
                   <p className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">Editor access is required to create improvement suggestions.</p>
@@ -503,7 +552,7 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
                     <div className="flex items-center justify-between"><span className="font-medium">{imp.suggestion_type}</span>{imp.priority && <Badge variant="outline" className="text-xs">{imp.priority}</Badge>}</div>
                     {imp.recommended && <p className="mt-1 text-xs text-muted-foreground">{imp.recommended}</p>}
                     <Button size="sm" variant="secondary" className="mt-2 w-full" onClick={() => applyImp.mutate(imp.id)} disabled={applyImp.isPending || imp.applied}>
-                      {imp.applied ? <><CheckCircle2 className="mr-1 h-3 w-3" /> Applied</> : 'Apply'}
+                      {imp.applied ? <><CheckCircle2 className="mr-1 h-3 w-3" /> Applied</> : 'Apply suggestion (new R version)'}
                     </Button>
                   </div>
                 ))}

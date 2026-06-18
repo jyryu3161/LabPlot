@@ -32,7 +32,7 @@ _UNIVERSAL_OPTION_KEYS = {
     "hide_legend", "log_x", "log_y", "flip_coords",
 }
 _OPTION_CHOICES = {
-    "palette_name": {"preset", "okabe_ito", "tol_bright", "set2", "npg", "tableau10"},
+    "palette_name": {"preset", "journal_muted", "okabe_ito", "tol_bright", "set2", "npg", "tableau10"},
     "size": {"single_column", "wide", "double_column", "square", "custom"},
     "color_mode": {"color", "grayscale"},
     "stat": {"mean", "sum", "count"},
@@ -43,11 +43,11 @@ _OPTION_CHOICES = {
 _BOOL_OPTIONS = {
     "show_points", "show_box", "error_bars", "scale_rows", "add_smooth", "show_density", "show_rug",
     "show_values", "hide_legend", "log_x", "log_y", "flip_coords", "connect_points", "show_contour_lines",
-    "cluster_rows", "cluster_cols", "show_row_names", "show_labels",
+    "cluster_rows", "cluster_cols", "show_row_names", "show_labels", "color_bars", "paired_rows_only",
 }
 _NUMBER_OPTIONS = {
     "fc_threshold", "p_threshold", "label_top", "font_scale", "dpi", "width_in", "height_in",
-    "bins", "sig_threshold",
+    "bins", "sig_threshold", "bar_alpha", "bar_width",
 }
 _MAX_SVG_BYTES = 5 * 1024 * 1024
 _BLOCKED_SVG_TAGS = {"script", "foreignobject", "iframe", "object", "embed", "link"}
@@ -394,7 +394,9 @@ def remove_template_favorite(db: Session, figure_id: uuid.UUID, owner_id: uuid.U
         db.commit()
 
 
-def generate_legend(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, owner_id: uuid.UUID, style: str = "nature") -> dict:
+def generate_legend(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, owner_id: uuid.UUID,
+                    style: str = "nature", prompt: str | None = None,
+                    current_legend: str | None = None) -> dict:
     fig = get_figure(db, figure_id, owner_id, write=True)
     v = get_version(fig, version_id)
     ds = ds_service.get_dataset(db, fig.dataset_id, owner_id)
@@ -408,7 +410,9 @@ def generate_legend(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, ow
         pc = ((pc + " ") if pc else "") + "Dataset: " + ds.description.strip()
     legend = ai_client.generate_legend(
         db, fig.plot_type, v.mapping or {}, v.options or {},
-        dataset_summary, fig.description, style, project_context=pc, user_id=owner_id
+        dataset_summary, fig.description, style, project_context=pc, user_id=owner_id,
+        current_legend=(current_legend or fig.legend or "").strip() or None,
+        user_request=(prompt or "").strip() or None,
     )
     fig.legend = legend
     db.commit()
@@ -759,7 +763,7 @@ def improve_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, ow
             suggestion_type="Publication export settings",
             current_state="Current figure settings may not specify final export defaults.",
             recommended="Use a stable wide export with 300 dpi and 7 pt type for publication layout.",
-            param_patch={"options": {"size": "wide", "dpi": 300, "font_scale": 1.0}},
+            param_patch={"options": {"size": "wide", "dpi": 300, "font_scale": 1.0, "palette_name": "journal_muted"}},
             priority="medium",
         )
         db.add(imp)
@@ -784,17 +788,17 @@ def apply_improvement(db: Session, figure_id: uuid.UUID, improvement_id: uuid.UU
     if not imp or imp.figure_version_id not in version_ids:
         raise NotFoundError("Improvement", str(improvement_id))
 
-    base = get_version(fig, fig.current_version_id) if fig.current_version_id else fig.versions[-1]
+    base = get_version(fig, imp.figure_version_id)
     patch = imp.param_patch or {}
     new_mapping = {**(base.mapping or {}), **(patch.get("mapping") or {})}
     new_options = {**(base.options or {}), **(patch.get("options") or {})}
-    new_preset = patch.get("style_preset") or fig.style_preset
+    new_preset = patch.get("style_preset") or base.style_preset or fig.style_preset
 
     class _Req:
         mapping = new_mapping
         options = new_options
         style_preset = new_preset
-        change_note = f"Applied AI suggestion: {imp.suggestion_type or 'improvement'}"
+        change_note = f"Applied AI suggestion to v{base.version_number}: {imp.suggestion_type or 'improvement'}"
 
     result = rerender(db, figure_id, owner_id, _Req())
     imp.applied = True
@@ -832,6 +836,10 @@ def _sanitize_option(key: str, value: Any) -> Any:
             return int(max(5, min(120, num)))
         if key == "font_scale":
             return max(0.6, min(2.0, num))
+        if key == "bar_alpha":
+            return max(0.15, min(1.0, num))
+        if key == "bar_width":
+            return max(0.2, min(1.0, num))
         if key in {"width_in", "height_in"}:
             return max(1.0, min(20.0, num))
         return num

@@ -330,8 +330,16 @@ export async function saveFigureTemplateFavorite(id: string, data?: { source_ver
 export async function deleteFigureTemplateFavorite(id: string): Promise<void> {
   return fetcher(`/api/figures/${id}/template-favorite`, { method: 'DELETE' });
 }
-export async function generateLegend(figureId: string, versionId: string): Promise<{ legend: string }> {
-  return fetcher(`/api/figures/${figureId}/versions/${versionId}/legend`, { method: 'POST' });
+export async function generateLegend(
+  figureId: string,
+  versionId: string,
+  data?: { prompt?: string; current_legend?: string },
+): Promise<{ legend: string }> {
+  const body = data && (data.prompt?.trim() || data.current_legend?.trim()) ? JSON.stringify({
+    prompt: data.prompt?.trim() || undefined,
+    current_legend: data.current_legend?.trim() || undefined,
+  }) : undefined;
+  return fetcher(`/api/figures/${figureId}/versions/${versionId}/legend`, { method: 'POST', body });
 }
 export async function rerenderFigure(id: string, body: { plot_type?: string; mapping?: Record<string, unknown>; options?: Record<string, unknown>; style_preset?: string; change_note?: string }): Promise<FigureVersion> {
   return fetcher(`/api/figures/${id}/rerender`, { method: 'POST', body: JSON.stringify(body) });

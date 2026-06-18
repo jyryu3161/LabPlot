@@ -1,13 +1,15 @@
 """Publication style presets -> R theme + palette code (uses base ggplot2 only)."""
 from __future__ import annotations
 
+_JOURNAL_MUTED = ["#5B6F82", "#8FA6B8", "#6F8A72", "#B8A46A", "#9A6F6F",
+                  "#7C739E", "#6F8F8E", "#9A9A9A"]
+
 PALETTES = {
-    "nature": ["#E64B35", "#4DBBD5", "#00A087", "#3C5488", "#F39B7F", "#8491B4",
-               "#91D1C2", "#DC0000", "#7E6148", "#B09C85"],
-    "science": ["#3B4992", "#EE0000", "#008B45", "#631879", "#008280", "#BB0021",
-                "#5F559B", "#A20056", "#808180", "#1B1919"],
-    "cell": ["#3C5488", "#E64B35", "#00A087", "#F39B7F", "#4DBBD5", "#8491B4",
-             "#91D1C2", "#DC0000", "#7E6148", "#B09C85"],
+    "nature": _JOURNAL_MUTED,
+    "science": ["#4F658C", "#8C5D5B", "#5F7E63", "#8B7B55", "#6E648B",
+                "#6A8584", "#8C7A73", "#9A9A9A"],
+    "cell": ["#526D87", "#8D6B67", "#668467", "#B0A06C", "#7A7195",
+             "#6D8B8B", "#987A71", "#9A9A9A"],
     "minimal": ["#333333", "#777777", "#AAAAAA", "#555555", "#999999", "#CCCCCC",
                 "#222222", "#888888"],
     "colorblind": ["#000000", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2",
@@ -38,6 +40,7 @@ _GREYS = ["#1a1a1a", "#666666", "#999999", "#cccccc", "#4d4d4d", "#808080", "#b3
 # Named discrete palettes the user can pick by name (verified hex). Overrides the
 # preset palette when set. Curated for scientific figures; cb = colorblind-safe.
 NAMED_PALETTES = {
+    "journal_muted": _JOURNAL_MUTED,
     "okabe_ito":  ["#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7", "#000000"],
     "tol_bright": ["#4477AA", "#EE6677", "#228833", "#CCBB44", "#66CCEE", "#AA3377", "#BBBBBB", "#000000"],
     "set2":       ["#66C2A5", "#FC8D62", "#8DA0CB", "#E78AC3", "#A6D854", "#FFD92F", "#E5C494", "#B3B3B3"],
@@ -45,6 +48,7 @@ NAMED_PALETTES = {
     "tableau10":  ["#4E79A7", "#F28E2B", "#E15759", "#76B7B2", "#59A14F", "#EDC948", "#B07AA1", "#FF9DA7"],
 }
 _PALETTE_META = {
+    "journal_muted": ("Journal muted", False),
     "okabe_ito":  ("Okabe–Ito (colorblind-safe)", True),
     "tol_bright": ("Paul Tol Bright (colorblind-safe)", True),
     "set2":       ("ColorBrewer Set2 (soft)", False),
@@ -83,6 +87,10 @@ def theme_r(preset: str, color_mode: str = "color", font_scale: float = 1.0, pal
 labplot_palette <- function(n = 100) {{
   pal <- c({pal_r})
   rep(pal, length.out = max(n, length(pal)))
+}}
+
+labplot_accent <- function() {{
+  c({pal_r})[[1]]
 }}
 
 labplot_theme <- function() {{

@@ -52,6 +52,19 @@ def _labs(options: dict, default_x="", default_y="", default_fill="NULL_DEFAULT"
     return "labs(" + ", ".join(parts) + ")"
 
 
+_ORDERED_FACTOR_R = """
+.labplot_ordered_factor <- function(x) {
+  x_chr <- as.character(x)
+  levels <- unique(x_chr[!is.na(x_chr)])
+  level_num <- suppressWarnings(as.numeric(levels))
+  if (length(levels) > 0 && all(!is.na(level_num))) {
+    levels <- levels[order(level_num)]
+  }
+  factor(x_chr, levels = levels)
+}
+"""
+
+
 # ---------------------------------------------------------------- builders
 def _box(m, o):
     x, y = m["x"], m["y"]
@@ -104,11 +117,20 @@ p <- ggplot(df, {aes}) +
 def _bar(m, o):
     x = m["x"]
     stat = o.get("stat", m.get("stat", "mean"))
+    color_bars = bool(o.get("color_bars", False))
     if stat == "count" or not m.get("y"):
-        return f"""
-p <- ggplot(df, aes(x = factor({_data(x)}), fill = factor({_data(x)}))) +
-  geom_bar() +
+        if color_bars:
+            return f"""
+{_ORDERED_FACTOR_R}
+p <- ggplot(df, aes(x = .labplot_ordered_factor({_data(x)}), fill = .labplot_ordered_factor({_data(x)}))) +
+  geom_bar(alpha = 0.9, colour = "grey25", linewidth = 0.25) +
   scale_fill_manual(values = labplot_palette()) +
+  {_labs(o, x, "count")} + guides(fill = "none")
+"""
+        return f"""
+{_ORDERED_FACTOR_R}
+p <- ggplot(df, aes(x = .labplot_ordered_factor({_data(x)}))) +
+  geom_bar(fill = labplot_accent(), alpha = 0.9, colour = "grey25", linewidth = 0.25) +
   {_labs(o, x, "count")} + guides(fill = "none")
 """
     y = m["y"]
@@ -117,15 +139,81 @@ p <- ggplot(df, aes(x = factor({_data(x)}), fill = factor({_data(x)}))) +
     if stat == "mean" and o.get("error_bars", True):
         err = """  geom_errorbar(aes(ymin = .val - .sd, ymax = .val + .sd), width = 0.2, linewidth = 0.25) +
 """
+    fill_aes = ", fill = .grp" if color_bars else ""
+    fill_layer = (
+        "  geom_col(width = 0.7, alpha = 0.9, colour = \"grey25\", linewidth = 0.25) +\n"
+        "  scale_fill_manual(values = labplot_palette()) +\n"
+        if color_bars else
+        "  geom_col(width = 0.7, alpha = 0.9, fill = labplot_accent(), colour = \"grey25\", linewidth = 0.25) +\n"
+    )
     return f"""
-.summ <- df %>% dplyr::group_by(.grp = factor({_data(x)})) %>%
+{_ORDERED_FACTOR_R}
+.summ <- df %>% dplyr::mutate(.grp = .labplot_ordered_factor({_data(x)})) %>%
+  dplyr::group_by(.grp) %>%
   dplyr::summarise(.val = {fun}({_data(y)}, na.rm = TRUE),
                    .sd = stats::sd({_data(y)}, na.rm = TRUE), .groups = "drop")
 .summ$.sd[is.na(.summ$.sd)] <- 0
-p <- ggplot(.summ, aes(x = .grp, y = .val, fill = .grp)) +
-  geom_col(width = 0.7, alpha = 0.92) +
-{err}  scale_fill_manual(values = labplot_palette()) +
-  {_labs(o, x, f"{fun}({y})")} + guides(fill = "none")
+p <- ggplot(.summ, aes(x = .grp, y = .val{fill_aes})) +
+{fill_layer}{err}  {_labs(o, x, f"{fun}({y})")} + guides(fill = "none")
+"""
+
+
+def _overlap_bar(m, o):
+    x = m["x"]
+    y = m["y"]
+    x2 = m.get("x2") or x
+    y2 = m.get("y2")
+    group = m.get("group")
+    alpha = max(0.15, min(1.0, _num(o.get("bar_alpha"), 0.45)))
+    width = max(0.2, min(1.0, _num(o.get("bar_width"), 0.75)))
+
+    if y2:
+        label1 = o.get("series_1_label") or y
+        label2 = o.get("series_2_label") or y2
+        if o.get("paired_rows_only", True):
+            base = (
+                f".base <- df %>% dplyr::filter(!is.na({_data(x)}), !is.na({_data(y)}), "
+                f"!is.na({_data(x2)}), !is.na({_data(y2)}))\n"
+            )
+        else:
+            base = ".base <- df\n"
+        data_block = f"""
+{base}.s1 <- .base %>%
+  dplyr::transmute(.x = as.character({_data(x)}), .value = suppressWarnings(as.numeric({_data(y)})), .series = {rq(label1)})
+.s2 <- .base %>%
+  dplyr::transmute(.x = as.character({_data(x2)}), .value = suppressWarnings(as.numeric({_data(y2)})), .series = {rq(label2)})
+.plot <- dplyr::bind_rows(.s1, .s2) %>%
+  dplyr::filter(!is.na(.x), !is.na(.value)) %>%
+  dplyr::mutate(.x_f = .labplot_ordered_factor(.x)) %>%
+  dplyr::group_by(.x_f, .series) %>%
+  dplyr::summarise(.value = sum(.value, na.rm = TRUE), .groups = "drop")
+"""
+    elif group:
+        data_block = f"""
+.plot <- df %>%
+  dplyr::transmute(.x = as.character({_data(x)}), .value = suppressWarnings(as.numeric({_data(y)})), .series = factor({_data(group)})) %>%
+  dplyr::filter(!is.na(.x), !is.na(.value), !is.na(.series)) %>%
+  dplyr::mutate(.x_f = .labplot_ordered_factor(.x)) %>%
+  dplyr::group_by(.x_f, .series) %>%
+  dplyr::summarise(.value = sum(.value, na.rm = TRUE), .groups = "drop")
+"""
+    else:
+        data_block = f"""
+.plot <- df %>%
+  dplyr::transmute(.x = as.character({_data(x)}), .value = suppressWarnings(as.numeric({_data(y)})), .series = {rq(y)}) %>%
+  dplyr::filter(!is.na(.x), !is.na(.value)) %>%
+  dplyr::mutate(.x_f = .labplot_ordered_factor(.x)) %>%
+  dplyr::group_by(.x_f, .series) %>%
+  dplyr::summarise(.value = sum(.value, na.rm = TRUE), .groups = "drop")
+"""
+
+    return f"""
+{_ORDERED_FACTOR_R}
+{data_block}
+p <- ggplot(.plot, aes(x = .x_f, y = .value, fill = .series)) +
+  geom_col(position = "identity", alpha = {alpha}, width = {width}, colour = "grey25", linewidth = 0.25) +
+  scale_fill_manual(values = labplot_palette()) +
+  {_labs(o, x, y)} + guides(fill = guide_legend(title = {rq(o.get("legend_title") or "Series")}))
 """
 
 
@@ -521,6 +609,7 @@ _BUILDERS = {
     "violin": _violin,
     "scatter": _scatter,
     "bar": _bar,
+    "overlap_bar": _overlap_bar,
     "line": _line,
     "error_bar": _error_bar,
     "ribbon": _ribbon,
@@ -555,10 +644,22 @@ PLOT_TYPES = [
      "optional": [{"key": "color", "label": "Color by", "roles": ["group", "category", "status"]}],
      "options": [{"key": "add_smooth", "label": "Regression line", "type": "bool", "default": False}]},
     {"type": "bar", "label": "Bar plot",
-     "required": [{"key": "x", "label": "Category (X)", "roles": ["group", "category", "status"]}],
+     "required": [{"key": "x", "label": "Category / bin (X)", "roles": ["group", "category", "status", "numeric", "time"]}],
      "optional": [{"key": "y", "label": "Value (Y)", "roles": ["numeric", "log2fc"]}],
      "options": [{"key": "stat", "label": "Statistic", "type": "select", "choices": ["mean", "sum", "count"], "default": "mean"},
-                 {"key": "error_bars", "label": "Error bars (SD)", "type": "bool", "default": True}]},
+                 {"key": "error_bars", "label": "Error bars (SD)", "type": "bool", "default": True},
+                 {"key": "color_bars", "label": "Color bars by category", "type": "bool", "default": False}]},
+    {"type": "overlap_bar", "label": "Overlapped bar chart",
+     "required": [{"key": "x", "label": "X / bin", "roles": ["numeric", "group", "category", "time"]},
+                  {"key": "y", "label": "Value / count", "roles": ["numeric"]}],
+     "optional": [{"key": "x2", "label": "Second X / bin", "roles": ["numeric", "group", "category", "time"]},
+                  {"key": "y2", "label": "Second value / count", "roles": ["numeric"]},
+                  {"key": "group", "label": "Series / group", "roles": ["group", "category", "status"]}],
+     "options": [{"key": "bar_alpha", "label": "Bar transparency", "type": "number", "default": 0.45},
+                 {"key": "bar_width", "label": "Bar width", "type": "number", "default": 0.75},
+                 {"key": "paired_rows_only", "label": "Use only paired rows", "type": "bool", "default": True},
+                 {"key": "series_1_label", "label": "First series label", "type": "text", "default": ""},
+                 {"key": "series_2_label", "label": "Second series label", "type": "text", "default": ""}]},
     {"type": "line", "label": "Line plot",
      "required": [{"key": "x", "label": "X (time/order)", "roles": ["time", "numeric", "category"]},
                   {"key": "y", "label": "Y (numeric)", "roles": ["numeric"]}],
@@ -1321,7 +1422,7 @@ PLOT_TYPES += [
 ]
 
 PLOT_DOMAINS = {
-    "box": "basic", "violin": "basic", "scatter": "basic", "bar": "basic", "line": "basic",
+    "box": "basic", "violin": "basic", "scatter": "basic", "bar": "basic", "overlap_bar": "basic", "line": "basic",
     "histogram": "basic", "density": "basic", "correlation_heatmap": "basic", "heatmap": "basic",
     "error_bar": "engineering", "ribbon": "engineering", "contour": "engineering", "radar": "engineering",
     "volcano": "omics", "pca": "omics",

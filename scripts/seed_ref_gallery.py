@@ -121,6 +121,18 @@ def _flow_histogram(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _overlapped_bar_distribution() -> pd.DataFrame:
+    bins = list(range(0, 11))
+    reference = [0, 410, 920, 1410, 1850, 2360, 2810, 3340, 3790, 4260, 4720]
+    selected = [0, 360, 640, 650, 505, 345, 180, 98, 38, 15, 8]
+    return pd.DataFrame({
+        "Distance_bin": bins,
+        "Reference_count": reference,
+        "Selected_distance_bin": bins,
+        "Selected_count": selected,
+    })
+
+
 def _pca_columns() -> list[str]:
     return [f"Gene_{idx}" for idx in range(1, 101)]
 
@@ -857,6 +869,25 @@ SEEDS = [
         plot_type="error_bar",
         mapping={"x": "Group", "y": "Mean_Cell_Viability", "error": "SEM"},
         options={**COMMON_OPTIONS, "x_label": "Group", "y_label": "Cell viability (%)", "connect_points": False},
+    ),
+    GallerySeed(
+        key="overlapped_distribution_bar",
+        figure_name="Overlapped distribution bar chart",
+        dataset_name="Gallery seed - overlapped distribution bar chart",
+        dataframe_factory=_overlapped_bar_distribution,
+        plot_type="overlap_bar",
+        mapping={"x": "Distance_bin", "y": "Reference_count", "x2": "Selected_distance_bin", "y2": "Selected_count"},
+        options={
+            **COMMON_OPTIONS,
+            "palette_name": "journal_muted",
+            "x_label": "Distance bin",
+            "y_label": "Count",
+            "legend_title": "Distribution",
+            "series_1_label": "Reference",
+            "series_2_label": "Selected",
+            "bar_alpha": 0.45,
+            "paired_rows_only": True,
+        },
     ),
     GallerySeed(
         key="grouped_error",

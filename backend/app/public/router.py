@@ -39,6 +39,7 @@ PUBLIC_GALLERY_ITEMS: list[tuple[str, str]] = [
     ("Box plot with jitter", "basic"),
     ("Violin plot", "basic"),
     ("Bar chart with error bars", "basic"),
+    ("Overlapped distribution bar chart", "basic"),
     ("Grouped error bar chart", "basic"),
     ("Histogram with density", "basic"),
     ("Cumulative distribution curve", "basic"),

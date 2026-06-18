@@ -43,6 +43,11 @@ class LegendResponse(BaseModel):
     legend: str
 
 
+class LegendRequest(BaseModel):
+    prompt: str | None = Field(default=None, max_length=1500)
+    current_legend: str | None = Field(default=None, max_length=5000)
+
+
 class EnhancePromptRequest(BaseModel):
     draft: str = ""
     kind: str = "dataset_description"
