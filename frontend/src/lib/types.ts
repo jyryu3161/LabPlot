@@ -284,6 +284,24 @@ export interface GalleryFigureItem extends FigureListItem {
   r_url?: string;
 }
 
+export interface FigureTemplateFavoriteItem {
+  id: string;
+  figure_id: string;
+  source_version_id?: string | null;
+  name: string;
+  figure_name: string;
+  plot_type: string;
+  style_preset: string;
+  status: string;
+  dataset_id: string;
+  project_id?: string | null;
+  created_at: string;
+  updated_at: string;
+  figure_updated_at: string;
+  is_favorite: true;
+  thumb_url?: string;
+}
+
 export interface FigureDetail {
   id: string;
   name: string;

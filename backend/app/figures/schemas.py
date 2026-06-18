@@ -34,6 +34,11 @@ class FigureUpdate(BaseModel):
     is_favorite: bool | None = None
 
 
+class TemplateFavoriteRequest(BaseModel):
+    source_version_id: uuid.UUID | None = None
+    name: str | None = Field(default=None, max_length=255)
+
+
 class LegendResponse(BaseModel):
     legend: str
 
@@ -104,6 +109,24 @@ class GalleryFigureItem(BaseModel):
     is_favorite: bool = False
     thumb_url: str | None = None
     r_url: str | None = None
+
+
+class FigureTemplateFavoriteItem(BaseModel):
+    id: uuid.UUID
+    figure_id: uuid.UUID
+    source_version_id: uuid.UUID | None = None
+    name: str
+    figure_name: str
+    plot_type: str
+    style_preset: str
+    status: str
+    dataset_id: uuid.UUID
+    project_id: uuid.UUID | None = None
+    created_at: datetime
+    updated_at: datetime
+    figure_updated_at: datetime
+    is_favorite: bool = True
+    thumb_url: str | None = None
 
 
 class FigureDetail(BaseModel):

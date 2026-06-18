@@ -8,6 +8,7 @@ import { toast } from 'sonner';
 import {
   getDataset, getSavedChartRecommendations, recommendCharts, getPlotTypes, getStyles,
   createFigure, getFigure, getProject, listFigures, updateDataset, recommendChartsFromImage,
+  listFigureTemplateFavorites,
 } from '@/lib/api';
 import { Textarea } from '@/components/ui/textarea';
 import type { ChartSuggestion, FigureDetail, PlotTypeDef } from '@/lib/types';
@@ -211,6 +212,11 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
     queryFn: () => listFigures(),
     enabled: !!ds,
   });
+  const { data: templateFavorites } = useQuery({
+    queryKey: ['figure-template-favorites'],
+    queryFn: listFigureTemplateFavorites,
+    enabled: !!ds,
+  });
   const { data: project } = useQuery({
     queryKey: ['project', ds?.project_id],
     queryFn: () => getProject(ds!.project_id!),
@@ -393,12 +399,17 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
       return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
     })
     .slice(0, 80), [formatFigures]);
-  const favoriteFormatFigures = useMemo(() => formatCopyFigures.filter((figure) => figure.is_favorite).slice(0, 10), [formatCopyFigures]);
+  const favoriteFormatFigures = useMemo(() => (templateFavorites ?? []).slice(0, 10), [templateFavorites]);
 
   const applyFigureFormat = useMutation({
-    mutationFn: (variables: { figureId: string; entryMode?: BuildEntryMode; showPicker?: boolean }) => getFigure(variables.figureId),
-    onSuccess: (source: FigureDetail, variables) => {
-      const version = source.versions.find((item) => item.id === source.current_version_id) ?? source.versions[source.versions.length - 1];
+    mutationFn: async (variables: { figureId: string; versionId?: string | null; entryMode?: BuildEntryMode; showPicker?: boolean }) => ({
+      source: await getFigure(variables.figureId),
+      versionId: variables.versionId,
+    }),
+    onSuccess: ({ source, versionId }: { source: FigureDetail; versionId?: string | null }, variables) => {
+      const version = source.versions.find((item) => item.id === versionId)
+        ?? source.versions.find((item) => item.id === source.current_version_id)
+        ?? source.versions[source.versions.length - 1];
       if (!version) {
         toast.error('Selected figure has no saved version');
         return;
@@ -896,20 +907,20 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                   <div className="space-y-3 rounded-lg border bg-muted/20 p-3">
                     <div className="flex items-center justify-between gap-3">
                       <div>
-                        <p className="text-sm font-medium">Favorite figure templates</p>
-                        <p className="text-xs text-muted-foreground">Copies chart type, style, size, labels, and visual options from a favorited figure. Column mappings are remapped to this dataset.</p>
+                        <p className="text-sm font-medium">Saved figure templates</p>
+                        <p className="text-xs text-muted-foreground">Copies chart type, style, size, labels, and visual options from your saved templates. Column mappings are remapped to this dataset.</p>
                       </div>
                       <Badge variant="secondary">{favoriteFormatFigures.length}</Badge>
                     </div>
                     {favoriteFormatFigures.length === 0 ? (
                       <div className="rounded-lg border border-dashed bg-background p-4 text-sm text-muted-foreground">
-                        Favorite a finished figure to reuse it here.
+                        Save a finished figure as a template to reuse it here.
                       </div>
                     ) : (
                       <div className="grid max-h-64 gap-2 overflow-y-auto pr-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
                         {favoriteFormatFigures.map((figure) => {
                           const compatible = compatiblePlotTypeSet.has(figure.plot_type);
-                          const selected = formatFigureId === figure.id;
+                          const selected = formatFigureId === figure.figure_id;
                           return (
                             <button
                               key={figure.id}
@@ -917,7 +928,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                               data-testid="favorite-template-card"
                               aria-label={`Use favorite figure template ${figure.name}`}
                               disabled={applyFigureFormat.isPending}
-                              onClick={() => applyFigureFormat.mutate({ figureId: figure.id, entryMode: 'template', showPicker: false })}
+                              onClick={() => applyFigureFormat.mutate({ figureId: figure.figure_id, versionId: figure.source_version_id, entryMode: 'template', showPicker: false })}
                               className={`overflow-hidden rounded-lg border bg-background text-left transition ${selected ? 'border-primary ring-2 ring-primary/20' : 'hover:border-primary hover:shadow-sm'} disabled:cursor-not-allowed disabled:opacity-55`}
                             >
                               {figure.thumb_url ? (
@@ -930,7 +941,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                               <div className="space-y-1 p-2">
                                 <p className="truncate text-xs font-medium">{figure.name}</p>
                                 <div className="flex flex-wrap gap-1">
-                                  <Badge variant="default"><Star className="mr-1 h-3 w-3 fill-current" />Favorite</Badge>
+                                  <Badge variant="default"><Star className="mr-1 h-3 w-3 fill-current" />Saved</Badge>
                                   <Badge variant="secondary">{figure.plot_type.replace(/_/g, ' ')}</Badge>
                                   <Badge variant="outline">{formatStylePreset(figure.style_preset)}</Badge>
                                   {!compatible && <Badge variant="outline">check mappings</Badge>}
@@ -1020,7 +1031,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                                 <div className="flex flex-wrap gap-1">
                                   <Badge variant="secondary">{figure.plot_type.replace(/_/g, ' ')}</Badge>
                                   <Badge variant="outline">{formatStylePreset(figure.style_preset)}</Badge>
-                                  {figure.is_favorite && <Badge variant="default"><Star className="mr-1 h-3 w-3 fill-current" />Favorite</Badge>}
+                                  {figure.is_favorite && <Badge variant="default"><Star className="mr-1 h-3 w-3 fill-current" />Saved</Badge>}
                                   {!compatible && <Badge variant="outline">check mappings</Badge>}
                                 </div>
                               </div>

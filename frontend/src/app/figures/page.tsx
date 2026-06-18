@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { listFigures, deleteFigure, updateFigure } from '@/lib/api';
+import { deleteFigureTemplateFavorite, listFigures, deleteFigure, saveFigureTemplateFavorite } from '@/lib/api';
 import { AppHeader } from '@/components/layout/AppHeader';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -20,11 +20,20 @@ export default function FiguresPage() {
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Delete failed'),
   });
   const favorite = useMutation({
-    mutationFn: ({ id, next }: { id: string; next: boolean }) => updateFigure(id, { is_favorite: next }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['figures'] });
+    mutationFn: async ({ id, next }: { id: string; next: boolean }) => {
+      if (next) {
+        await saveFigureTemplateFavorite(id);
+        return true;
+      }
+      await deleteFigureTemplateFavorite(id);
+      return false;
     },
-    onError: (e) => toast.error(e instanceof Error ? e.message : 'Favorite update failed'),
+    onSuccess: (saved) => {
+      toast.success(saved ? 'Saved as a template' : 'Removed from saved templates');
+      qc.invalidateQueries({ queryKey: ['figures'] });
+      qc.invalidateQueries({ queryKey: ['figure-template-favorites'] });
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Template update failed'),
   });
 
   return (
@@ -56,7 +65,7 @@ export default function FiguresPage() {
                     <Button
                       variant="ghost"
                       size="sm"
-                      aria-label={f.is_favorite ? `Remove ${f.name} from favorites` : `Favorite ${f.name}`}
+                      aria-label={f.is_favorite ? `Remove ${f.name} from saved templates` : `Save ${f.name} as template`}
                       onClick={() => favorite.mutate({ id: f.id, next: !f.is_favorite })}
                       disabled={favorite.isPending}
                     >

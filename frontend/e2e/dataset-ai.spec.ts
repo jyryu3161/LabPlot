@@ -79,11 +79,11 @@ test('dataset upload saves purpose, auto-loads AI once, and refreshes with promp
         }),
       });
       if (!figureRes.ok) throw new Error(await figureRes.text());
-      const figure = await figureRes.json() as { id: string; name: string };
-      const favoriteRes = await fetch(`/api/figures/${figure.id}`, {
-        method: 'PATCH',
+      const figure = await figureRes.json() as { id: string; name: string; current_version_id?: string };
+      const favoriteRes = await fetch(`/api/figures/${figure.id}/template-favorite`, {
+        method: 'POST',
         headers: jsonHeaders,
-        body: JSON.stringify({ is_favorite: true }),
+        body: JSON.stringify({ source_version_id: figure.current_version_id }),
       });
       if (!favoriteRes.ok) throw new Error(await favoriteRes.text());
       return { datasetId: dataset.id, figureId: figure.id, figureName: figure.name };
@@ -155,7 +155,7 @@ test('dataset upload saves purpose, auto-loads AI once, and refreshes with promp
     });
     await expect(page.getByText('AI dose response scatter')).toBeVisible();
     const favoriteTemplateFromRecommendations = page.getByRole('button', { name: `Use favorite figure template ${source.figureName}` });
-    await expect(favoriteTemplateFromRecommendations.getByText('Favorite')).toBeVisible();
+    await expect(favoriteTemplateFromRecommendations.getByText('Saved')).toBeVisible();
     await favoriteTemplateFromRecommendations.click();
     await expect(page.locator('[data-testid="in-plot-title"]')).toHaveValue('Copied template title');
     await expect(page.locator('[data-testid="chart-type-select"]')).toHaveValue('scatter');
@@ -179,7 +179,7 @@ test('dataset upload saves purpose, auto-loads AI once, and refreshes with promp
     await page.getByRole('button', { name: 'Back to recommendations' }).click();
     await page.getByRole('button', { name: 'Build manually' }).click();
     const sourceTemplate = page.getByRole('button', { name: `Use figure format ${source.figureName}` });
-    await expect(sourceTemplate.getByText('Favorite')).toBeVisible();
+    await expect(sourceTemplate.getByText('Saved')).toBeVisible();
     await sourceTemplate.click();
     await expect(page.locator('[data-testid="in-plot-title"]')).toHaveValue('Copied template title');
     await expect(page.locator('[data-testid="chart-type-select"]')).toHaveValue('scatter');

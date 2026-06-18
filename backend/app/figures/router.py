@@ -16,6 +16,7 @@ from app.figures.schemas import (
     FigureCreate,
     FigureDetail,
     FigureListItem,
+    FigureTemplateFavoriteItem,
     FigureUpdate,
     GalleryFigureItem,
     ImprovementRequest,
@@ -27,6 +28,7 @@ from app.figures.schemas import (
     RerenderRequest,
     ReviewResponse,
     SvgEditRequest,
+    TemplateFavoriteRequest,
     VersionResponse,
 )
 from app.r_engine.presets import PRESET_LABELS, PRESETS, list_palettes
@@ -113,6 +115,11 @@ def gallery(limit: int = 200, db: Session = Depends(get_db), _: User = Depends(g
     return service.list_gallery_figures(db, limit=limit)
 
 
+@router.get("/template-favorites", response_model=list[FigureTemplateFavoriteItem])
+def list_template_favorites(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    return service.list_template_favorites(db, current_user.id)
+
+
 @router.get("/gallery/{figure_id}/versions/{version_id}/export")
 def gallery_export(figure_id: uuid.UUID, version_id: uuid.UUID, format: str = "r",
                    db: Session = Depends(get_db), _: User = Depends(get_current_user)):
@@ -134,6 +141,28 @@ def get_figure(figure_id: uuid.UUID, db: Session = Depends(get_db), current_user
 @router.patch("/{figure_id}", response_model=FigureDetail)
 def update_figure(figure_id: uuid.UUID, data: FigureUpdate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     return service.update_figure(db, figure_id, current_user.id, data.model_dump(exclude_unset=True))
+
+
+@router.post("/{figure_id}/template-favorite", response_model=FigureTemplateFavoriteItem)
+def save_template_favorite(
+    figure_id: uuid.UUID,
+    data: TemplateFavoriteRequest | None = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    req = data or TemplateFavoriteRequest()
+    return service.save_template_favorite(
+        db,
+        figure_id,
+        current_user.id,
+        source_version_id=req.source_version_id,
+        name=req.name,
+    )
+
+
+@router.delete("/{figure_id}/template-favorite", status_code=204)
+def remove_template_favorite(figure_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    service.remove_template_favorite(db, figure_id, current_user.id)
 
 
 @router.post("/{figure_id}/versions/{version_id}/legend", response_model=LegendResponse,

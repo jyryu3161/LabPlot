@@ -7,7 +7,7 @@ import { toast } from 'sonner';
 import {
   getFigure, getDataset, getPlotTypes, getStyles, getPalettes, rerenderFigure, reviewVersion,
   improveVersion, applyImprovement, updateFigure, generateLegend, downloadExport, enhancePrompt, saveSvgEditVersion,
-  deleteFigureVersion, getProject,
+  deleteFigureVersion, getProject, saveFigureTemplateFavorite, deleteFigureTemplateFavorite,
 } from '@/lib/api';
 import type { FigureVersion, Review, Improvement, PlotTypeDef, ColumnProfile } from '@/lib/types';
 import { formatStylePreset } from '@/lib/style-presets';
@@ -131,14 +131,22 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Version delete failed'),
   });
   const toggleFavorite = useMutation({
-    mutationFn: () => updateFigure(id, { is_favorite: !fig?.is_favorite }),
-    onSuccess: (updated) => {
-      toast.success(updated.is_favorite ? 'Added to favorites' : 'Removed from favorites');
-      qc.setQueryData(['figure', id], updated);
+    mutationFn: async () => {
+      if (fig?.is_favorite) {
+        await deleteFigureTemplateFavorite(id);
+        return false;
+      }
+      await saveFigureTemplateFavorite(id, { source_version_id: effectiveSelectedVid ?? undefined });
+      return true;
+    },
+    onSuccess: (saved) => {
+      toast.success(saved ? 'Saved as a template' : 'Removed from saved templates');
+      qc.setQueryData(['figure', id], fig ? { ...fig, is_favorite: saved } : fig);
       qc.invalidateQueries({ queryKey: ['figure', id] });
       qc.invalidateQueries({ queryKey: ['figures'] });
+      qc.invalidateQueries({ queryKey: ['figure-template-favorites'] });
     },
-    onError: (e) => toast.error(e instanceof Error ? e.message : 'Favorite update failed'),
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Template update failed'),
   });
 
   async function doExport(fmt: string) {
@@ -185,19 +193,17 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
           <Badge variant="secondary">{fig.plot_type}</Badge>
           <Badge variant="outline">{formatStylePreset(fig.style_preset)}</Badge>
           {isViewerOnly && <Badge variant="outline">viewer</Badge>}
-          {canEditFigure && (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => toggleFavorite.mutate()}
-              disabled={toggleFavorite.isPending}
-              aria-label={fig.is_favorite ? 'Remove from favorites' : 'Add to favorites'}
-            >
-              <Star className={`h-4 w-4 ${fig.is_favorite ? 'fill-amber-400 text-amber-500' : 'text-muted-foreground'}`} />
-              {fig.is_favorite ? 'Favorited' : 'Favorite'}
-            </Button>
-          )}
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => toggleFavorite.mutate()}
+            disabled={toggleFavorite.isPending}
+            aria-label={fig.is_favorite ? 'Remove from saved templates' : 'Save as template'}
+          >
+            <Star className={`h-4 w-4 ${fig.is_favorite ? 'fill-amber-400 text-amber-500' : 'text-muted-foreground'}`} />
+            {fig.is_favorite ? 'Saved template' : 'Save as template'}
+          </Button>
         </div>
 
         <div className="grid gap-6 lg:grid-cols-3">

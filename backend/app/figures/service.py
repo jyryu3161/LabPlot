@@ -19,7 +19,7 @@ from app.common.quotas import enforce_render_quota
 from app.config import settings
 from app.datasets.models import Dataset
 from app.datasets import service as ds_service
-from app.figures.models import Figure, FigureCodeArtifact, FigureVersion, Improvement, Recommendation, Review
+from app.figures.models import Figure, FigureCodeArtifact, FigureTemplateFavorite, FigureVersion, Improvement, Recommendation, Review
 from app.projects.models import Project
 from app.r_engine import renderer
 from app.r_engine.presets import PRESETS
@@ -174,6 +174,71 @@ def get_version(fig: Figure, version_id: uuid.UUID) -> FigureVersion:
     raise NotFoundError("FigureVersion", str(version_id))
 
 
+def _current_or_latest_version(fig: Figure) -> FigureVersion | None:
+    if not fig.versions:
+        return None
+    if fig.current_version_id:
+        for version in fig.versions:
+            if version.id == fig.current_version_id:
+                return version
+    return max(fig.versions, key=lambda version: version.version_number)
+
+
+def _favorite_version(fig: Figure, favorite: FigureTemplateFavorite) -> FigureVersion | None:
+    if favorite.source_version_id:
+        for version in fig.versions:
+            if version.id == favorite.source_version_id:
+                return version
+    return _current_or_latest_version(fig)
+
+
+def _favorite_figure_ids(db: Session, owner_id: uuid.UUID, figure_ids: list[uuid.UUID]) -> set[uuid.UUID]:
+    if not figure_ids:
+        return set()
+    rows = (
+        db.query(FigureTemplateFavorite.figure_id)
+        .filter(FigureTemplateFavorite.user_id == owner_id, FigureTemplateFavorite.figure_id.in_(figure_ids))
+        .all()
+    )
+    return {row[0] for row in rows}
+
+
+def _is_template_favorite(db: Session, owner_id: uuid.UUID, figure_id: uuid.UUID) -> bool:
+    return db.query(FigureTemplateFavorite.id).filter(
+        FigureTemplateFavorite.user_id == owner_id,
+        FigureTemplateFavorite.figure_id == figure_id,
+    ).first() is not None
+
+
+def template_favorite_response(favorite: FigureTemplateFavorite) -> dict:
+    fig = favorite.figure
+    version = _favorite_version(fig, favorite)
+    thumb_path = None
+    source_version_id = favorite.source_version_id
+    style_preset = fig.style_preset
+    if version:
+        thumb_path = version.png_path or version.svg_path
+        source_version_id = version.id
+        style_preset = version.style_preset or fig.style_preset
+    return {
+        "id": favorite.id,
+        "figure_id": fig.id,
+        "source_version_id": source_version_id,
+        "name": favorite.name or fig.name,
+        "figure_name": fig.name,
+        "plot_type": fig.plot_type,
+        "style_preset": style_preset,
+        "status": fig.status,
+        "dataset_id": fig.dataset_id,
+        "project_id": fig.project_id,
+        "created_at": favorite.created_at,
+        "updated_at": favorite.updated_at,
+        "figure_updated_at": fig.updated_at,
+        "is_favorite": True,
+        "thumb_url": _url(thumb_path),
+    }
+
+
 def list_figures(db: Session, owner_id: uuid.UUID, project_id: uuid.UUID | None = None) -> list[dict]:
     from app.projects import service as project_service
 
@@ -187,17 +252,35 @@ def list_figures(db: Session, owner_id: uuid.UUID, project_id: uuid.UUID | None 
     else:
         ids = project_service.accessible_project_ids(db, owner_id)
         q = q.filter(or_(Figure.owner_id == owner_id, Figure.project_id.in_(ids)))
-    rows = q.order_by(Figure.is_favorite.desc(), Figure.updated_at.desc()).all()
+    rows = q.order_by(Figure.updated_at.desc()).all()
+    favorite_ids = _favorite_figure_ids(db, owner_id, [f.id for f, _ in rows])
     out = []
     for f, png_path in rows:
         out.append({
             "id": f.id, "name": f.name, "plot_type": f.plot_type, "style_preset": f.style_preset,
             "status": f.status, "dataset_id": f.dataset_id, "project_id": f.project_id,
             "created_at": f.created_at, "updated_at": f.updated_at,
-            "is_favorite": bool(f.is_favorite),
+            "is_favorite": f.id in favorite_ids,
             "thumb_url": _url(png_path),
         })
-    return out
+    return sorted(out, key=lambda item: (item["is_favorite"], item["updated_at"]), reverse=True)
+
+
+def list_template_favorites(db: Session, owner_id: uuid.UUID) -> list[dict]:
+    from app.projects import service as project_service
+
+    accessible_project_ids = project_service.accessible_project_ids(db, owner_id)
+    q = (
+        db.query(FigureTemplateFavorite)
+        .join(Figure, FigureTemplateFavorite.figure_id == Figure.id)
+        .options(joinedload(FigureTemplateFavorite.figure).joinedload(Figure.versions))
+        .filter(
+            FigureTemplateFavorite.user_id == owner_id,
+            or_(Figure.owner_id == owner_id, Figure.project_id.in_(accessible_project_ids)),
+        )
+        .order_by(FigureTemplateFavorite.updated_at.desc())
+    )
+    return [template_favorite_response(row) for row in q.all()]
 
 
 def list_gallery_figures(db: Session, limit: int = 200) -> list[dict]:
@@ -250,18 +333,65 @@ def figure_detail(db: Session, figure_id: uuid.UUID, owner_id: uuid.UUID) -> dic
         "description": fig.description, "legend": fig.legend,
         "current_version_id": fig.current_version_id,
         "created_at": fig.created_at, "updated_at": fig.updated_at,
-        "is_favorite": bool(fig.is_favorite),
+        "is_favorite": _is_template_favorite(db, owner_id, fig.id),
         "versions": [version_response(v) for v in sorted(fig.versions, key=lambda x: x.version_number)],
     }
 
 
 def update_figure(db: Session, figure_id: uuid.UUID, owner_id: uuid.UUID, data: dict) -> dict:
-    fig = get_figure(db, figure_id, owner_id, write=True)
-    for k in ("name", "description", "legend", "is_favorite"):
-        if k in data and data[k] is not None:
-            setattr(fig, k, data[k])
-    db.commit()
+    favorite_value = data.pop("is_favorite", None) if "is_favorite" in data else None
+    metadata = {k: v for k, v in data.items() if k in {"name", "description", "legend"} and v is not None}
+    if metadata:
+        fig = get_figure(db, figure_id, owner_id, write=True)
+        for key, value in metadata.items():
+            setattr(fig, key, value)
+        db.commit()
+    if favorite_value is True:
+        save_template_favorite(db, figure_id, owner_id)
+    elif favorite_value is False:
+        remove_template_favorite(db, figure_id, owner_id)
     return figure_detail(db, figure_id, owner_id)
+
+
+def save_template_favorite(
+    db: Session,
+    figure_id: uuid.UUID,
+    owner_id: uuid.UUID,
+    source_version_id: uuid.UUID | None = None,
+    name: str | None = None,
+) -> dict:
+    fig = get_figure(db, figure_id, owner_id)
+    source_version = get_version(fig, source_version_id) if source_version_id else _current_or_latest_version(fig)
+    favorite = db.query(FigureTemplateFavorite).filter(
+        FigureTemplateFavorite.user_id == owner_id,
+        FigureTemplateFavorite.figure_id == figure_id,
+    ).first()
+    cleaned_name = name.strip() if isinstance(name, str) and name.strip() else None
+    if favorite:
+        favorite.source_version_id = source_version.id if source_version else None
+        favorite.name = cleaned_name
+    else:
+        favorite = FigureTemplateFavorite(
+            user_id=owner_id,
+            figure_id=figure_id,
+            source_version_id=source_version.id if source_version else None,
+            name=cleaned_name,
+        )
+        db.add(favorite)
+    db.commit()
+    db.refresh(favorite)
+    return template_favorite_response(favorite)
+
+
+def remove_template_favorite(db: Session, figure_id: uuid.UUID, owner_id: uuid.UUID) -> None:
+    get_figure(db, figure_id, owner_id)
+    favorite = db.query(FigureTemplateFavorite).filter(
+        FigureTemplateFavorite.user_id == owner_id,
+        FigureTemplateFavorite.figure_id == figure_id,
+    ).first()
+    if favorite:
+        db.delete(favorite)
+        db.commit()
 
 
 def generate_legend(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, owner_id: uuid.UUID, style: str = "nature") -> dict:

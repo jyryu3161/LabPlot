@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import relationship
 
@@ -34,6 +34,7 @@ class Figure(Base):
     dataset = relationship("Dataset", back_populates="figures")
     versions = relationship("FigureVersion", back_populates="figure",
                             cascade="all, delete-orphan", order_by="FigureVersion.version_number")
+    template_favorites = relationship("FigureTemplateFavorite", back_populates="figure", cascade="all, delete-orphan")
 
 
 class FigureVersion(Base):
@@ -58,6 +59,25 @@ class FigureVersion(Base):
     figure = relationship("Figure", back_populates="versions")
     reviews = relationship("Review", back_populates="version", cascade="all, delete-orphan")
     improvements = relationship("Improvement", back_populates="version", cascade="all, delete-orphan")
+
+
+class FigureTemplateFavorite(Base):
+    __tablename__ = "figure_template_favorites"
+    __table_args__ = (
+        UniqueConstraint("user_id", "figure_id", name="uq_figure_template_favorites_user_figure"),
+    )
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    figure_id = Column(UUID(as_uuid=True), ForeignKey("figures.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_version_id = Column(UUID(as_uuid=True), ForeignKey("figure_versions.id", ondelete="SET NULL"), nullable=True, index=True)
+    name = Column(String(255), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=_now)
+    updated_at = Column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+    user = relationship("User", back_populates="figure_template_favorites")
+    figure = relationship("Figure", back_populates="template_favorites")
+    source_version = relationship("FigureVersion")
 
 
 class FigureCodeArtifact(Base):

@@ -28,6 +28,7 @@ class User(Base):
 
     datasets = relationship("Dataset", back_populates="owner", cascade="all, delete-orphan")
     figures = relationship("Figure", back_populates="owner", cascade="all, delete-orphan")
+    figure_template_favorites = relationship("FigureTemplateFavorite", back_populates="user", cascade="all, delete-orphan")
     password_reset_tokens = relationship("PasswordResetToken", back_populates="user", cascade="all, delete-orphan")
 
 

@@ -2,7 +2,7 @@ import type {
   User, TokenResponse, LoginRequest, RegisterRequest,
   DatasetIngestOptions, DatasetListItem, DatasetDetail, DatasetPreview, ChartSuggestion, PlotTypeDef, StyleDef,
   FigureListItem, FigureDetail, FigureVersion, Review, Improvement, AdminUser, AIConfig, GalleryFigureItem, AuditLogItem,
-  ClientErrorItem, Project, ProjectListItem, EmailDeliveryStatus,
+  ClientErrorItem, Project, ProjectListItem, EmailDeliveryStatus, FigureTemplateFavoriteItem,
   MembershipItem, MyOrganizationItem, OrganizationAIConfig, OrganizationItem, OrganizationSearchItem, OrganizationUsageSummary, OrganizationUserSearchItem,
   ProjectCollaborator, ProjectInvitation, ProjectUserSearchItem, GalleryTemplate, RecommendationCache,
 } from './types';
@@ -313,6 +313,9 @@ export async function listFigures(projectId?: string): Promise<FigureListItem[]>
 export async function listGalleryFigures(limit = 200): Promise<GalleryFigureItem[]> {
   return fetcher(`/api/figures/gallery?limit=${limit}`);
 }
+export async function listFigureTemplateFavorites(): Promise<FigureTemplateFavoriteItem[]> {
+  return fetcher('/api/figures/template-favorites');
+}
 export async function getFigure(id: string): Promise<FigureDetail> { return fetcher(`/api/figures/${id}`); }
 export async function deleteFigure(id: string): Promise<void> { return fetcher(`/api/figures/${id}`, { method: 'DELETE' }); }
 export async function deleteFigureVersion(figureId: string, versionId: string): Promise<FigureDetail> {
@@ -320,6 +323,12 @@ export async function deleteFigureVersion(figureId: string, versionId: string): 
 }
 export async function updateFigure(id: string, data: { name?: string; description?: string; legend?: string; is_favorite?: boolean }): Promise<FigureDetail> {
   return fetcher(`/api/figures/${id}`, { method: 'PATCH', body: JSON.stringify(data) });
+}
+export async function saveFigureTemplateFavorite(id: string, data?: { source_version_id?: string; name?: string }): Promise<FigureTemplateFavoriteItem> {
+  return fetcher(`/api/figures/${id}/template-favorite`, { method: 'POST', body: JSON.stringify(data ?? {}) });
+}
+export async function deleteFigureTemplateFavorite(id: string): Promise<void> {
+  return fetcher(`/api/figures/${id}/template-favorite`, { method: 'DELETE' });
 }
 export async function generateLegend(figureId: string, versionId: string): Promise<{ legend: string }> {
   return fetcher(`/api/figures/${figureId}/versions/${versionId}/legend`, { method: 'POST' });
