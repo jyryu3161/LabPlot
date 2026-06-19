@@ -6,7 +6,7 @@ import Link from 'next/link';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import {
-  getDataset, getSavedChartRecommendations, recommendCharts, getPlotTypes, getStyles,
+  getDataset, getSavedChartRecommendations, recommendCharts, getPlotTypes, getStyles, getPalettes,
   createFigure, getFigure, getProject, listFigures, updateDataset, recommendChartsFromImage,
   listFigureTemplateFavorites,
 } from '@/lib/api';
@@ -151,6 +151,10 @@ function defaultOptions(def: PlotTypeDef | undefined) {
   return options;
 }
 
+function defaultBuildOptions(def: PlotTypeDef | undefined, paletteName = 'journal_muted') {
+  return { ...defaultOptions(def), palette_name: paletteName };
+}
+
 function remapTemplateMapping(def: PlotTypeDef | undefined, sourceMapping: Record<string, unknown>, columns: ColumnShape[]) {
   if (!def) return {};
   const used = new Set<string>();
@@ -202,6 +206,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
   });
   const { data: plotTypesData } = useQuery({ queryKey: ['plot-types'], queryFn: getPlotTypes });
   const { data: stylesData } = useQuery({ queryKey: ['styles'], queryFn: getStyles });
+  const { data: palettesData } = useQuery({ queryKey: ['palettes'], queryFn: getPalettes });
   const { data: figures } = useQuery({
     queryKey: ['figures', ds?.project_id ?? 'all'],
     queryFn: () => listFigures(ds?.project_id ?? undefined),
@@ -270,6 +275,12 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
 
   const plotTypes = useMemo(() => plotTypesData?.plot_types ?? [], [plotTypesData?.plot_types]);
   const styles = useMemo(() => stylesData?.styles ?? [], [stylesData?.styles]);
+  const palettes = useMemo(() => palettesData?.palettes ?? [], [palettesData?.palettes]);
+  const paletteOptions = useMemo(() => (
+    palettes.length
+      ? palettes
+      : [{ key: 'journal_muted', label: 'LabPlot Academic muted', colorblind_safe: false, hex: [] }]
+  ), [palettes]);
   const columns = useMemo(() => (ds?.column_profile ?? []) as ColumnShape[], [ds?.column_profile]);
   const savedColumnRoles = useMemo(() => columnRoleSnapshot(columns), [columns]);
   const columnRoles = columnRolesDraft ?? savedColumnRoles;
@@ -384,6 +395,8 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
   const [formatFigureId, setFormatFigureId] = useState('');
   const [buildEntryMode, setBuildEntryMode] = useState<BuildEntryMode>('manual');
   const [showFormatTemplatePicker, setShowFormatTemplatePicker] = useState(false);
+  const buildPaletteKey = String(options.palette_name ?? 'journal_muted');
+  const selectedBuildPalette = paletteOptions.find((palette) => palette.key === buildPaletteKey);
 
   const currentDef: PlotTypeDef | undefined = useMemo(
     () => plotTypes.find((p) => p.type === plotType), [plotTypes, plotType]);
@@ -417,7 +430,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
       const def = plotTypes.find((plot) => plot.type === source.plot_type);
       setPlotType(source.plot_type);
       setMapping(remapTemplateMapping(def, version.mapping ?? {}, columns));
-      setOptions({ ...defaultOptions(def), ...(version.options ?? {}) });
+      setOptions({ ...defaultBuildOptions(def), ...(version.options ?? {}) });
       setStyle(version.style_preset);
       setName(`${ds?.name ?? 'figure'} - ${source.name} format`);
       setFormatFigureId(source.id);
@@ -441,7 +454,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
     setShowFormatTemplatePicker(entryMode === 'manual' && showTemplates);
     setPlotType(pt);
     setMapping(presetMapping ? { ...presetMapping } : {});
-    setOptions(defaultOptions(def));
+    setOptions(defaultBuildOptions(def, buildPaletteKey));
     if (!name) setName(`${ds?.name ?? 'figure'} - ${def?.label ?? pt}`);
     setVisualizeStep('build');
     document.getElementById('builder')?.scrollIntoView({ behavior: 'smooth' });
@@ -529,7 +542,14 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
   }
 
   const create = useMutation({
-    mutationFn: () => createFigure({ dataset_id: id, name: name || 'Untitled', plot_type: plotType, mapping, options, style_preset: style }),
+    mutationFn: () => createFigure({
+      dataset_id: id,
+      name: name || 'Untitled',
+      plot_type: plotType,
+      mapping,
+      options: { ...options, palette_name: buildPaletteKey },
+      style_preset: style,
+    }),
     onSuccess: (fig) => { toast.success('Figure created'); router.push(`/figures/${fig.id}`); },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Render failed'),
   });
@@ -1100,7 +1120,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                       </div>
                     )}
 
-                    <div className="grid gap-4 md:grid-cols-2">
+                    <div className="grid gap-4 md:grid-cols-3">
                       <div className="space-y-1">
                         <Label>In-plot title (usually blank)</Label>
                         <Input data-testid="in-plot-title" value={String(options.title ?? '')} onChange={(e) => setOptions({ ...options, title: e.target.value })} placeholder="Leave blank for manuscript-style figures" />
@@ -1110,6 +1130,25 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                         <select className="w-full rounded-md border px-3 py-2 text-sm" value={style} onChange={(e) => setStyle(e.target.value)}>
                           {styles.map((s) => <option key={s.key} value={s.key}>{s.label}</option>)}
                         </select>
+                      </div>
+                      <div className="space-y-1">
+                        <Label>Color palette</Label>
+                        <select
+                          className="w-full rounded-md border px-3 py-2 text-sm"
+                          value={buildPaletteKey}
+                          onChange={(e) => setOptions({ ...options, palette_name: e.target.value })}
+                        >
+                          {paletteOptions.map((palette) => (
+                            <option key={palette.key} value={palette.key}>{palette.label}</option>
+                          ))}
+                        </select>
+                        {selectedBuildPalette?.hex?.length ? (
+                          <div className="flex gap-0.5 pt-1">
+                            {selectedBuildPalette.hex.map((hex) => (
+                              <span key={hex} className="h-3 w-4 rounded-sm border" style={{ backgroundColor: hex }} />
+                            ))}
+                          </div>
+                        ) : null}
                       </div>
                     </div>
 
