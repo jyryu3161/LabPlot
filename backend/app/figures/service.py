@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import os
 import re
 import shutil
@@ -57,6 +59,8 @@ _NUMBER_OPTIONS = {
 }
 _MAX_SVG_BYTES = 5 * 1024 * 1024
 _BLOCKED_SVG_TAGS = {"script", "foreignobject", "iframe", "object", "embed", "link"}
+_MAX_AI_EDITOR_IMAGE_BYTES = 8 * 1024 * 1024
+_AI_EDITOR_IMAGE_MIME_TYPES = {"image/png", "image/jpeg", "image/webp"}
 
 
 def _project_context(db: Session, project_id) -> str | None:
@@ -98,6 +102,33 @@ def _friendly_error(log: str) -> str:
     if msg.startswith("A selected column") or msg.startswith("A column expected"):
         return msg
     return "Rendering failed. Check the chart type, column mappings, and options."
+
+
+def _decode_ai_editor_image(data_url: str | None) -> tuple[bytes, str] | None:
+    if not data_url:
+        return None
+    if not isinstance(data_url, str):
+        raise BadRequestError("Annotated image must be a data URL.", error_code="BAD_ANNOTATED_IMAGE")
+    raw = data_url.strip()
+    mime = "image/png"
+    payload = raw
+    if raw.startswith("data:"):
+        header, sep, encoded = raw.partition(",")
+        if not sep or ";base64" not in header.lower():
+            raise BadRequestError("Annotated image must be base64 encoded.", error_code="BAD_ANNOTATED_IMAGE")
+        mime = header[5:].split(";", 1)[0].lower()
+        payload = encoded
+    if mime not in _AI_EDITOR_IMAGE_MIME_TYPES:
+        raise BadRequestError("Annotated image must be PNG, JPEG, or WebP.", error_code="BAD_ANNOTATED_IMAGE_TYPE")
+    try:
+        image_bytes = base64.b64decode(payload, validate=True)
+    except (binascii.Error, ValueError):
+        raise BadRequestError("Annotated image could not be decoded.", error_code="BAD_ANNOTATED_IMAGE")
+    if len(image_bytes) > _MAX_AI_EDITOR_IMAGE_BYTES:
+        raise BadRequestError("Annotated image must be 8 MB or smaller.", error_code="ANNOTATED_IMAGE_TOO_LARGE")
+    if not image_bytes:
+        raise BadRequestError("Annotated image is empty.", error_code="EMPTY_ANNOTATED_IMAGE")
+    return image_bytes, mime
 
 
 def _plot_def(plot_type: str) -> dict:
@@ -951,7 +982,7 @@ def review_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, own
 
 
 def improve_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, owner_id: uuid.UUID,
-                    prompt: str | None = None) -> list[Improvement]:
+                    prompt: str | None = None, annotated_image: str | None = None) -> list[Improvement]:
     fig = get_figure(db, figure_id, owner_id, write=True)
     v = get_version(fig, version_id)
     last_review = (db.query(Review).filter(Review.figure_version_id == version_id)
@@ -959,11 +990,18 @@ def improve_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, ow
     pdef = _plot_def(fig.plot_type)
     available = {"options": pdef.get("options", []),
                  "mapping_keys": [r["key"] for r in pdef["required"]] + [o["key"] for o in pdef.get("optional", [])]}
+    image_payload = _decode_ai_editor_image(annotated_image)
+    if image_payload is None and v.png_path and storage.exists(v.png_path):
+        png_path = storage.materialize(v.png_path, suffix=".png")
+        with open(png_path, "rb") as f:
+            image_payload = (f.read(), "image/png")
     suggestions = ai_client.improve_figure(
         db, fig.plot_type, v.mapping or {}, v.options or {}, fig.style_preset,
         last_review.payload if last_review else None, [available],
         project_context=_project_context(db, fig.project_id), user_id=owner_id,
         user_request=(prompt or "").strip() or None,
+        rendered_image=image_payload,
+        r_code=v.r_code,
     )
     rows = []
     for s in suggestions:

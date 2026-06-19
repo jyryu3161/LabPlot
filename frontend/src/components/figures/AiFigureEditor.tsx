@@ -14,6 +14,11 @@ import type { Improvement } from '@/lib/types';
 type AnnotationTool = 'select' | 'region' | 'arrow' | 'note';
 type AnnotationType = Exclude<AnnotationTool, 'select'>;
 
+interface AiEditPayload {
+  prompt: string;
+  annotated_image?: string;
+}
+
 interface Annotation {
   id: string;
   type: AnnotationType;
@@ -45,8 +50,8 @@ interface AiFigureEditorProps {
   isApplyingSuggestion?: boolean;
   canEdit?: boolean;
   onPromptChange: (value: string) => void;
-  onSuggest: (prompt: string) => void;
-  onApplyPrompt: (prompt: string) => void;
+  onSuggest: (request: AiEditPayload) => void;
+  onApplyPrompt: (request: AiEditPayload) => void;
   onApplySuggestion: (improvementId: string) => void;
   onApplySuggestions: (improvementIds: string[]) => void;
 }
@@ -82,7 +87,7 @@ function annotationSummary(annotation: Annotation, index: number): string {
 
 function buildLocalizedPrompt(prompt: string, annotations: Annotation[]): string {
   const base = prompt.trim();
-  const valid = annotations.filter((annotation) => annotation.text.trim() || annotation.type !== 'note');
+  const valid = annotations.filter((annotation) => annotation.text.trim() || base);
   if (!valid.length) return base;
   const annotationText = valid.map(annotationSummary).join('\n');
   return [
@@ -94,6 +99,94 @@ function buildLocalizedPrompt(prompt: string, annotations: Annotation[]): string
     'If several marks are present, satisfy all non-conflicting memos. If a memo is ambiguous, choose the smallest conservative manuscript-style change that addresses the marked region.',
     annotationText,
   ].join('\n');
+}
+
+function loadImage(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    if (src.startsWith('http') && !src.startsWith(window.location.origin)) {
+      image.crossOrigin = 'anonymous';
+    }
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error('Could not load figure preview for annotation export'));
+    image.src = src;
+  });
+}
+
+function drawArrow(ctx: CanvasRenderingContext2D, x1: number, y1: number, x2: number, y2: number, scale: number) {
+  const head = Math.max(9, 12 * scale);
+  const angle = Math.atan2(y2 - y1, x2 - x1);
+  ctx.beginPath();
+  ctx.moveTo(x1, y1);
+  ctx.lineTo(x2, y2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(x2, y2);
+  ctx.lineTo(x2 - head * Math.cos(angle - Math.PI / 6), y2 - head * Math.sin(angle - Math.PI / 6));
+  ctx.lineTo(x2 - head * Math.cos(angle + Math.PI / 6), y2 - head * Math.sin(angle + Math.PI / 6));
+  ctx.closePath();
+  ctx.fill();
+}
+
+async function renderAnnotatedImage(imageUrl: string | null | undefined, annotations: Annotation[]): Promise<string | undefined> {
+  if (!imageUrl || annotations.length === 0 || typeof document === 'undefined') return undefined;
+  const image = await loadImage(imageUrl);
+  const width = Math.max(1, image.naturalWidth || image.width);
+  const height = Math.max(1, image.naturalHeight || image.height);
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return undefined;
+
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, width, height);
+  ctx.drawImage(image, 0, 0, width, height);
+
+  const scale = Math.max(0.75, Math.min(2.5, Math.min(width, height) / 700));
+  ctx.lineWidth = Math.max(2, 2.2 * scale);
+  ctx.strokeStyle = '#2563eb';
+  ctx.fillStyle = 'rgba(37, 99, 235, 0.14)';
+  ctx.font = `${Math.max(13, 15 * scale)}px sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  annotations.forEach((annotation, index) => {
+    const x = (annotation.x / 100) * width;
+    const y = (annotation.y / 100) * height;
+    ctx.strokeStyle = '#2563eb';
+    ctx.fillStyle = 'rgba(37, 99, 235, 0.14)';
+    if (annotation.type === 'region') {
+      const w = ((annotation.w ?? 0) / 100) * width;
+      const h = ((annotation.h ?? 0) / 100) * height;
+      ctx.fillRect(x, y, w, h);
+      ctx.setLineDash([8 * scale, 5 * scale]);
+      ctx.strokeRect(x, y, w, h);
+      ctx.setLineDash([]);
+    } else if (annotation.type === 'arrow') {
+      ctx.fillStyle = '#2563eb';
+      drawArrow(ctx, x, y, ((annotation.x2 ?? annotation.x) / 100) * width, ((annotation.y2 ?? annotation.y) / 100) * height, scale);
+    } else {
+      ctx.beginPath();
+      ctx.arc(x, y, Math.max(8, 9 * scale), 0, Math.PI * 2);
+      ctx.fillStyle = '#2563eb';
+      ctx.fill();
+    }
+
+    const labelRadius = Math.max(11, 13 * scale);
+    ctx.beginPath();
+    ctx.arc(x, y, labelRadius, 0, Math.PI * 2);
+    ctx.fillStyle = '#ffffff';
+    ctx.fill();
+    ctx.strokeStyle = '#2563eb';
+    ctx.lineWidth = Math.max(1.5, 1.8 * scale);
+    ctx.stroke();
+    ctx.fillStyle = '#2563eb';
+    ctx.font = `700 ${Math.max(13, 15 * scale)}px sans-serif`;
+    ctx.fillText(String(index + 1), x, y + 0.5);
+  });
+
+  return canvas.toDataURL('image/png');
 }
 
 function annotationBounds(annotation: Annotation) {
@@ -145,9 +238,12 @@ export function AiFigureEditor({
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [selectedImprovementIds, setSelectedImprovementIds] = useState<string[]>([]);
+  const [isPreparingImage, setIsPreparingImage] = useState(false);
   const [drag, setDrag] = useState<DraftDrag | null>(null);
 
   const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+  const hasAnnotations = annotations.length > 0;
+  const hasMarkedInstructions = annotations.some((annotation) => annotation.text.trim());
   const selectableImprovementIds = useMemo(
     () => (improvements ?? []).filter((imp) => !imp.applied).map((imp) => imp.id),
     [improvements],
@@ -160,7 +256,8 @@ export function AiFigureEditor({
   const allSelectableSuggestionsChecked = selectableImprovementIds.length > 0
     && selectableImprovementIds.every((id) => selectedImprovementIdSet.has(id));
   const combinedPrompt = useMemo(() => buildLocalizedPrompt(prompt, annotations), [annotations, prompt]);
-  const canRun = canEdit && Boolean(imageUrl) && Boolean(combinedPrompt.trim());
+  const canPreview = canEdit && Boolean(imageUrl);
+  const canRun = canEdit && Boolean(imageUrl) && Boolean(prompt.trim() || hasMarkedInstructions);
 
   function updateAnnotationText(id: string, value: string) {
     setAnnotations((items) => items.map((item) => item.id === id ? { ...item, text: value } : item));
@@ -279,6 +376,39 @@ export function AiFigureEditor({
 
   function removeSelected() {
     removeAnnotations(selectedIds);
+  }
+
+  async function buildEditPayload(): Promise<AiEditPayload> {
+    const payload: AiEditPayload = { prompt: combinedPrompt };
+    if (hasAnnotations) {
+      try {
+        const annotatedImage = await renderAnnotatedImage(imageUrl, annotations);
+        if (annotatedImage) payload.annotated_image = annotatedImage;
+      } catch {
+        // The backend will still attach the current rendered PNG and use the coordinate summaries.
+      }
+    }
+    return payload;
+  }
+
+  async function handleApplyPrompt() {
+    if (!canRun) return;
+    setIsPreparingImage(true);
+    try {
+      onApplyPrompt(await buildEditPayload());
+    } finally {
+      setIsPreparingImage(false);
+    }
+  }
+
+  async function handleSuggest() {
+    if (!canPreview) return;
+    setIsPreparingImage(true);
+    try {
+      onSuggest(await buildEditPayload());
+    } finally {
+      setIsPreparingImage(false);
+    }
   }
 
   return (
@@ -417,15 +547,18 @@ export function AiFigureEditor({
 
             <div className="grid gap-3 md:grid-cols-[1fr_1fr]">
               <div className="space-y-1">
-                <Label htmlFor="ai-editor-prompt" className="text-xs">Edit request</Label>
+                <Label htmlFor="ai-editor-prompt" className="text-xs">{hasAnnotations ? 'Additional edit request (optional)' : 'Edit request'}</Label>
                 <Textarea
                   id="ai-editor-prompt"
                   value={prompt}
                   onChange={(event) => onPromptChange(event.target.value)}
                   rows={4}
                   maxLength={2500}
-                  placeholder="Example: make the bars more restrained, move the legend to the bottom, and keep x-axis labels horizontal."
+                  placeholder={hasAnnotations
+                    ? 'Optional: add instructions not covered by the mark memos.'
+                    : 'Example: make the bars more restrained, move the legend to the bottom, and keep x-axis labels horizontal.'}
                 />
+                {hasAnnotations && <p className="text-xs text-muted-foreground">When marks have memos, this field can stay empty.</p>}
               </div>
               <div className="space-y-2">
                 <div className="flex items-center justify-between gap-2">
@@ -464,6 +597,9 @@ export function AiFigureEditor({
                 <p className="text-xs leading-relaxed text-muted-foreground">
                   Select mode supports drag selection. Use Ctrl or Command when clicking marks to select more than one. Delete or Backspace removes selected marks.
                 </p>
+                {hasAnnotations && !hasMarkedInstructions && !prompt.trim() && (
+                  <p className="text-xs text-amber-700">Add a memo to at least one mark, or write an edit request.</p>
+                )}
               </div>
             </div>
 
@@ -474,12 +610,12 @@ export function AiFigureEditor({
                   <p className="text-xs text-muted-foreground">Recommended: apply the prompt and marks directly. Use suggestions first only when you want to review candidate changes before applying.</p>
                 </div>
                 <div className="grid gap-2 sm:min-w-56">
-                  <Button type="button" onClick={() => onApplyPrompt(combinedPrompt)} disabled={!canRun || isApplyingPrompt || isSuggesting || isApplyingSuggestion}>
-                    {isApplyingPrompt ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Wand2 className="mr-2 h-4 w-4" />}
+                  <Button type="button" onClick={() => { void handleApplyPrompt(); }} disabled={!canRun || isPreparingImage || isApplyingPrompt || isSuggesting || isApplyingSuggestion}>
+                    {isPreparingImage || isApplyingPrompt ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Wand2 className="mr-2 h-4 w-4" />}
                     Apply annotated edit
                   </Button>
-                  <Button type="button" variant="outline" onClick={() => onSuggest(combinedPrompt)} disabled={!canEdit || !imageUrl || isSuggesting || isApplyingPrompt}>
-                    {isSuggesting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <MousePointer2 className="mr-2 h-4 w-4" />}
+                  <Button type="button" variant="outline" onClick={() => { void handleSuggest(); }} disabled={!canPreview || isPreparingImage || isSuggesting || isApplyingPrompt}>
+                    {isPreparingImage || isSuggesting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <MousePointer2 className="mr-2 h-4 w-4" />}
                     Preview suggestions
                   </Button>
                 </div>

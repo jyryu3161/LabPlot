@@ -258,7 +258,10 @@ def review(figure_id: uuid.UUID, version_id: uuid.UUID, db: Session = Depends(ge
 def improve(figure_id: uuid.UUID, version_id: uuid.UUID, data: ImprovementRequest | None = None,
             db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     req = data or ImprovementRequest()
-    return service.improve_version(db, figure_id, version_id, current_user.id, prompt=req.prompt)
+    return service.improve_version(
+        db, figure_id, version_id, current_user.id,
+        prompt=req.prompt, annotated_image=req.annotated_image,
+    )
 
 
 @router.get("/{figure_id}/versions/{version_id}/improvements", response_model=list[ImprovementResponse])

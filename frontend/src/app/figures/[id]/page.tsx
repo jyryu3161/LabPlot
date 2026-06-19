@@ -10,6 +10,7 @@ import {
   deleteFigureVersion, getProject, saveFigureTemplateFavorite, deleteFigureTemplateFavorite,
   createCustomPalette, updateCustomPalette, deleteCustomPalette,
 } from '@/lib/api';
+import type { ImproveVersionRequest } from '@/lib/api';
 import type { FigureVersion, Review, Improvement, PlotTypeDef, ColumnProfile, PaletteDef } from '@/lib/types';
 import { formatStylePreset } from '@/lib/style-presets';
 import { AiFigureEditor } from '@/components/figures/AiFigureEditor';
@@ -94,7 +95,11 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Review failed'),
   });
   const runImprove = useMutation({
-    mutationFn: (promptOverride?: string) => improveVersion(id, effectiveSelectedVid!, promptOverride ?? improvePrompt),
+    mutationFn: (request?: ImproveVersionRequest) => improveVersion(
+      id,
+      effectiveSelectedVid!,
+      request ?? { prompt: improvePrompt },
+    ),
     onSuccess: (l) => { setImprovements(l); toast.success(`${l.length} suggestions`); },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Improve failed'),
   });
@@ -109,11 +114,14 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Apply failed'),
   });
   const directAiEdit = useMutation({
-    mutationFn: async (promptOverride?: string) => {
-      const prompt = (promptOverride ?? improvePrompt).trim();
+    mutationFn: async (request?: ImproveVersionRequest) => {
+      const prompt = (request?.prompt ?? improvePrompt).trim();
       if (!prompt) throw new Error('Describe the edit you want first');
       if (!effectiveSelectedVid) throw new Error('No figure version selected');
-      const suggestions = await improveVersion(id, effectiveSelectedVid, prompt);
+      const suggestions = await improveVersion(id, effectiveSelectedVid, {
+        prompt,
+        annotated_image: request?.annotated_image,
+      });
       const applicable = suggestions.filter((item) => item.param_patch && Object.keys(item.param_patch).length > 0);
       if (!applicable.length) throw new Error('AI did not return an applicable visual edit');
       const appliedIds = applicable.map((item) => item.id);
@@ -330,8 +338,8 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
               isApplyingPrompt={directAiEdit.isPending}
               isApplyingSuggestion={applyImp.isPending || applyImps.isPending}
               onPromptChange={setImprovePrompt}
-              onSuggest={(prompt) => runImprove.mutate(prompt)}
-              onApplyPrompt={(prompt) => directAiEdit.mutate(prompt)}
+              onSuggest={(request) => runImprove.mutate(request)}
+              onApplyPrompt={(request) => directAiEdit.mutate(request)}
               onApplySuggestion={(improvementId) => applyImp.mutate(improvementId)}
               onApplySuggestions={(improvementIds) => applyImps.mutate(improvementIds)}
             />

@@ -412,7 +412,9 @@ def _normalize_review_payload(payload: dict) -> dict:
 # ----------------------------------------------------------------- improve
 def improve_figure(db: Session, plot_type: str, mapping: dict, options: dict, style_preset: str,
                    review: dict | None, available_options: list[dict], project_context: str | None = None,
-                   user_id: uuid.UUID | None = None, user_request: str | None = None) -> list[dict]:
+                   user_id: uuid.UUID | None = None, user_request: str | None = None,
+                   rendered_image: tuple[bytes, str] | None = None,
+                   r_code: str | None = None) -> list[dict]:
     system = with_guide(IMPROVE_SYSTEM, r_code_generator_guide(), "R code generator")
     schema = {
         "type": "object",
@@ -431,6 +433,18 @@ def improve_figure(db: Session, plot_type: str, mapping: dict, options: dict, st
            "current_style_preset": style_preset, "available_options_for_this_type": available_options,
            "prior_review": review or {}}
     content = _ctx_block(project_context) + [{"kind": "text", "text": "Context:\n" + json.dumps(ctx, ensure_ascii=False)}]
+    if r_code:
+        content.append({"kind": "text", "text": "Current generated R code for orientation:\n```r\n" + r_code[:20000] + "\n```"})
+    if rendered_image is not None:
+        image_bytes, image_mime = rendered_image
+        content.extend([
+            {"kind": "text", "text": (
+                "Attached image is the current rendered figure for visual grounding. "
+                "If it contains numbered blue marks, use those visible marks together with the mark summaries "
+                "in the user request to identify the local region to edit."
+            )},
+            {"kind": "image", "mime": image_mime, "b64": base64.standard_b64encode(image_bytes).decode("ascii")},
+        ])
     if user_request and user_request.strip():
         content.append({"kind": "text", "text": (
             "UNTRUSTED USER-PROVIDED FIGURE IMPROVEMENT REQUEST\n"

@@ -65,6 +65,7 @@ class RecommendationRequest(BaseModel):
 
 class ImprovementRequest(BaseModel):
     prompt: str | None = Field(default=None, max_length=4000)
+    annotated_image: str | None = Field(default=None, max_length=12_000_000)
 
 
 class ImprovementApplyRequest(BaseModel):

@@ -356,8 +356,16 @@ export async function rerenderFigure(id: string, body: { plot_type?: string; map
 export async function reviewVersion(figureId: string, versionId: string): Promise<Review> {
   return fetcher(`/api/figures/${figureId}/versions/${versionId}/review`, { method: 'POST' });
 }
-export async function improveVersion(figureId: string, versionId: string, prompt?: string): Promise<Improvement[]> {
-  const body = prompt?.trim() ? JSON.stringify({ prompt: prompt.trim() }) : undefined;
+export interface ImproveVersionRequest {
+  prompt?: string;
+  annotated_image?: string;
+}
+export async function improveVersion(figureId: string, versionId: string, request?: string | ImproveVersionRequest): Promise<Improvement[]> {
+  const payload = typeof request === 'string' ? { prompt: request } : (request ?? {});
+  const body = payload.prompt?.trim() || payload.annotated_image ? JSON.stringify({
+    prompt: payload.prompt?.trim() || undefined,
+    annotated_image: payload.annotated_image,
+  }) : undefined;
   return fetcher(`/api/figures/${figureId}/versions/${versionId}/improve`, { method: 'POST', body });
 }
 export async function listImprovements(figureId: string, versionId: string): Promise<Improvement[]> {
