@@ -133,7 +133,7 @@ export default function AdminPage() {
                 </>
               ) : (
                 <>
-                  <div className="space-y-1"><Label>Gemini model</Label><Input value={activeGeminiModel} onChange={(e) => setGeminiModel(e.target.value)} placeholder="gemini-3.5-flash" /></div>
+                  <div className="space-y-1"><Label>Gemini model</Label><Input value={activeGeminiModel} onChange={(e) => setGeminiModel(e.target.value)} placeholder="gemini-3.1-flash-lite" /></div>
                   <div className="space-y-1"><Label>Gemini API key {aiCfg?.has_gemini_key && <span className="text-xs text-green-600">(set)</span>}</Label><Input type="password" value={geminiKey} onChange={(e) => setGeminiKey(e.target.value)} placeholder={aiCfg?.has_gemini_key ? '•••••• (leave blank to keep)' : 'AIza...'} /></div>
                 </>
               )}

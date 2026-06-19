@@ -62,6 +62,7 @@ _OPTIONS_PATCH_SCHEMA = {
         "y_min": {"type": "number"}, "y_max": {"type": "number"},
         "fc_threshold": {"type": "number"}, "p_threshold": {"type": "number"},
         "label_top": {"type": "integer"}, "palette_name": {"type": "string"},
+        "category_colors": {"type": "object", "additionalProperties": {"type": "string"}},
         "size": {"type": "string", "enum": ["single_column", "wide", "double_column", "square", "custom"]},
         "width_in": {"type": "number"}, "height_in": {"type": "number"},
         "color_mode": {"type": "string", "enum": ["color", "grayscale"]},

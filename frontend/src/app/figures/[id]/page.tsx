@@ -62,6 +62,38 @@ function clearAxisRangeOptions(options: Record<string, unknown>): Record<string,
   return next;
 }
 
+function normalizedCategoryColors(value: unknown): Record<string, string> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).filter(([level, color]) => (
+      level.trim().length > 0 && typeof color === 'string' && HEX_COLOR_RE.test(color)
+    )).map(([level, color]) => [level.trim(), normalizeHexColor(String(color))]),
+  );
+}
+
+function mappingValue(mapping: Record<string, unknown>, key: string): string | null {
+  const value = mapping[key];
+  return typeof value === 'string' && value.trim() ? value : null;
+}
+
+function categoryColorColumn(plotType: string, mapping: Record<string, unknown>, options: Record<string, unknown>): string | null {
+  const explicit = mappingValue(mapping, 'group') || mappingValue(mapping, 'color');
+  if (explicit) return explicit;
+  if (plotType === 'box' || plotType === 'violin') return mappingValue(mapping, 'x');
+  if (plotType === 'bar' && options.color_bars) return mappingValue(mapping, 'x');
+  return null;
+}
+
+function categoryLevels(profile: ColumnProfile | undefined, colors: Record<string, string>): string[] {
+  const levels = new Set<string>();
+  (profile?.sample_values ?? []).forEach((value) => {
+    const label = String(value ?? '').trim();
+    if (label) levels.add(label);
+  });
+  Object.keys(colors).forEach((level) => levels.add(level));
+  return Array.from(levels).slice(0, 30);
+}
+
 export default function FigureDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const qc = useQueryClient();
@@ -89,6 +121,7 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
   const [paletteEditingId, setPaletteEditingId] = useState<string | null>(null);
   const [paletteName, setPaletteName] = useState('');
   const [paletteColors, setPaletteColors] = useState<string[]>(DEFAULT_CUSTOM_COLORS);
+  const [newCategoryColorLevel, setNewCategoryColorLevel] = useState('');
 
   const plotTypes = plotTypesData?.plot_types ?? [];
   const styles = stylesData?.styles ?? [];
@@ -107,6 +140,10 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
   const legendValue = legend ?? fig?.legend ?? '';
   const currentDef: PlotTypeDef | undefined = plotTypes.find((p) => p.type === effectivePlotType);
   const editablePlotOptions = (currentDef?.options ?? []).filter((option) => !AXIS_RANGE_OPTION_KEYS.has(option.key));
+  const categoryColors = normalizedCategoryColors(effectiveOptions.category_colors);
+  const categoryColorColumnName = categoryColorColumn(effectivePlotType, effectiveMapping, effectiveOptions);
+  const categoryColorProfile = columns.find((column) => column.name === categoryColorColumnName);
+  const categoryColorLevels = categoryLevels(categoryColorProfile, categoryColors);
   const canEditFigure = !fig?.project_id || project?.role === 'owner' || project?.role === 'editor';
   const isViewerOnly = Boolean(fig?.project_id && project?.role === 'viewer');
 
@@ -311,6 +348,29 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
     else if (next.length < 12) next.push(color);
     else next[next.length - 1] = color;
     setPaletteColors(next);
+  }
+
+  function setCategoryColor(level: string, color: string) {
+    const label = level.trim();
+    const normalized = normalizeHexColor(color);
+    if (!label || !HEX_COLOR_RE.test(normalized)) return;
+    setOptions({ ...effectiveOptions, category_colors: { ...categoryColors, [label]: normalized } });
+  }
+
+  function removeCategoryColor(level: string) {
+    const nextColors = { ...categoryColors };
+    delete nextColors[level];
+    const nextOptions = { ...effectiveOptions };
+    if (Object.keys(nextColors).length) nextOptions.category_colors = nextColors;
+    else delete nextOptions.category_colors;
+    setOptions(nextOptions);
+  }
+
+  function addCategoryColorLevel() {
+    const level = newCategoryColorLevel.trim();
+    if (!level) return;
+    setCategoryColor(level, '#4477AA');
+    setNewCategoryColorLevel('');
   }
 
   if (isLoading || !fig) {
@@ -550,6 +610,53 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
                         {selectedPalette?.hex?.length ? (
                           <div className="mt-1 flex gap-0.5">{selectedPalette.hex.map((h) => <span key={h} className="h-3 w-4 rounded-sm border" style={{ backgroundColor: h }} />)}</div>
                         ) : null}
+                        {categoryColorColumnName && (
+                          <div className="mt-2 space-y-2 rounded-md border bg-muted/20 p-2">
+                            <div>
+                              <Label className="text-xs">Category colors</Label>
+                              <p className="text-[11px] text-muted-foreground">Override specific colors in <span className="font-medium">{categoryColorColumnName}</span>. Other groups keep the selected palette.</p>
+                            </div>
+                            {categoryColorLevels.length > 0 && (
+                              <div className="space-y-1">
+                                {categoryColorLevels.map((level) => {
+                                  const color = categoryColors[level] ?? '';
+                                  return (
+                                    <div key={level} className="grid grid-cols-[minmax(0,1fr)_auto_minmax(76px,92px)_auto] items-center gap-1">
+                                      <span className="truncate text-xs" title={level}>{level}</span>
+                                      <input
+                                        type="color"
+                                        value={HEX_COLOR_RE.test(color) ? color : '#4477AA'}
+                                        onChange={(e) => setCategoryColor(level, e.target.value)}
+                                        className="h-7 w-8 rounded border bg-background"
+                                        aria-label={`Color for ${level}`}
+                                      />
+                                      <Input
+                                        className="h-7 font-mono text-[11px]"
+                                        value={color}
+                                        placeholder="palette"
+                                        onChange={(e) => {
+                                          const next = normalizeHexColor(e.target.value);
+                                          if (HEX_COLOR_RE.test(next)) setCategoryColor(level, next);
+                                        }}
+                                      />
+                                      <Button type="button" variant="ghost" size="sm" disabled={!color} onClick={() => removeCategoryColor(level)}>Reset</Button>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                            <div className="flex gap-1">
+                              <Input
+                                className="h-8 text-xs"
+                                value={newCategoryColorLevel}
+                                onChange={(e) => setNewCategoryColorLevel(e.target.value)}
+                                onKeyDown={(e) => { if (e.key === 'Enter') addCategoryColorLevel(); }}
+                                placeholder="Add category label"
+                              />
+                              <Button type="button" variant="outline" size="sm" onClick={addCategoryColorLevel}>Add</Button>
+                            </div>
+                          </div>
+                        )}
                         <div className="flex flex-wrap gap-2 pt-1">
                           <Button type="button" variant="outline" size="sm" onClick={openNewPalette}>New custom palette</Button>
                           {selectedPalette?.custom && (

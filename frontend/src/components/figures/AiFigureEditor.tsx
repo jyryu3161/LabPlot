@@ -81,6 +81,14 @@ function annotationTargetPoint(annotation: Annotation): { x: number; y: number }
   return { x: clampPercent(annotation.x), y: clampPercent(annotation.y) };
 }
 
+function annotationBadgePoint(annotation: Annotation): { x: number; y: number } {
+  const target = annotationTargetPoint(annotation);
+  return {
+    x: Math.max(3, Math.min(97, target.x)),
+    y: Math.max(3, Math.min(97, target.y)),
+  };
+}
+
 function pointerPercent(event: PointerEvent<HTMLElement>, element: HTMLElement | null) {
   if (!element) return null;
   const rect = element.getBoundingClientRect();
@@ -245,6 +253,10 @@ function intersects(a: ReturnType<typeof annotationBounds>, b: ReturnType<typeof
   return a.left <= b.right && a.right >= b.left && a.top <= b.bottom && a.bottom >= b.top;
 }
 
+function dragDistance(drag: DraftDrag): number {
+  return Math.hypot(drag.x2 - drag.x, drag.y2 - drag.y);
+}
+
 function loadStoredAnnotations(key: string | null): Annotation[] {
   if (!key || typeof window === 'undefined') return [];
   try {
@@ -305,6 +317,17 @@ export function AiFigureEditor({
   const allSelectableSuggestionsChecked = selectableImprovementIds.length > 0
     && selectableImprovementIds.every((id) => selectedImprovementIdSet.has(id));
   const combinedPrompt = useMemo(() => buildLocalizedPrompt(prompt, annotations), [annotations, prompt]);
+  const draftAnnotations = drag && drag.type !== 'select' && dragDistance(drag) >= 0.5 ? [{
+    id: drag.id,
+    type: drag.type,
+    x: drag.type === 'region' ? Math.min(drag.x, drag.x2) : drag.x,
+    y: drag.type === 'region' ? Math.min(drag.y, drag.y2) : drag.y,
+    w: Math.abs(drag.x2 - drag.x),
+    h: Math.abs(drag.y2 - drag.y),
+    x2: drag.x2,
+    y2: drag.y2,
+    text: '',
+  } as Annotation] : [];
   const canPreview = canEdit && Boolean(imageUrl);
   const canRun = canEdit && Boolean(imageUrl) && Boolean(prompt.trim() || hasMarkedInstructions);
 
@@ -385,6 +408,7 @@ export function AiFigureEditor({
 
   function handlePointerDown(event: PointerEvent<HTMLDivElement>) {
     if (!canEdit || !imageUrl) return;
+    event.preventDefault();
     const point = pointerPercent(event, stageRef.current);
     if (!point) return;
     const id = crypto.randomUUID();
@@ -410,7 +434,9 @@ export function AiFigureEditor({
 
   function handlePointerUp(event: PointerEvent<HTMLDivElement>) {
     if (!drag) return;
-    event.currentTarget.releasePointerCapture(event.pointerId);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
     const additive = event.ctrlKey || event.metaKey || event.shiftKey;
     if (drag.type === 'select') {
       selectByDrag(drag, additive);
@@ -428,6 +454,13 @@ export function AiFigureEditor({
         : { id: drag.id, type: 'arrow', x: drag.x, y: drag.y, x2: drag.x2, y2: drag.y2, text: '' };
       setAnnotations((items) => [...items, next]);
       setSelectedIds([next.id]);
+    }
+    setDrag(null);
+  }
+
+  function handlePointerCancel(event: PointerEvent<HTMLDivElement>) {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
     }
     setDrag(null);
   }
@@ -509,10 +542,11 @@ export function AiFigureEditor({
 
             <div
               ref={stageRef}
-              className="relative mx-auto min-h-64 max-w-full touch-none overflow-hidden rounded-md border bg-white"
+              className={`relative mx-auto min-h-64 max-w-full touch-none select-none overflow-hidden rounded-md border bg-white ${tool === 'select' ? 'cursor-default' : 'cursor-crosshair'}`}
               onPointerDown={handlePointerDown}
               onPointerMove={handlePointerMove}
               onPointerUp={handlePointerUp}
+              onPointerCancel={handlePointerCancel}
             >
               {imageUrl ? (
                 <img src={imageUrl} alt="Figure for AI editing" className="block max-h-[56vh] w-full object-contain" draggable={false} />
@@ -525,17 +559,7 @@ export function AiFigureEditor({
                     <path d="M0,0 L5,2.5 L0,5 z" fill="#2563eb" />
                   </marker>
                 </defs>
-                {[...annotations, ...(drag && drag.type !== 'select' ? [{
-                  id: drag.id,
-                  type: drag.type,
-                  x: drag.type === 'region' ? Math.min(drag.x, drag.x2) : drag.x,
-                  y: drag.type === 'region' ? Math.min(drag.y, drag.y2) : drag.y,
-                  w: Math.abs(drag.x2 - drag.x),
-                  h: Math.abs(drag.y2 - drag.y),
-                  x2: drag.x2,
-                  y2: drag.y2,
-                  text: '',
-                } as Annotation] : [])].map((annotation, index) => (
+                {[...annotations, ...draftAnnotations].map((annotation) => (
                   <g key={annotation.id}>
                     {annotation.type === 'region' && (
                       <rect
@@ -568,15 +592,6 @@ export function AiFigureEditor({
                         fill={selectedIdSet.has(annotation.id) ? '#0f172a' : '#2563eb'}
                       />
                     )}
-                    {(() => {
-                      const label = annotationTargetPoint(annotation);
-                      return (
-                        <>
-                          <circle cx={label.x} cy={label.y} r={1.55} fill="#ffffff" stroke="#2563eb" strokeWidth={0.25} />
-                          <text x={label.x} y={label.y + 0.55} textAnchor="middle" fontSize="2.5" fill="#2563eb" fontWeight="700">{index + 1}</text>
-                        </>
-                      );
-                    })()}
                   </g>
                 ))}
                 {drag?.type === 'select' && (
@@ -592,22 +607,31 @@ export function AiFigureEditor({
                   />
                 )}
               </svg>
-              <div className="absolute inset-0">
+              <div className="pointer-events-none absolute inset-0">
                 {annotations.map((annotation) => {
-                  const target = annotationTargetPoint(annotation);
+                  const target = annotationBadgePoint(annotation);
+                  const index = annotations.findIndex((item) => item.id === annotation.id);
+                  const selected = selectedIdSet.has(annotation.id);
                   return (
                     <button
                       key={annotation.id}
                       type="button"
                       aria-label={`Select annotation ${annotation.type}`}
-                      className="absolute h-8 w-8 -translate-x-1/2 -translate-y-1/2 rounded-full focus:outline-none focus:ring-2 focus:ring-primary/40"
+                      className={`pointer-events-auto absolute flex h-7 min-w-7 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border-2 px-1 text-[11px] font-bold shadow-sm transition focus:outline-none focus:ring-2 focus:ring-primary/40 ${
+                        selected ? 'border-slate-900 bg-slate-900 text-white' : 'border-white bg-blue-600 text-white'
+                      }`}
                       style={{ left: `${target.x}%`, top: `${target.y}%` }}
-                      onPointerDown={(event) => event.stopPropagation()}
+                      onPointerDown={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                      }}
                       onClick={(event) => {
                         event.stopPropagation();
                         toggleAnnotationSelection(annotation.id, event.ctrlKey || event.metaKey || event.shiftKey);
                       }}
-                    />
+                    >
+                      {index + 1}
+                    </button>
                   );
                 })}
               </div>

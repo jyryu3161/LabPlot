@@ -34,7 +34,7 @@ _UNIVERSAL_OPTION_KEYS = {
     "title", "subtitle", "x_label", "y_label", "legend_title",
     "hide_legend", "log_x", "log_y", "flip_coords", "x_text_angle", "legend_position",
     "x_min", "x_max", "y_min", "y_max",
-    "custom_palette_values", "custom_palette_label",
+    "custom_palette_values", "custom_palette_label", "category_colors",
 }
 _OPTION_CHOICES = {
     "palette_name": {"preset", "journal_muted", "okabe_ito", "tol_bright", "set2", "npg", "tableau10"},
@@ -1277,6 +1277,23 @@ def _known_mapping_values(mapping: dict[str, Any]) -> set[str]:
 def _sanitize_option(key: str, value: Any) -> Any:
     if key in {"x_label", "y_label"} and value == "":
         return ""
+    if key == "category_colors":
+        if not isinstance(value, dict):
+            return None
+        clean: dict[str, str] = {}
+        for raw_level, raw_color in value.items():
+            if not isinstance(raw_level, str) or not isinstance(raw_color, str):
+                continue
+            level = raw_level.strip()
+            color = raw_color.strip().upper()
+            if not level or len(level) > 120:
+                continue
+            if not re.fullmatch(r"#[0-9A-F]{6}", color):
+                continue
+            clean[level] = color
+            if len(clean) >= 80:
+                break
+        return clean or None
     if value in (None, ""):
         return None
     if key == "palette_name":

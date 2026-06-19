@@ -71,7 +71,7 @@ export default function OrganizationsPage() {
   });
   const activeProvider = provider || aiCfg?.provider || 'claude';
   const activeClaudeModel = claudeModel || aiCfg?.claude_model || 'claude-sonnet-4-6';
-  const activeGeminiModel = geminiModel || aiCfg?.gemini_model || 'gemini-3.5-flash';
+  const activeGeminiModel = geminiModel || aiCfg?.gemini_model || 'gemini-3.1-flash-lite';
 
   const refresh = () => {
     qc.invalidateQueries({ queryKey: ['my-organizations'] });

@@ -134,6 +134,7 @@ SCOPE
 - For bar plots, prefer muted single-color bars by default. Use category-colored bars only when color encodes a meaningful grouping requested by the user.
 - For overlapped bar charts, use overlap_bar and keep alpha/transparency high enough to see both series.
 - If a user asks to make colors less excessive, prefer options.palette_name = "journal_muted"; for bar plots also set options.color_bars = false.
+- If the user asks to change one specific category/group color, set options.category_colors as an object mapping exact visible group labels to HEX colors, for example {"Control": "#4477AA"}. Use this only for categorical fill/colour encodings.
 - Keep x-axis tick labels horizontal by default. Set options.x_text_angle to 45 or 90 only when labels are visibly overlapping, long, or crowded. Do not rotate short numeric/bin labels such as 0, 1, 2, ..., 10.
 - For line plots, use options.line_type for solid/dashed/dotted/dotdash/longdash lines and options.point_shape for circle/square/triangle/diamond/none markers. If the user asks for square points, set point_shape = "square"; if they ask for dashed lines, set line_type = "dashed".
 - If the user asks for an x-axis range or limit such as 0 to 12, set options.x_min and options.x_max as numbers. If the user asks for a y-axis range or limit such as 1 to 10, set options.y_min and options.y_max as numbers. Do not use labels or free-form text for axis limits.
@@ -146,7 +147,7 @@ VALID PATCH SHAPE
 param_patch may contain only:
 - "style_preset": one of nature, science, cell, minimal, colorblind.
 - "mapping": keys valid for the current plot type; values must be existing column names.
-- "options": valid plot-type options plus universal options: palette_name, size, width_in, height_in, color_mode, font_scale, dpi, title, subtitle, x_label, y_label, legend_title, hide_legend, log_x, log_y, flip_coords, x_text_angle, x_min, x_max, y_min, y_max, legend_position.
+- "options": valid plot-type options plus universal options: palette_name, category_colors, size, width_in, height_in, color_mode, font_scale, dpi, title, subtitle, x_label, y_label, legend_title, hide_legend, log_x, log_y, flip_coords, x_text_angle, x_min, x_max, y_min, y_max, legend_position.
 - Bar plot options include stat, error_bars, and color_bars. Overlapped bar options include bar_alpha, bar_width, paired_rows_only, series_1_label, and series_2_label.
 - Line plot options include line_type and point_shape.
 - Valid palette_name values: preset, journal_muted, okabe_ito, tol_bright, set2, npg, tableau10.

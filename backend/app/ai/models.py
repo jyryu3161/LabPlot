@@ -15,7 +15,7 @@ class AIConfig(Base):
     provider = Column(String(20), nullable=False, default="claude")  # claude | gemini
     enabled = Column(Boolean, nullable=False, default=True)
     claude_model = Column(String(64), nullable=False, default="claude-sonnet-4-6")
-    gemini_model = Column(String(64), nullable=False, default="gemini-3.5-flash")
+    gemini_model = Column(String(64), nullable=False, default="gemini-3.1-flash-lite")
     anthropic_api_key = Column(Text, nullable=True)
     gemini_api_key = Column(Text, nullable=True)
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc),

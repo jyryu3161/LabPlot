@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -26,6 +27,7 @@ _HEADER = (
     "  library(ggplot2); library(dplyr); library(tidyr); library(readr); library(scales)\n"
     "})\n"
 )
+_HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
 
 
 def _rscript_bin() -> str:
@@ -52,6 +54,50 @@ def _finite_float_option(options: dict, key: str) -> float | None:
     except (TypeError, ValueError):
         return None
     return value if math.isfinite(value) else None
+
+
+def _category_color_override_r(options: dict) -> str:
+    raw = options.get("category_colors")
+    if not isinstance(raw, dict):
+        return ""
+    items: list[tuple[str, str]] = []
+    for level, color in raw.items():
+        if not isinstance(level, str) or not isinstance(color, str):
+            continue
+        label = level.strip()
+        hex_color = color.strip()
+        if not label or not _HEX_COLOR_RE.fullmatch(hex_color):
+            continue
+        items.append((label[:120], hex_color.upper()))
+    if not items:
+        return ""
+    vec = ", ".join(f"{rq(label)} = {rq(color)}" for label, color in items[:80])
+    return f"""
+labplot_apply_category_colors <- function(plot) {{
+  .override <- c({vec})
+  .apply <- function(current_plot, aesthetic, scale_fun) {{
+    built <- tryCatch(ggplot2::ggplot_build(current_plot), error = function(e) NULL)
+    if (is.null(built)) return(current_plot)
+    sc <- built$plot$scales$get_scales(aesthetic)
+    if (is.null(sc)) return(current_plot)
+    is_discrete <- tryCatch(isTRUE(sc$is_discrete()), error = function(e) FALSE)
+    if (!is_discrete) return(current_plot)
+    limits <- tryCatch(sc$get_limits(), error = function(e) character())
+    limits <- as.character(limits[!is.na(limits)])
+    if (!length(limits)) return(current_plot)
+    hits <- intersect(names(.override), limits)
+    if (!length(hits)) return(current_plot)
+    values <- labplot_palette(length(limits))
+    names(values) <- limits
+    values[hits] <- .override[hits]
+    suppressMessages(current_plot + scale_fun(values = values))
+  }}
+  plot <- .apply(plot, "fill", ggplot2::scale_fill_manual)
+  plot <- .apply(plot, "colour", ggplot2::scale_colour_manual)
+  plot
+}}
+p <- labplot_apply_category_colors(p)
+"""
 
 
 def build_script(plot_type: str, mapping: dict, options: dict, preset: str,
@@ -87,6 +133,7 @@ pdf("figure.pdf", width = {w}, height = {h}, pointsize = 7); draw_plot(); invisi
         lt = opts.get("legend_title")
         if lt:
             post += f"p <- p + labs(fill = {rq(lt)}, colour = {rq(lt)})\n"
+        post += _category_color_override_r(opts)
         legend_position = opts.get("legend_position")
         if opts.get("hide_legend") or legend_position == "none":
             post += 'p <- p + theme(legend.position = "none")\n'
