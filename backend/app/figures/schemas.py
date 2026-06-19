@@ -64,7 +64,7 @@ class RecommendationRequest(BaseModel):
 
 
 class ImprovementRequest(BaseModel):
-    prompt: str | None = Field(default=None, max_length=1500)
+    prompt: str | None = Field(default=None, max_length=4000)
 
 
 class VersionResponse(BaseModel):

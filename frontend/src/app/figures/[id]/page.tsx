@@ -6,13 +6,13 @@ import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import {
   getFigure, getDataset, getPlotTypes, getStyles, getPalettes, rerenderFigure, reviewVersion,
-  improveVersion, applyImprovement, updateFigure, generateLegend, downloadExport, enhancePrompt, saveSvgEditVersion,
+  improveVersion, applyImprovement, updateFigure, generateLegend, downloadExport, enhancePrompt,
   deleteFigureVersion, getProject, saveFigureTemplateFavorite, deleteFigureTemplateFavorite,
   createCustomPalette, updateCustomPalette, deleteCustomPalette,
 } from '@/lib/api';
 import type { FigureVersion, Review, Improvement, PlotTypeDef, ColumnProfile, PaletteDef } from '@/lib/types';
 import { formatStylePreset } from '@/lib/style-presets';
-import { SvgVectorEditor } from '@/components/figures/SvgVectorEditor';
+import { AiFigureEditor } from '@/components/figures/AiFigureEditor';
 import { AppHeader } from '@/components/layout/AppHeader';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -20,7 +20,7 @@ import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
-import { Loader2, Star, Wand2, Download, CheckCircle2, History, Pencil, FileText, Sparkles, Trash2, MousePointer2 } from 'lucide-react';
+import { Loader2, Star, Download, History, Pencil, FileText, Sparkles, Trash2 } from 'lucide-react';
 
 const SCORE_COLOR = (s: number) => (s >= 80 ? 'text-green-600' : s >= 60 ? 'text-amber-600' : 'text-red-600');
 const HEX_COLOR_RE = /^#[0-9A-Fa-f]{6}$/;
@@ -88,28 +88,13 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
     onSuccess: (v) => { toast.success(`Re-rendered (v${v.version_number})`); setSelectedVid(v.id); setReview(null); setImprovements(null); qc.invalidateQueries({ queryKey: ['figure', id] }); qc.invalidateQueries({ queryKey: ['figures'] }); },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Render failed'),
   });
-  const saveSvgEdit = useMutation({
-    mutationFn: (svg: string) => {
-      if (!effectiveSelectedVid) throw new Error('No figure version selected');
-      return saveSvgEditVersion(id, effectiveSelectedVid, { svg, change_note: 'Manual SVG edit' });
-    },
-    onSuccess: (v) => {
-      toast.success(`Saved SVG edit (v${v.version_number})`);
-      setSelectedVid(v.id);
-      setReview(null);
-      setImprovements(null);
-      qc.invalidateQueries({ queryKey: ['figure', id] });
-      qc.invalidateQueries({ queryKey: ['figures'] });
-    },
-    onError: (e) => toast.error(e instanceof Error ? e.message : 'SVG save failed'),
-  });
   const runReview = useMutation({
     mutationFn: () => reviewVersion(id, effectiveSelectedVid!),
     onSuccess: (r) => { setReview(r); toast.success('Review complete'); },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Review failed'),
   });
   const runImprove = useMutation({
-    mutationFn: () => improveVersion(id, effectiveSelectedVid!, improvePrompt),
+    mutationFn: (promptOverride?: string) => improveVersion(id, effectiveSelectedVid!, promptOverride ?? improvePrompt),
     onSuccess: (l) => { setImprovements(l); toast.success(`${l.length} suggestions`); },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Improve failed'),
   });
@@ -119,8 +104,8 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Apply failed'),
   });
   const directAiEdit = useMutation({
-    mutationFn: async () => {
-      const prompt = improvePrompt.trim();
+    mutationFn: async (promptOverride?: string) => {
+      const prompt = (promptOverride ?? improvePrompt).trim();
       if (!prompt) throw new Error('Describe the edit you want first');
       if (!effectiveSelectedVid) throw new Error('No figure version selected');
       const suggestions = await improveVersion(id, effectiveSelectedVid, prompt);
@@ -237,8 +222,7 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
     catch { toast.error('Export failed'); }
   }
 
-  const isManualSvgEdit = Boolean(effectiveOptions.manual_svg_edit);
-  const previewUrl = (isManualSvgEdit ? version?.svg_url : version?.png_url) ?? version?.svg_url;
+  const previewUrl = version?.png_url ?? version?.svg_url;
   const previewIsSvg = Boolean(previewUrl && previewUrl === version?.svg_url);
   const exportFormats = [
     { fmt: 'png', label: 'PNG', available: Boolean(version?.png_url) },
@@ -327,22 +311,20 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
               {previewIsSvg && <p className="mt-2 text-center text-xs text-muted-foreground">SVG preview</p>}
             </CardContent></Card>
 
-            {canEditFigure ? (
-              <SvgVectorEditor
-                svgUrl={version?.svg_url}
-                filenameBase={fig.name}
-                versionNumber={version?.version_number}
-                isSaving={saveSvgEdit.isPending}
-                onSaveVersion={(svg) => saveSvgEdit.mutate(svg)}
-              />
-            ) : (
-              <Card>
-                <CardHeader className="pb-2"><CardTitle className="flex items-center gap-2 text-base"><MousePointer2 className="h-4 w-4" /> Vector SVG editor</CardTitle></CardHeader>
-                <CardContent>
-                  <p className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">Viewer access can inspect and export this figure. Ask the project owner for editor access to edit SVG elements or save new versions.</p>
-                </CardContent>
-              </Card>
-            )}
+            <AiFigureEditor
+              imageUrl={version?.png_url ?? version?.svg_url}
+              versionNumber={version?.version_number}
+              prompt={improvePrompt}
+              improvements={improvements}
+              canEdit={canEditFigure}
+              isSuggesting={runImprove.isPending}
+              isApplyingPrompt={directAiEdit.isPending}
+              isApplyingSuggestion={applyImp.isPending}
+              onPromptChange={setImprovePrompt}
+              onSuggest={(prompt) => runImprove.mutate(prompt)}
+              onApplyPrompt={(prompt) => directAiEdit.mutate(prompt)}
+              onApplySuggestion={(improvementId) => applyImp.mutate(improvementId)}
+            />
 
             <Card>
               <CardHeader className="pb-2"><CardTitle className="flex items-center gap-2 text-base"><Download className="h-4 w-4" /> Export {version && `(v${version.version_number})`}</CardTitle></CardHeader>
@@ -677,46 +659,6 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
               </CardContent>
             </Card>
 
-            {/* AI improve */}
-            <Card>
-              <CardHeader className="pb-2"><CardTitle className="flex items-center gap-2 text-base"><Wand2 className="h-4 w-4 text-primary" /> AI Improve</CardTitle></CardHeader>
-              <CardContent className="space-y-3">
-                {canEditFigure ? (
-                  <>
-                    <div className="space-y-1">
-                      <Label htmlFor="ai-improve-request" className="text-xs">Optional edit request</Label>
-                      <Textarea
-                        id="ai-improve-request"
-                        value={improvePrompt}
-                        onChange={(e) => setImprovePrompt(e.target.value)}
-                        rows={3}
-                        maxLength={1500}
-                        placeholder="Example: make this bar plot more restrained for a manuscript, use muted colors, and simplify the axis labels."
-                      />
-                    </div>
-                    <div className="grid gap-2">
-                      <Button size="sm" className="w-full" onClick={() => directAiEdit.mutate()} disabled={directAiEdit.isPending || runImprove.isPending || applyImp.isPending || !effectiveSelectedVid || !improvePrompt.trim()}>
-                        {directAiEdit.isPending ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Applying…</> : 'Apply prompt directly (new R version)'}
-                      </Button>
-                      <Button size="sm" variant="outline" className="w-full" onClick={() => runImprove.mutate()} disabled={runImprove.isPending || directAiEdit.isPending || !effectiveSelectedVid}>
-                        {runImprove.isPending ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Thinking…</> : improvePrompt.trim() ? 'Suggest from prompt' : 'Suggest improvements'}
-                      </Button>
-                    </div>
-                  </>
-                ) : (
-                  <p className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">Editor access is required to create improvement suggestions.</p>
-                )}
-                {improvements?.map((imp) => (
-                  <div key={imp.id} className="rounded border p-2 text-sm">
-                    <div className="flex items-center justify-between"><span className="font-medium">{imp.suggestion_type}</span>{imp.priority && <Badge variant="outline" className="text-xs">{imp.priority}</Badge>}</div>
-                    {imp.recommended && <p className="mt-1 text-xs text-muted-foreground">{imp.recommended}</p>}
-                    <Button size="sm" variant="secondary" className="mt-2 w-full" onClick={() => applyImp.mutate(imp.id)} disabled={applyImp.isPending || imp.applied}>
-                      {imp.applied ? <><CheckCircle2 className="mr-1 h-3 w-3" /> Applied</> : 'Apply suggestion (new R version)'}
-                    </Button>
-                  </div>
-                ))}
-              </CardContent>
-            </Card>
           </div>
         </div>
       </main>
