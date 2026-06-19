@@ -47,6 +47,20 @@ function formatMappingValue(value: unknown): string {
   return '';
 }
 
+const DATA_DEPENDENT_AXIS_KEYS = new Set(['x_min', 'x_max', 'y_min', 'y_max']);
+
+function optionsForTargetDataset(templateOptions: Record<string, unknown> | undefined, mapping: Record<string, unknown>): Record<string, unknown> {
+  const next = { ...(templateOptions ?? {}) };
+  DATA_DEPENDENT_AXIS_KEYS.forEach((key) => delete next[key]);
+
+  const xColumn = typeof mapping.x === 'string' ? mapping.x : '';
+  const yColumn = typeof mapping.y === 'string' ? mapping.y : '';
+  if (xColumn) next.x_label = xColumn;
+  if (yColumn) next.y_label = yColumn;
+
+  return next;
+}
+
 function ExampleDataGuide({ template, plotDef }: {
   template: NonNullable<Awaited<ReturnType<typeof getPublicGalleryTemplate>>>;
   plotDef?: PlotTypeDef;
@@ -179,7 +193,7 @@ export default function GalleryTemplatePage({ params }: { params: Promise<{ id: 
         name: figureName || `${dataset.name} - ${template.name}`,
         plot_type: template.plot_type,
         mapping,
-        options: template.options ?? {},
+        options: optionsForTargetDataset(template.options, mapping),
         style_preset: template.style_preset,
       });
     },

@@ -26,6 +26,7 @@ import { Loader2, Star, Download, History, Pencil, FileText, Sparkles, Trash2 } 
 const SCORE_COLOR = (s: number) => (s >= 80 ? 'text-green-600' : s >= 60 ? 'text-amber-600' : 'text-red-600');
 const HEX_COLOR_RE = /^#[0-9A-Fa-f]{6}$/;
 const DEFAULT_CUSTOM_COLORS = ['#4477AA', '#EE6677', '#228833', '#CCBB44'];
+const AXIS_RANGE_OPTION_KEYS = new Set(['x_min', 'x_max', 'y_min', 'y_max']);
 const REPRESENTATIVE_COLORS = [
   '#4477AA', '#EE6677', '#228833', '#CCBB44', '#66CCEE', '#AA3377',
   '#332288', '#88CCEE', '#44AA99', '#117733', '#DDCC77', '#CC6677',
@@ -35,6 +36,30 @@ const REPRESENTATIVE_COLORS = [
 function normalizeHexColor(value: string): string {
   const clean = value.trim();
   return HEX_COLOR_RE.test(clean) ? clean.toUpperCase() : clean;
+}
+
+function numericOptionValue(value: unknown): string {
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  if (typeof value === 'string' && value.trim()) return value;
+  return '';
+}
+
+function updateNumericOption(options: Record<string, unknown>, key: string, rawValue: string): Record<string, unknown> {
+  const next = { ...options };
+  const value = rawValue.trim();
+  if (!value) {
+    delete next[key];
+    return next;
+  }
+  const parsed = Number(value);
+  if (Number.isFinite(parsed)) next[key] = parsed;
+  return next;
+}
+
+function clearAxisRangeOptions(options: Record<string, unknown>): Record<string, unknown> {
+  const next = { ...options };
+  AXIS_RANGE_OPTION_KEYS.forEach((key) => delete next[key]);
+  return next;
 }
 
 export default function FigureDetailPage({ params }: { params: Promise<{ id: string }> }) {
@@ -81,6 +106,7 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
   const descriptionValue = description ?? fig?.description ?? '';
   const legendValue = legend ?? fig?.legend ?? '';
   const currentDef: PlotTypeDef | undefined = plotTypes.find((p) => p.type === effectivePlotType);
+  const editablePlotOptions = (currentDef?.options ?? []).filter((option) => !AXIS_RANGE_OPTION_KEYS.has(option.key));
   const canEditFigure = !fig?.project_id || project?.role === 'owner' || project?.role === 'editor';
   const isViewerOnly = Boolean(fig?.project_id && project?.role === 'viewer');
 
@@ -450,7 +476,7 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
                     ))}
 
                     {/* plot-specific options */}
-                    {currentDef?.options.map((o) => (
+                    {editablePlotOptions.map((o) => (
                       <div key={o.key} className="space-y-1">
                         <Label className="text-xs">{o.label}</Label>
                         {o.type === 'bool' ? (
@@ -458,7 +484,7 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
                         ) : o.type === 'select' ? (
                           <select className="w-full rounded-md border px-2 py-1.5 text-sm" value={String(effectiveOptions[o.key] ?? o.default ?? '')} onChange={(e) => setOptions({ ...effectiveOptions, [o.key]: e.target.value })}>{o.choices?.map((c) => <option key={c} value={c}>{c}</option>)}</select>
                         ) : o.type === 'number' ? (
-                          <Input type="number" value={String(effectiveOptions[o.key] ?? o.default ?? '')} onChange={(e) => setOptions({ ...effectiveOptions, [o.key]: parseFloat(e.target.value) })} />
+                          <Input type="number" value={numericOptionValue(effectiveOptions[o.key] ?? o.default)} onChange={(e) => setOptions(updateNumericOption(effectiveOptions, o.key, e.target.value))} />
                         ) : <Input value={String(effectiveOptions[o.key] ?? '')} onChange={(e) => setOptions({ ...effectiveOptions, [o.key]: e.target.value })} />}
                       </div>
                     ))}
@@ -469,6 +495,33 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
                       <div className="grid grid-cols-2 gap-2">
                         <div className="space-y-1"><Label className="text-xs">X label</Label><Input className="text-sm" value={String(effectiveOptions.x_label ?? '')} onChange={(e) => setOptions({ ...effectiveOptions, x_label: e.target.value })} /></div>
                         <div className="space-y-1"><Label className="text-xs">Y label</Label><Input className="text-sm" value={String(effectiveOptions.y_label ?? '')} onChange={(e) => setOptions({ ...effectiveOptions, y_label: e.target.value })} /></div>
+                      </div>
+                      <div className="space-y-2 rounded-md border bg-muted/20 p-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <div>
+                            <Label className="text-xs">Axis scale</Label>
+                            <p className="text-[11px] text-muted-foreground">Leave blank to auto-fit to the selected data.</p>
+                          </div>
+                          <Button type="button" variant="outline" size="sm" onClick={() => setOptions(clearAxisRangeOptions(effectiveOptions))}>Auto fit</Button>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          <div className="space-y-1">
+                            <Label className="text-xs">X min</Label>
+                            <Input type="number" step="any" className="text-sm" value={numericOptionValue(effectiveOptions.x_min)} onChange={(e) => setOptions(updateNumericOption(effectiveOptions, 'x_min', e.target.value))} placeholder="auto" />
+                          </div>
+                          <div className="space-y-1">
+                            <Label className="text-xs">X max</Label>
+                            <Input type="number" step="any" className="text-sm" value={numericOptionValue(effectiveOptions.x_max)} onChange={(e) => setOptions(updateNumericOption(effectiveOptions, 'x_max', e.target.value))} placeholder="auto" />
+                          </div>
+                          <div className="space-y-1">
+                            <Label className="text-xs">Y min</Label>
+                            <Input type="number" step="any" className="text-sm" value={numericOptionValue(effectiveOptions.y_min)} onChange={(e) => setOptions(updateNumericOption(effectiveOptions, 'y_min', e.target.value))} placeholder="auto" />
+                          </div>
+                          <div className="space-y-1">
+                            <Label className="text-xs">Y max</Label>
+                            <Input type="number" step="any" className="text-sm" value={numericOptionValue(effectiveOptions.y_max)} onChange={(e) => setOptions(updateNumericOption(effectiveOptions, 'y_max', e.target.value))} placeholder="auto" />
+                          </div>
+                        </div>
                       </div>
                       <div className="space-y-1"><Label className="text-xs">Legend title</Label><Input className="text-sm" value={String(effectiveOptions.legend_title ?? '')} onChange={(e) => setOptions({ ...effectiveOptions, legend_title: e.target.value })} /></div>
                       <div className="grid grid-cols-2 gap-2">
