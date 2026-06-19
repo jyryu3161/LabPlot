@@ -1120,7 +1120,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                     )}
                     {!canEditDataset && <p className="text-sm text-muted-foreground">Viewer access can inspect this dataset but cannot generate new figures.</p>}
                     <Button onClick={() => create.mutate()} disabled={create.isPending || !canEditDataset || missingRequiredFields.length > 0} className="w-full">
-                      {create.isPending ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Rendering…</> : 'Generate figure'}
+                      {create.isPending ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Rendering and checking…</> : 'Generate figure'}
                     </Button>
                   </>
                 )}

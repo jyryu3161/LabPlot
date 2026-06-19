@@ -1,8 +1,8 @@
 """Publication style presets -> R theme + palette code (uses base ggplot2 only)."""
 from __future__ import annotations
 
-_JOURNAL_MUTED = ["#5B6F82", "#8FA6B8", "#6F8A72", "#B8A46A", "#9A6F6F",
-                  "#7C739E", "#6F8F8E", "#9A9A9A"]
+_JOURNAL_MUTED = ["#CC6677", "#332288", "#DDCC77", "#117733", "#88CCEE",
+                  "#882255", "#44AA99", "#999933", "#AA4499"]
 
 PALETTES = {
     "nature": _JOURNAL_MUTED,
@@ -18,9 +18,9 @@ PALETTES = {
 
 _BASE = {
     "nature":     {"size": 7, "base": "theme_classic", "grid": False},
-    "science":    {"size": 7, "base": "theme_bw",      "grid": True},
+    "science":    {"size": 7, "base": "theme_classic", "grid": False},
     "cell":       {"size": 7, "base": "theme_classic", "grid": False},
-    "minimal":    {"size": 7, "base": "theme_minimal", "grid": True},
+    "minimal":    {"size": 7, "base": "theme_classic", "grid": False},
     "colorblind": {"size": 7, "base": "theme_classic", "grid": False},
 }
 
@@ -28,10 +28,18 @@ PRESETS = list(_BASE.keys())
 
 PRESET_LABELS = {
     "nature": "Clean Classic",
-    "science": "Grid Classic",
-    "cell": "Biomedical",
-    "minimal": "Minimal",
+    "science": "Science Classic",
+    "cell": "Biomedical Classic",
+    "minimal": "Minimal Classic",
     "colorblind": "Colorblind-safe",
+}
+
+PRESET_DESCRIPTIONS = {
+    "nature": "Default manuscript theme with restrained academic colors.",
+    "science": "Compact classic theme with cool muted colors and no gridlines.",
+    "cell": "Biomedical theme with soft categorical colors and no gridlines.",
+    "minimal": "Monochrome classic theme for simple publication figures.",
+    "colorblind": "Classic theme using a colorblind-safe default palette.",
 }
 
 # Distinguishable greyscale ramp for print/monochrome figures
@@ -48,7 +56,7 @@ NAMED_PALETTES = {
     "tableau10":  ["#4E79A7", "#F28E2B", "#E15759", "#76B7B2", "#59A14F", "#EDC948", "#B07AA1", "#FF9DA7"],
 }
 _PALETTE_META = {
-    "journal_muted": ("Journal muted", False),
+    "journal_muted": ("LabPlot Academic muted", False),
     "okabe_ito":  ("Okabe–Ito (colorblind-safe)", True),
     "tol_bright": ("Paul Tol Bright (colorblind-safe)", True),
     "set2":       ("ColorBrewer Set2 (soft)", False),
@@ -57,18 +65,23 @@ _PALETTE_META = {
 }
 
 
-def list_palettes() -> list[dict]:
+def list_palettes(custom_palettes: list[dict] | None = None) -> list[dict]:
     out = [{"key": "preset", "label": "Match style preset", "colorblind_safe": False, "hex": []}]
     for k, hexes in NAMED_PALETTES.items():
         label, cb = _PALETTE_META.get(k, (k, False))
         out.append({"key": k, "label": label, "colorblind_safe": cb, "hex": hexes})
+    if custom_palettes:
+        out.extend(custom_palettes)
     return out
 
 
-def theme_r(preset: str, color_mode: str = "color", font_scale: float = 1.0, palette_name: str | None = None) -> str:
+def theme_r(preset: str, color_mode: str = "color", font_scale: float = 1.0,
+            palette_name: str | None = None, custom_palette_values: list[str] | None = None) -> str:
     cfg = _BASE.get(preset, _BASE["nature"])
     if color_mode == "grayscale":
         pal = _GREYS
+    elif palette_name and (palette_name == "custom" or palette_name.startswith("custom:")) and custom_palette_values:
+        pal = custom_palette_values
     elif palette_name and palette_name in NAMED_PALETTES:
         pal = NAMED_PALETTES[palette_name]
     else:
@@ -102,8 +115,8 @@ labplot_theme <- function() {{
     plot.caption = element_text(size = {size}, colour = "grey35"),
     axis.title = element_text(face = "bold", colour = "black", size = {size}),
     axis.text = element_text(colour = "black", size = {size}),
-    axis.line = element_line(colour = "black", linewidth = 0.3),
-    axis.ticks = element_line(colour = "black", linewidth = 0.3),
+    axis.line = element_line(colour = "black", linewidth = 0.4),
+    axis.ticks = element_line(colour = "black", linewidth = 0.35),
     axis.ticks.length = grid::unit(2.2, "pt"),
     legend.position = "right",
     legend.title = element_text(face = "bold", colour = "black", size = {size}),

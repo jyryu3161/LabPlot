@@ -90,6 +90,13 @@ EVALUATION CATEGORIES
 - statistical: plot-type suitability, error-bar conventions, individual data points where expected, scaling/truncation, overlap, significance-marker clarity when visible.
 - suitability: reviewer-facing clarity and common publication-figure norms.
 
+MANDATORY CHECKS
+- Determine whether the color usage is academically restrained and semantically justified. Flag unnecessary multi-color bars when a single-color bar chart is more appropriate.
+- Determine whether axis tick labels, axis titles, legends, or annotations overlap or are clipped. Recommend x-axis rotation when needed.
+- Determine whether the final text size remains publication readable around 7 pt and whether figure dimensions should be changed instead of shrinking text.
+- Determine whether gridlines, saturated primary colors, red-green combinations, or low-contrast elements violate academic figure norms.
+- Use the generated R code as evidence for font size, figure size, line width, palette, and output format when visible image evidence is insufficient.
+
 OUTPUT
 Return only a valid JSON object:
 {
@@ -116,12 +123,16 @@ SCOPE
 - For bar plots, prefer muted single-color bars by default. Use category-colored bars only when color encodes a meaningful grouping requested by the user.
 - For overlapped bar charts, use overlap_bar and keep alpha/transparency high enough to see both series.
 - If a user asks to make colors less excessive, prefer options.palette_name = "journal_muted"; for bar plots also set options.color_bars = false.
+- Keep x-axis tick labels horizontal by default. Set options.x_text_angle to 45 or 90 only when labels are visibly overlapping, long, or crowded. Do not rotate short numeric/bin labels such as 0, 1, 2, ..., 10.
+- If the legend competes with plot area, set options.legend_position = "bottom" for wide figures or "right" for compact figures.
+- Keep font_scale at 1.0 unless the user explicitly requests larger text; adjust figure size rather than shrinking below 7 pt.
+- For automatic quality correction, return every supported patch needed to fix critical visual problems in one response.
 
 VALID PATCH SHAPE
 param_patch may contain only:
 - "style_preset": one of nature, science, cell, minimal, colorblind.
 - "mapping": keys valid for the current plot type; values must be existing column names.
-- "options": valid plot-type options plus universal options: palette_name, size, width_in, height_in, color_mode, font_scale, dpi, title, subtitle, x_label, y_label, legend_title, hide_legend, log_x, log_y, flip_coords.
+- "options": valid plot-type options plus universal options: palette_name, size, width_in, height_in, color_mode, font_scale, dpi, title, subtitle, x_label, y_label, legend_title, hide_legend, log_x, log_y, flip_coords, x_text_angle, legend_position.
 - Bar plot options include stat, error_bars, and color_bars. Overlapped bar options include bar_alpha, bar_width, paired_rows_only, series_1_label, and series_2_label.
 - Valid palette_name values: preset, journal_muted, okabe_ito, tol_bright, set2, npg, tableau10.
 

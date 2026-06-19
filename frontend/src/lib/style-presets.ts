@@ -1,8 +1,8 @@
 const STYLE_PRESET_LABELS: Record<string, string> = {
   nature: 'Clean Classic',
-  science: 'Grid Classic',
-  cell: 'Biomedical',
-  minimal: 'Minimal',
+  science: 'Science Classic',
+  cell: 'Biomedical Classic',
+  minimal: 'Minimal Classic',
   colorblind: 'Colorblind-safe',
 };
 

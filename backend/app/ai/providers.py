@@ -133,12 +133,18 @@ def _gemini(model, key, system, content, schema, max_tokens) -> tuple[dict, dict
             parts.append({"inline_data": {"mime_type": c["mime"], "data": c["b64"]}})
 
     gen = {"responseMimeType": "application/json", "maxOutputTokens": max_tokens, "temperature": 0.3}
+    json_instruction = (
+        "\n\nReturn ONLY a single JSON object that conforms to this JSON schema "
+        "(no prose, no markdown, no code fences):\n" + json.dumps(schema)
+    )
     try:
         gen["responseSchema"] = _to_gemini_schema(schema)
-        sys_text = system  # schema is enforced by responseSchema
+        # Keep the explicit text instruction even when responseSchema is
+        # available. Gemini can still occasionally emit plain text for simple
+        # one-field responses, especially legend rewrites.
+        sys_text = system + json_instruction
     except _UnsupportedSchema:
-        sys_text = (system + "\n\nReturn ONLY a single JSON object that conforms to this JSON schema "
-                    "(no prose, no markdown, no code fences):\n" + json.dumps(schema))
+        sys_text = system + json_instruction
     body = {
         "system_instruction": {"parts": [{"text": sys_text}]},
         "contents": [{"parts": parts}],
@@ -164,7 +170,7 @@ def _gemini(model, key, system, content, schema, max_tokens) -> tuple[dict, dict
     except (KeyError, IndexError):
         raise BadRequestError("Gemini returned no content", error_code="AI_BAD_RESPONSE")
 
-    return _parse_json(text), _gemini_usage(payload)
+    return _parse_json(text, schema), _gemini_usage(payload)
 
 
 def _gemini_usage(payload: dict) -> dict:
@@ -186,7 +192,7 @@ def _gemini_usage(payload: dict) -> dict:
     }
 
 
-def _parse_json(text: str) -> dict:
+def _parse_json(text: str, schema: dict | None = None) -> dict:
     t = (text or "").strip()
     # strip ```json ... ``` / ``` ... ``` fences
     if t.startswith("```"):
@@ -197,7 +203,12 @@ def _parse_json(text: str) -> dict:
             t = t[:-3]
         t = t.strip()
     try:
-        return json.loads(t, strict=False)
+        parsed = json.loads(t, strict=False)
+        if isinstance(parsed, dict):
+            return parsed
+        coerced = _coerce_single_string_response(parsed, schema)
+        if coerced is not None:
+            return coerced
     except json.JSONDecodeError:
         pass
     # robust brace extraction (handles trailing prose)
@@ -211,14 +222,45 @@ def _parse_json(text: str) -> dict:
                 depth -= 1
                 if depth == 0:
                     try:
-                        return json.loads(t[start:i + 1], strict=False)
+                        parsed = json.loads(t[start:i + 1], strict=False)
+                        if isinstance(parsed, dict):
+                            return parsed
                     except json.JSONDecodeError:
                         break
     # last resort: simple span
     end = t.rfind("}")
     if start >= 0 and end > start:
         try:
-            return json.loads(t[start:end + 1], strict=False)
+            parsed = json.loads(t[start:end + 1], strict=False)
+            if isinstance(parsed, dict):
+                return parsed
         except json.JSONDecodeError:
             pass
+    coerced = _coerce_single_string_response(t, schema)
+    if coerced is not None:
+        return coerced
     raise BadRequestError("Gemini did not return valid JSON", error_code="AI_BAD_RESPONSE")
+
+
+def _coerce_single_string_response(value, schema: dict | None) -> dict | None:
+    """Accept plain text for schemas shaped like {"legend": string}.
+
+    Gemini sometimes ignores JSON-only instructions for simple rewrite tasks and
+    returns the requested prose directly. This keeps those user-facing workflows
+    usable without weakening multi-field structured responses.
+    """
+    if not schema or schema.get("type") != "object":
+        return None
+    props = schema.get("properties")
+    required = schema.get("required") or []
+    if not isinstance(props, dict) or len(props) != 1 or len(required) != 1:
+        return None
+    key = required[0]
+    field = props.get(key)
+    if not isinstance(field, dict) or field.get("type") != "string":
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if text and "{" not in text and "}" not in text:
+            return {key: text}
+    return None

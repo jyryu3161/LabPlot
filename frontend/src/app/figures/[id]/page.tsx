@@ -8,8 +8,9 @@ import {
   getFigure, getDataset, getPlotTypes, getStyles, getPalettes, rerenderFigure, reviewVersion,
   improveVersion, applyImprovement, updateFigure, generateLegend, downloadExport, enhancePrompt, saveSvgEditVersion,
   deleteFigureVersion, getProject, saveFigureTemplateFavorite, deleteFigureTemplateFavorite,
+  createCustomPalette, updateCustomPalette, deleteCustomPalette,
 } from '@/lib/api';
-import type { FigureVersion, Review, Improvement, PlotTypeDef, ColumnProfile } from '@/lib/types';
+import type { FigureVersion, Review, Improvement, PlotTypeDef, ColumnProfile, PaletteDef } from '@/lib/types';
 import { formatStylePreset } from '@/lib/style-presets';
 import { SvgVectorEditor } from '@/components/figures/SvgVectorEditor';
 import { AppHeader } from '@/components/layout/AppHeader';
@@ -22,6 +23,18 @@ import { Textarea } from '@/components/ui/textarea';
 import { Loader2, Star, Wand2, Download, CheckCircle2, History, Pencil, FileText, Sparkles, Trash2, MousePointer2 } from 'lucide-react';
 
 const SCORE_COLOR = (s: number) => (s >= 80 ? 'text-green-600' : s >= 60 ? 'text-amber-600' : 'text-red-600');
+const HEX_COLOR_RE = /^#[0-9A-Fa-f]{6}$/;
+const DEFAULT_CUSTOM_COLORS = ['#4477AA', '#EE6677', '#228833', '#CCBB44'];
+const REPRESENTATIVE_COLORS = [
+  '#4477AA', '#EE6677', '#228833', '#CCBB44', '#66CCEE', '#AA3377',
+  '#332288', '#88CCEE', '#44AA99', '#117733', '#DDCC77', '#CC6677',
+  '#882255', '#999933', '#000000', '#666666',
+];
+
+function normalizeHexColor(value: string): string {
+  const clean = value.trim();
+  return HEX_COLOR_RE.test(clean) ? clean.toUpperCase() : clean;
+}
 
 export default function FigureDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -46,6 +59,10 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
   const [legend, setLegend] = useState<string | null>(null);
   const [improvePrompt, setImprovePrompt] = useState('');
   const [legendPrompt, setLegendPrompt] = useState('');
+  const [palettePanelOpen, setPalettePanelOpen] = useState(false);
+  const [paletteEditingId, setPaletteEditingId] = useState<string | null>(null);
+  const [paletteName, setPaletteName] = useState('');
+  const [paletteColors, setPaletteColors] = useState<string[]>(DEFAULT_CUSTOM_COLORS);
 
   const plotTypes = plotTypesData?.plot_types ?? [];
   const styles = stylesData?.styles ?? [];
@@ -57,6 +74,9 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
   const effectiveStyle = style ?? fig?.style_preset ?? '';
   const effectiveMapping = mapping ?? version?.mapping ?? {};
   const effectiveOptions = options ?? version?.options ?? {};
+  const selectedPaletteKey = String(effectiveOptions.palette_name ?? 'preset');
+  const selectedPalette = palettes.find((pl) => pl.key === selectedPaletteKey);
+  const selectedStyle = styles.find((s) => s.key === effectiveStyle);
   const descriptionValue = description ?? fig?.description ?? '';
   const legendValue = legend ?? fig?.legend ?? '';
   const currentDef: PlotTypeDef | undefined = plotTypes.find((p) => p.type === effectivePlotType);
@@ -178,6 +198,38 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
     },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Template update failed'),
   });
+  const saveCustomPalette = useMutation({
+    mutationFn: () => {
+      const name = paletteName.trim();
+      const colors = paletteColors.map(normalizeHexColor).filter((c) => HEX_COLOR_RE.test(c));
+      if (!name) throw new Error('Palette name is required');
+      if (colors.length === 0) throw new Error('Choose at least one HEX color');
+      if (paletteEditingId) return updateCustomPalette(paletteEditingId, { name, colors });
+      return createCustomPalette({ name, colors });
+    },
+    onSuccess: (palette) => {
+      toast.success(paletteEditingId ? 'Palette updated' : 'Palette saved');
+      setOptions({ ...effectiveOptions, palette_name: palette.key });
+      setPalettePanelOpen(false);
+      setPaletteEditingId(null);
+      qc.invalidateQueries({ queryKey: ['palettes'] });
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Palette save failed'),
+  });
+  const removeCustomPalette = useMutation({
+    mutationFn: (palette: PaletteDef) => {
+      if (!palette.id) throw new Error('Palette id is missing');
+      return deleteCustomPalette(palette.id);
+    },
+    onSuccess: (_, palette) => {
+      toast.success('Palette deleted');
+      if (selectedPaletteKey === palette.key) setOptions({ ...effectiveOptions, palette_name: 'preset' });
+      setPalettePanelOpen(false);
+      setPaletteEditingId(null);
+      qc.invalidateQueries({ queryKey: ['palettes'] });
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Palette delete failed'),
+  });
 
   async function doExport(fmt: string) {
     if (!version) return;
@@ -202,6 +254,36 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
     const opt = { ...effectiveOptions };
     def?.options.forEach((o) => { if (opt[o.key] === undefined && o.default !== undefined) opt[o.key] = o.default; });
     setOptions(opt);
+  }
+
+  function openNewPalette() {
+    setPaletteEditingId(null);
+    setPaletteName('');
+    setPaletteColors(selectedPalette?.hex?.length ? selectedPalette.hex.slice(0, 12) : DEFAULT_CUSTOM_COLORS);
+    setPalettePanelOpen(true);
+  }
+
+  function openEditPalette(palette: PaletteDef) {
+    if (!palette.custom || !palette.id) return;
+    setPaletteEditingId(palette.id);
+    setPaletteName(palette.name ?? palette.label.replace(/^Custom:\s*/, ''));
+    setPaletteColors(palette.hex?.length ? palette.hex.slice(0, 12) : DEFAULT_CUSTOM_COLORS);
+    setPalettePanelOpen(true);
+  }
+
+  function updatePaletteColor(index: number, color: string) {
+    const next = [...paletteColors];
+    next[index] = normalizeHexColor(color);
+    setPaletteColors(next);
+  }
+
+  function addRepresentativeColor(color: string) {
+    const next = [...paletteColors];
+    const blankIndex = next.findIndex((c) => !c.trim());
+    if (blankIndex >= 0) next[blankIndex] = color;
+    else if (next.length < 12) next.push(color);
+    else next[next.length - 1] = color;
+    setPaletteColors(next);
   }
 
   if (isLoading || !fig) {
@@ -399,18 +481,95 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
                           <select className="w-full rounded-md border px-2 py-1.5 text-sm" value={effectiveStyle} onChange={(e) => setStyle(e.target.value)}>{styles.map((s) => <option key={s.key} value={s.key}>{s.label}</option>)}</select>
                         </div>
                       </div>
+                      {selectedStyle?.description && (
+                        <p className="text-xs leading-relaxed text-muted-foreground">
+                          {selectedStyle.description} Color palette overrides the style colors; manuscript styles use no gridlines by default.
+                        </p>
+                      )}
                       {/* color palette */}
                       <div className="space-y-1">
                         <Label className="text-xs">Color palette</Label>
-                        <select className="w-full rounded-md border px-2 py-1.5 text-sm" value={String(effectiveOptions.palette_name ?? 'preset')} onChange={(e) => setOptions({ ...effectiveOptions, palette_name: e.target.value })}>
+                        <select className="w-full rounded-md border px-2 py-1.5 text-sm" value={selectedPaletteKey} onChange={(e) => setOptions({ ...effectiveOptions, palette_name: e.target.value })}>
                           {palettes.map((pl) => <option key={pl.key} value={pl.key}>{pl.label}</option>)}
                         </select>
-                        {(() => {
-                          const sel = palettes.find((pl) => pl.key === (effectiveOptions.palette_name ?? 'preset'));
-                          return sel?.hex?.length ? (
-                            <div className="mt-1 flex gap-0.5">{sel.hex.map((h) => <span key={h} className="h-3 w-4 rounded-sm border" style={{ backgroundColor: h }} />)}</div>
-                          ) : null;
-                        })()}
+                        {selectedPalette?.hex?.length ? (
+                          <div className="mt-1 flex gap-0.5">{selectedPalette.hex.map((h) => <span key={h} className="h-3 w-4 rounded-sm border" style={{ backgroundColor: h }} />)}</div>
+                        ) : null}
+                        <div className="flex flex-wrap gap-2 pt-1">
+                          <Button type="button" variant="outline" size="sm" onClick={openNewPalette}>New custom palette</Button>
+                          {selectedPalette?.custom && (
+                            <>
+                              <Button type="button" variant="outline" size="sm" onClick={() => openEditPalette(selectedPalette)}>Edit palette</Button>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                disabled={removeCustomPalette.isPending}
+                                onClick={() => {
+                                  if (confirm(`Delete custom palette "${selectedPalette.name ?? selectedPalette.label}"?`)) {
+                                    removeCustomPalette.mutate(selectedPalette);
+                                  }
+                                }}
+                              >
+                                <Trash2 className="mr-1 h-3 w-3" /> Delete
+                              </Button>
+                            </>
+                          )}
+                        </div>
+                        {palettePanelOpen && (
+                          <div className="mt-2 space-y-2 rounded-md border bg-muted/20 p-2">
+                            <div className="space-y-1">
+                              <Label className="text-xs">Palette name</Label>
+                              <Input className="h-8 text-sm" value={paletteName} onChange={(e) => setPaletteName(e.target.value)} placeholder="e.g. AAV muted bars" maxLength={100} />
+                            </div>
+                            <div className="space-y-1">
+                              <Label className="text-xs">Representative colors</Label>
+                              <div className="flex flex-wrap gap-1">
+                                {REPRESENTATIVE_COLORS.map((color) => (
+                                  <button
+                                    key={color}
+                                    type="button"
+                                    title={color}
+                                    className="h-6 w-6 rounded border shadow-sm"
+                                    style={{ backgroundColor: color }}
+                                    onClick={() => addRepresentativeColor(color)}
+                                  />
+                                ))}
+                              </div>
+                            </div>
+                            <div className="space-y-1">
+                              <Label className="text-xs">Palette colors</Label>
+                              {paletteColors.map((color, idx) => (
+                                <div key={idx} className="flex items-center gap-1">
+                                  <input
+                                    type="color"
+                                    value={HEX_COLOR_RE.test(color) ? color : '#4477AA'}
+                                    onChange={(e) => updatePaletteColor(idx, e.target.value)}
+                                    className="h-8 w-9 rounded border bg-background"
+                                  />
+                                  <Input className="h-8 flex-1 font-mono text-xs" value={color} onChange={(e) => updatePaletteColor(idx, e.target.value)} />
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="icon-xs"
+                                    disabled={paletteColors.length <= 1}
+                                    onClick={() => setPaletteColors(paletteColors.filter((_, i) => i !== idx))}
+                                  >
+                                    <Trash2 className="h-3 w-3" />
+                                  </Button>
+                                </div>
+                              ))}
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                              <Button type="button" variant="outline" size="sm" disabled={paletteColors.length >= 12} onClick={() => setPaletteColors([...paletteColors, '#666666'])}>Add color</Button>
+                              <Button type="button" size="sm" disabled={saveCustomPalette.isPending} onClick={() => saveCustomPalette.mutate()}>
+                                {saveCustomPalette.isPending ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : null}
+                                {paletteEditingId ? 'Save palette' : 'Create and apply'}
+                              </Button>
+                              <Button type="button" variant="ghost" size="sm" onClick={() => setPalettePanelOpen(false)}>Cancel</Button>
+                            </div>
+                          </div>
+                        )}
                       </div>
                       {/* figure size */}
                       <div className="grid grid-cols-3 gap-2">

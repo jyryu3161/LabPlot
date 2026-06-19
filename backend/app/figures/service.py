@@ -20,6 +20,7 @@ from app.config import settings
 from app.datasets.models import Dataset
 from app.datasets import service as ds_service
 from app.figures.models import Figure, FigureCodeArtifact, FigureTemplateFavorite, FigureVersion, Improvement, Recommendation, Review
+from app.palettes import service as palette_service
 from app.projects.models import Project
 from app.r_engine import renderer
 from app.r_engine.presets import PRESETS
@@ -29,7 +30,8 @@ _STATIC_ROOT = os.path.dirname(settings.figures_dir.rstrip("/"))
 _UNIVERSAL_OPTION_KEYS = {
     "palette_name", "size", "width_in", "height_in", "color_mode", "font_scale", "dpi",
     "title", "subtitle", "x_label", "y_label", "legend_title",
-    "hide_legend", "log_x", "log_y", "flip_coords",
+    "hide_legend", "log_x", "log_y", "flip_coords", "x_text_angle", "legend_position",
+    "custom_palette_values", "custom_palette_label",
 }
 _OPTION_CHOICES = {
     "palette_name": {"preset", "journal_muted", "okabe_ito", "tol_bright", "set2", "npg", "tableau10"},
@@ -39,6 +41,7 @@ _OPTION_CHOICES = {
     "palette": {"viridis", "magma", "inferno", "plasma", "cividis"},
     "corr_method": {"pearson", "spearman"},
     "layout": {"fr", "kk", "circle", "stress"},
+    "legend_position": {"right", "bottom", "none"},
 }
 _BOOL_OPTIONS = {
     "show_points", "show_box", "error_bars", "scale_rows", "add_smooth", "show_density", "show_rug",
@@ -47,7 +50,7 @@ _BOOL_OPTIONS = {
 }
 _NUMBER_OPTIONS = {
     "fc_threshold", "p_threshold", "label_top", "font_scale", "dpi", "width_in", "height_in",
-    "bins", "sig_threshold", "bar_alpha", "bar_width",
+    "bins", "sig_threshold", "bar_alpha", "bar_width", "x_text_angle",
 }
 _MAX_SVG_BYTES = 5 * 1024 * 1024
 _BLOCKED_SVG_TAGS = {"script", "foreignobject", "iframe", "object", "embed", "link"}
@@ -130,6 +133,28 @@ def sanitize_options(plot_type: str, options: dict | None) -> dict:
         sanitized = _sanitize_option(key, value)
         if sanitized is not None:
             clean[key] = sanitized
+    return clean
+
+
+def _resolve_custom_palette_options(db: Session, owner_id: uuid.UUID, options: dict | None) -> dict:
+    clean = dict(options or {})
+    palette_name = clean.get("palette_name")
+    if isinstance(palette_name, str) and palette_name.startswith("custom:"):
+        try:
+            palette_id = uuid.UUID(palette_name.split(":", 1)[1])
+        except (ValueError, IndexError):
+            raise BadRequestError("Custom palette was not found", error_code="CUSTOM_PALETTE_NOT_FOUND")
+        row = palette_service.get_user_palette(db, owner_id, palette_id)
+        clean["custom_palette_values"] = palette_service.normalize_colors(row.colors or [])
+        clean["custom_palette_label"] = row.name
+    elif palette_name == "custom":
+        if "custom_palette_values" in clean:
+            clean["custom_palette_values"] = palette_service.normalize_colors(clean.get("custom_palette_values"))
+        else:
+            clean.pop("custom_palette_label", None)
+    else:
+        clean.pop("custom_palette_values", None)
+        clean.pop("custom_palette_label", None)
     return clean
 
 
@@ -538,6 +563,7 @@ def create_figure(db: Session, owner_id: uuid.UUID, data) -> dict:
     preset = data.style_preset if data.style_preset in PRESETS else "nature"
     validate_mapping(data.plot_type, data.mapping)
     options = sanitize_options(data.plot_type, data.options)
+    options = _resolve_custom_palette_options(db, owner_id, options)
     df = ds_service.load_dataframe(ds)
 
     figure_id = uuid.uuid4()
@@ -562,8 +588,200 @@ def create_figure(db: Session, owner_id: uuid.UUID, data) -> dict:
     db.add(version)
     db.flush()
     _archive_code_artifact(db, owner_id, ds, fig, version, res)
+    _auto_quality_correct_initial_figure(
+        db, owner_id, ds, df, fig, version, data.plot_type, data.mapping, options, preset
+    )
     db.commit()
     return figure_detail(db, figure_id, owner_id)
+
+
+def _auto_quality_correct_initial_figure(db: Session, owner_id: uuid.UUID, ds: Dataset, df,
+                                         fig: Figure, version: FigureVersion,
+                                         plot_type: str, mapping: dict, options: dict,
+                                         preset: str) -> None:
+    """Review the initial render and, when useful, create a corrected v2.
+
+    This is intentionally best-effort: AI outages or unsupported responses should
+    not prevent the user from getting the first rendered figure.
+    """
+    try:
+        if not version.png_path or not storage.exists(version.png_path):
+            return
+        png_path = storage.materialize(version.png_path, suffix=".png")
+        review_payload = ai_client.review_figure(
+            db,
+            png_path,
+            plot_type,
+            mapping or {},
+            options or {},
+            project_context=_project_context(db, fig.project_id),
+            user_id=owner_id,
+            r_code=version.r_code,
+        )
+        review = Review(
+            figure_version_id=version.id,
+            publication_score=review_payload.get("publication_score"),
+            payload=review_payload,
+            model=ai_client.active_provider_label(db, owner_id),
+        )
+        db.add(review)
+        pdef = _plot_def(plot_type)
+        available = {
+            "options": pdef.get("options", []),
+            "mapping_keys": [r["key"] for r in pdef["required"]] + [o["key"] for o in pdef.get("optional", [])],
+        }
+        suggestions = ai_client.improve_figure(
+            db,
+            plot_type,
+            mapping or {},
+            options or {},
+            preset,
+            review_payload,
+            [available],
+            project_context=_project_context(db, fig.project_id),
+            user_id=owner_id,
+            user_request=(
+                "Automatically correct this first draft for journal-ready output. "
+                "Prioritize restrained academic colors, avoid unnecessary multicolor bars, "
+                "fix overlapping x-axis labels with x_text_angle when needed, keep final text at 7 pt, "
+                "and choose a suitable single-column, wide, square, or custom figure size rather than shrinking text."
+            ),
+        )
+        patch = _combined_quality_patch(suggestions, pdef, mapping or {}, options or {}, preset)
+        _drop_unneeded_auto_x_rotation(patch, df, mapping or {}, options or {})
+        if not patch:
+            return
+        new_mapping = {**(mapping or {}), **(patch.get("mapping") or {})}
+        new_options = {**(options or {}), **(patch.get("options") or {})}
+        new_preset = patch.get("style_preset") or preset
+        validate_mapping(plot_type, new_mapping)
+        new_options = sanitize_options(plot_type, new_options)
+        new_options = _resolve_custom_palette_options(db, owner_id, new_options)
+        next_num = (db.query(func.max(FigureVersion.version_number))
+                    .filter(FigureVersion.figure_id == fig.id).scalar() or 0) + 1
+        corrected_id = uuid.uuid4()
+        res, _ = _render_into_version(df, plot_type, new_mapping, new_options, new_preset, fig.id, corrected_id)
+        corrected = FigureVersion(
+            id=corrected_id,
+            figure_id=fig.id,
+            version_number=next_num,
+            mapping=new_mapping,
+            options=new_options or {},
+            style_preset=new_preset,
+            r_code=res.r_code,
+            change_note="Auto-corrected after AI quality check",
+            png_path=res.outputs.get("png"),
+            svg_path=res.outputs.get("svg"),
+            tiff_path=res.outputs.get("tiff"),
+            pdf_path=res.outputs.get("pdf"),
+            r_path=res.outputs.get("r"),
+            render_log=res.log,
+        )
+        db.add(corrected)
+        fig.current_version_id = corrected_id
+        fig.style_preset = new_preset
+        fig.status = "ready"
+        for suggestion in suggestions:
+            clean = _sanitize_param_patch(suggestion.get("param_patch", {}), pdef, mapping or {})
+            if not clean:
+                continue
+            db.add(Improvement(
+                figure_version_id=version.id,
+                suggestion_type=suggestion.get("suggestion_type"),
+                current_state=suggestion.get("current"),
+                recommended=suggestion.get("recommended"),
+                param_patch=clean,
+                priority=suggestion.get("priority"),
+                applied=True,
+            ))
+        db.flush()
+        _archive_code_artifact(db, owner_id, ds, fig, corrected, res)
+    except Exception as exc:
+        note = f"Auto quality check skipped: {type(exc).__name__}: {str(exc)[:300]}"
+        version.render_log = ((version.render_log or "").rstrip() + "\n" + note).strip()
+
+
+def _combined_quality_patch(suggestions: list[dict], pdef: dict, base_mapping: dict[str, Any],
+                            base_options: dict[str, Any], base_preset: str) -> dict[str, Any]:
+    combined: dict[str, Any] = {}
+    for suggestion in suggestions or []:
+        clean = _sanitize_param_patch(suggestion.get("param_patch", {}), pdef, base_mapping)
+        if not clean:
+            continue
+        if clean.get("style_preset"):
+            combined["style_preset"] = clean["style_preset"]
+        if clean.get("mapping"):
+            combined.setdefault("mapping", {}).update(clean["mapping"])
+        if clean.get("options"):
+            combined.setdefault("options", {}).update(clean["options"])
+    if not combined:
+        return {}
+    if combined.get("style_preset") == base_preset:
+        combined.pop("style_preset", None)
+    if combined.get("mapping"):
+        changed_mapping = {k: v for k, v in combined["mapping"].items() if base_mapping.get(k) != v}
+        if changed_mapping:
+            combined["mapping"] = changed_mapping
+        else:
+            combined.pop("mapping", None)
+    if combined.get("options"):
+        changed_options = {k: v for k, v in combined["options"].items() if base_options.get(k) != v}
+        if changed_options:
+            combined["options"] = changed_options
+        else:
+            combined.pop("options", None)
+    return combined
+
+
+def _drop_unneeded_auto_x_rotation(patch: dict[str, Any], df, mapping: dict[str, Any],
+                                   base_options: dict[str, Any]) -> None:
+    options_patch = patch.get("options")
+    if not isinstance(options_patch, dict) or "x_text_angle" not in options_patch:
+        return
+    if _x_axis_labels_need_rotation(df, mapping, {**base_options, **options_patch}):
+        return
+    options_patch.pop("x_text_angle", None)
+    if not options_patch:
+        patch.pop("options", None)
+
+
+def _x_axis_labels_need_rotation(df, mapping: dict[str, Any], options: dict[str, Any]) -> bool:
+    x_col = mapping.get("x") or mapping.get("time") or mapping.get("group") or mapping.get("axis")
+    if not isinstance(x_col, str) or not x_col or x_col not in getattr(df, "columns", []):
+        return False
+    values = df[x_col].dropna().astype(str).str.strip()
+    labels = [label for label in values.unique().tolist() if label]
+    if len(labels) <= 1:
+        return False
+
+    lengths = [len(label) for label in labels]
+    numeric = True
+    for label in labels:
+        try:
+            float(label)
+        except ValueError:
+            numeric = False
+            break
+    if numeric and max(lengths) <= 5 and len(labels) <= 25:
+        return False
+
+    size = options.get("size", "wide")
+    width_by_size = {"single_column": 3.6, "wide": 7.0, "double_column": 7.0, "square": 4.5}
+    try:
+        width_in = float(options.get("width_in") if size == "custom" else width_by_size.get(size, 7.0))
+    except (TypeError, ValueError):
+        width_in = 7.0
+    width_in = max(1.0, min(20.0, width_in))
+    total_chars = sum(min(length, 18) for length in lengths)
+    avg_len = sum(lengths) / len(lengths)
+
+    return (
+        max(lengths) >= 14
+        or (max(lengths) >= 10 and len(labels) >= 4)
+        or total_chars > width_in * 9
+        or (len(labels) > width_in * 5 and avg_len > 3)
+        or len(labels) > 30
+    )
 
 
 def rerender(db: Session, figure_id: uuid.UUID, owner_id: uuid.UUID, req) -> dict:
@@ -580,6 +798,7 @@ def rerender(db: Session, figure_id: uuid.UUID, owner_id: uuid.UUID, req) -> dic
     plot_type = getattr(req, "plot_type", None) or fig.plot_type
     validate_mapping(plot_type, mapping)
     options = sanitize_options(plot_type, options)
+    options = _resolve_custom_palette_options(db, owner_id, options)
 
     ds = ds_service.get_dataset(db, fig.dataset_id, owner_id)
     df = ds_service.load_dataframe(ds)
@@ -714,7 +933,8 @@ def review_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, own
     png_path = storage.materialize(v.png_path, suffix=".png")
     result = ai_client.review_figure(
         db, png_path, fig.plot_type, v.mapping or {}, v.options or {},
-        project_context=_project_context(db, fig.project_id), user_id=owner_id
+        project_context=_project_context(db, fig.project_id), user_id=owner_id,
+        r_code=v.r_code,
     )
     rev = Review(
         figure_version_id=version_id,
@@ -819,6 +1039,30 @@ def _known_mapping_values(mapping: dict[str, Any]) -> set[str]:
 def _sanitize_option(key: str, value: Any) -> Any:
     if value in (None, ""):
         return None
+    if key == "palette_name":
+        if isinstance(value, str) and value in _OPTION_CHOICES[key]:
+            return value
+        if isinstance(value, str) and value.startswith("custom:"):
+            try:
+                uuid.UUID(value.split(":", 1)[1])
+            except (ValueError, IndexError):
+                return None
+            return value
+        if value == "custom":
+            return value
+        return None
+    if key == "custom_palette_values":
+        try:
+            return palette_service.normalize_colors(value)
+        except BadRequestError:
+            return None
+    if key == "custom_palette_label":
+        if not isinstance(value, str):
+            return None
+        try:
+            return palette_service.normalize_palette_name(value)
+        except BadRequestError:
+            return None
     if key in _OPTION_CHOICES:
         return value if isinstance(value, str) and value in _OPTION_CHOICES[key] else None
     if key in _BOOL_OPTIONS:
@@ -840,6 +1084,8 @@ def _sanitize_option(key: str, value: Any) -> Any:
             return max(0.15, min(1.0, num))
         if key == "bar_width":
             return max(0.2, min(1.0, num))
+        if key == "x_text_angle":
+            return max(0, min(90, num))
         if key in {"width_in", "height_in"}:
             return max(1.0, min(20.0, num))
         return num

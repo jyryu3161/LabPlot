@@ -30,6 +30,7 @@ class User(Base):
     figures = relationship("Figure", back_populates="owner", cascade="all, delete-orphan")
     figure_template_favorites = relationship("FigureTemplateFavorite", back_populates="user", cascade="all, delete-orphan")
     password_reset_tokens = relationship("PasswordResetToken", back_populates="user", cascade="all, delete-orphan")
+    color_palettes = relationship("UserColorPalette", back_populates="owner", cascade="all, delete-orphan")
 
 
 class PasswordResetToken(Base):

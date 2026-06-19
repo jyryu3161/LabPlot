@@ -298,6 +298,15 @@ export async function recommendChartsFromImage(datasetId: string, file: File): P
 export async function getPlotTypes(): Promise<{ plot_types: PlotTypeDef[] }> { return fetcher('/api/plot-types'); }
 export async function getStyles(): Promise<{ styles: StyleDef[] }> { return fetcher('/api/styles'); }
 export async function getPalettes(): Promise<{ palettes: import('./types').PaletteDef[] }> { return fetcher('/api/palettes'); }
+export async function createCustomPalette(data: { name: string; colors: string[] }): Promise<import('./types').PaletteDef> {
+  return fetcher('/api/palettes/custom', { method: 'POST', body: JSON.stringify(data) });
+}
+export async function updateCustomPalette(id: string, data: { name: string; colors: string[] }): Promise<import('./types').PaletteDef> {
+  return fetcher(`/api/palettes/custom/${id}`, { method: 'PUT', body: JSON.stringify(data) });
+}
+export async function deleteCustomPalette(id: string): Promise<void> {
+  return fetcher(`/api/palettes/custom/${id}`, { method: 'DELETE' });
+}
 
 // ── figures ──
 export interface FigureCreatePayload {

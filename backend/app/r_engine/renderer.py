@@ -56,6 +56,7 @@ def build_script(plot_type: str, mapping: dict, options: dict, preset: str,
     w, h, dpi = _dimensions(opts)
     head = ("# LabPlot AI - reproducible figure script\n"
             f"# plot type: {plot_type} | style: {preset} | color: {color_mode}\n"
+            "# generated with LabPlot academic figure rules: 7 pt text, restrained palettes, white background, no gridlines\n"
             + _HEADER
             + f'\ndf <- readr::read_csv("{data_filename}", show_col_types = FALSE)\n'
             + "df <- as.data.frame(df)\n")
@@ -77,8 +78,20 @@ pdf("figure.pdf", width = {w}, height = {h}, pointsize = 7); draw_plot(); invisi
         lt = opts.get("legend_title")
         if lt:
             post += f"p <- p + labs(fill = {rq(lt)}, colour = {rq(lt)})\n"
-        if opts.get("hide_legend"):
+        legend_position = opts.get("legend_position")
+        if opts.get("hide_legend") or legend_position == "none":
             post += 'p <- p + theme(legend.position = "none")\n'
+        elif legend_position in {"right", "bottom"}:
+            post += f'p <- p + theme(legend.position = "{legend_position}")\n'
+        x_angle = opts.get("x_text_angle")
+        if x_angle not in (None, ""):
+            try:
+                angle = max(0, min(90, float(x_angle)))
+                hjust = 1 if angle >= 30 else 0.5
+                vjust = 0.5 if angle >= 30 else 1
+                post += f"p <- p + theme(axis.text.x = element_text(angle = {angle:g}, hjust = {hjust}, vjust = {vjust}))\n"
+            except (TypeError, ValueError):
+                pass
         if opts.get("log_y"):
             post += "p <- p + scale_y_log10()\n"
         if opts.get("log_x"):
@@ -93,7 +106,7 @@ ggsave("figure.tiff", p, width = {w}, height = {h}, dpi = {dpi}, bg = "white", c
 ggsave("figure.pdf",  p, width = {w}, height = {h}, bg = "white", limitsize = FALSE)
 """
     return (head
-            + theme_r(preset, color_mode, font_scale, opts.get("palette_name"))
+            + theme_r(preset, color_mode, font_scale, opts.get("palette_name"), opts.get("custom_palette_values"))
             + plot_r
             + theme_append
             + post

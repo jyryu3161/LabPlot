@@ -32,7 +32,8 @@ from app.figures.schemas import (
     TemplateFavoriteRequest,
     VersionResponse,
 )
-from app.r_engine.presets import PRESET_LABELS, PRESETS, list_palettes
+from app.palettes import service as palette_service
+from app.r_engine.presets import PRESET_DESCRIPTIONS, PRESET_LABELS, PRESETS, list_palettes
 from app.r_engine.templates import PLOT_TYPES
 
 router = APIRouter(prefix="/api/figures", tags=["figures"])
@@ -47,12 +48,17 @@ def plot_types(_: User = Depends(get_current_user)):
 
 @meta_router.get("/styles")
 def styles(_: User = Depends(get_current_user)):
-    return {"styles": [{"key": p, "label": PRESET_LABELS.get(p, p)} for p in PRESETS]}
+    return {
+        "styles": [
+            {"key": p, "label": PRESET_LABELS.get(p, p), "description": PRESET_DESCRIPTIONS.get(p, "")}
+            for p in PRESETS
+        ]
+    }
 
 
 @meta_router.get("/palettes")
-def palettes(_: User = Depends(get_current_user)):
-    return {"palettes": list_palettes()}
+def palettes(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    return {"palettes": list_palettes(palette_service.list_palette_options(db, current_user.id))}
 
 
 @meta_router.post("/ai/enhance-prompt", response_model=EnhancePromptResponse,

@@ -213,8 +213,16 @@ export interface PlotTypeDef {
   optional: PlotField[];
   options: PlotOption[];
 }
-export interface StyleDef { key: string; label: string; }
-export interface PaletteDef { key: string; label: string; colorblind_safe: boolean; hex: string[]; }
+export interface StyleDef { key: string; label: string; description?: string; }
+export interface PaletteDef {
+  key: string;
+  label: string;
+  colorblind_safe: boolean;
+  hex: string[];
+  custom?: boolean;
+  id?: string;
+  name?: string;
+}
 export interface PublicFigure {
   id: string;
   current_version_id?: string;

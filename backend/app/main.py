@@ -21,6 +21,7 @@ from app.figures import models as _fig_models  # noqa: F401
 from app.ai import models as _ai_models  # noqa: F401
 from app.audit import models as _audit_models  # noqa: F401
 from app.client_errors import models as _client_error_models  # noqa: F401
+from app.palettes import models as _palette_models  # noqa: F401
 from app.database import engine
 
 from app.auth.router import router as auth_router
@@ -31,6 +32,7 @@ from app.organizations.router import router as organizations_router
 from app.projects.router import router as projects_router
 from app.datasets.router import router as datasets_router
 from app.figures.router import router as figures_router, meta_router
+from app.palettes.router import router as palettes_router
 from app.public.router import router as public_router
 
 
@@ -78,6 +80,7 @@ app.include_router(projects_router)
 app.include_router(datasets_router)
 app.include_router(figures_router)
 app.include_router(meta_router)
+app.include_router(palettes_router)
 app.include_router(public_router)
 
 # static mount for rendered figures (/static/figures/...)

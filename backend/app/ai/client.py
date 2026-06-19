@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.ai import providers
 from app.ai.config_service import active_model_and_key, get_config
+from app.ai.guide_prompts import figure_quality_checker_guide, r_code_generator_guide, with_guide
 from app.ai.models import AIUsage
 from app.ai.prompts import IMPROVE_SYSTEM, LEGEND_SYSTEM, RECOMMEND_SYSTEM, REFERENCE_RECOMMEND_SYSTEM, REVIEW_SYSTEM
 from app.common.exceptions import BadRequestError
@@ -55,6 +56,7 @@ _OPTIONS_PATCH_SCHEMA = {
         "corr_method": {"type": "string", "enum": ["pearson", "spearman"]},
         "palette": {"type": "string", "enum": ["viridis", "magma", "inferno", "plasma", "cividis"]},
         "bins": {"type": "integer"}, "bar_alpha": {"type": "number"}, "bar_width": {"type": "number"},
+        "x_text_angle": {"type": "number"},
         "fc_threshold": {"type": "number"}, "p_threshold": {"type": "number"},
         "label_top": {"type": "integer"}, "palette_name": {"type": "string"},
         "size": {"type": "string", "enum": ["single_column", "wide", "double_column", "square", "custom"]},
@@ -64,6 +66,7 @@ _OPTIONS_PATCH_SCHEMA = {
         "title": {"type": "string"}, "subtitle": {"type": "string"},
         "x_label": {"type": "string"}, "y_label": {"type": "string"},
         "legend_title": {"type": "string"}, "series_1_label": {"type": "string"}, "series_2_label": {"type": "string"},
+        "legend_position": {"type": "string", "enum": ["right", "bottom", "none"]},
         "hide_legend": {"type": "boolean"},
         "log_x": {"type": "boolean"}, "log_y": {"type": "boolean"}, "flip_coords": {"type": "boolean"},
     },
@@ -335,12 +338,13 @@ def recommend_from_reference_image(db: Session, column_profile: list[dict], imag
 
 # ----------------------------------------------------------------- review
 def review_figure(db: Session, png_path: str, plot_type: str, mapping: dict, options: dict,
-                  project_context: str | None = None, user_id: uuid.UUID | None = None) -> dict:
+                  project_context: str | None = None, user_id: uuid.UUID | None = None,
+                  r_code: str | None = None) -> dict:
     if not os.path.exists(png_path):
         raise BadRequestError("Rendered image not found for review", error_code="NO_IMAGE")
     with open(png_path, "rb") as f:
         b64 = base64.standard_b64encode(f.read()).decode("ascii")
-    system = REVIEW_SYSTEM
+    system = with_guide(REVIEW_SYSTEM, figure_quality_checker_guide(), "Figure quality checker")
     review_section_schema = {
         "type": "object",
         "properties": {
@@ -365,6 +369,7 @@ def review_figure(db: Session, png_path: str, plot_type: str, mapping: dict, opt
     content = _ctx_block(project_context) + [
         {"kind": "text", "text": f"Figure type: {plot_type}. Mapping: {json.dumps(mapping, ensure_ascii=False)}. "
                                  f"Style options: {json.dumps(options, ensure_ascii=False)}."},
+        {"kind": "text", "text": "Generated R code for verification:\n```r\n" + (r_code or "")[:20000] + "\n```"},
         {"kind": "image", "mime": "image/png", "b64": b64},
     ]
     return _normalize_review_payload(
@@ -406,7 +411,7 @@ def _normalize_review_payload(payload: dict) -> dict:
 def improve_figure(db: Session, plot_type: str, mapping: dict, options: dict, style_preset: str,
                    review: dict | None, available_options: list[dict], project_context: str | None = None,
                    user_id: uuid.UUID | None = None, user_request: str | None = None) -> list[dict]:
-    system = IMPROVE_SYSTEM
+    system = with_guide(IMPROVE_SYSTEM, r_code_generator_guide(), "R code generator")
     schema = {
         "type": "object",
         "properties": {"suggestions": {"type": "array", "items": {"type": "object", "properties": {
