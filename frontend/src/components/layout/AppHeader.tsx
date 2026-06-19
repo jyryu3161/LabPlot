@@ -54,7 +54,7 @@ export function AppHeader() {
   return (
     <header className="border-b bg-background sticky top-0 z-30">
       <div className="mx-auto flex h-14 max-w-7xl items-center gap-6 px-4">
-        <Link href="/projects" className="flex items-center gap-2 font-semibold">
+        <Link href="/" className="flex items-center gap-2 font-semibold">
           <BarChart3 className="h-5 w-5 text-primary" /> LabPlot AI
         </Link>
         <nav className="flex items-center gap-1">
