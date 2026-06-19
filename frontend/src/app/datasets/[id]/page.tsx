@@ -1,6 +1,6 @@
 'use client';
 
-import { use, useEffect, useMemo, useRef, useState } from 'react';
+import { use, useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
@@ -32,15 +32,50 @@ const ROLE_COLORS: Record<string, string> = {
 
 type ColumnShape = { name: string; role: string; dtype: string; sample_values?: unknown[] };
 type BuildEntryMode = 'manual' | 'recommendation' | 'template';
+type DropPosition = 'before' | 'after';
+type DropTarget = { id: string; position: DropPosition } | null;
 
-function moveFigure(items: FigureListItem[], activeId: string, overId: string): FigureListItem[] {
+function moveFigure(items: FigureListItem[], activeId: string, overId: string, position: DropPosition): FigureListItem[] {
   const from = items.findIndex((item) => item.id === activeId);
-  const to = items.findIndex((item) => item.id === overId);
-  if (from < 0 || to < 0 || from === to) return items;
+  const over = items.findIndex((item) => item.id === overId);
+  if (from < 0 || over < 0 || from === over) return items;
   const next = [...items];
   const [item] = next.splice(from, 1);
+  const overAfterRemove = next.findIndex((entry) => entry.id === overId);
+  if (overAfterRemove < 0) return items;
+  const to = position === 'after' ? overAfterRemove + 1 : overAfterRemove;
   next.splice(to, 0, item);
   return next;
+}
+
+function dragDropPosition(event: DragEvent<HTMLElement>): DropPosition {
+  const rect = event.currentTarget.getBoundingClientRect();
+  const useVerticalPlacement = typeof window !== 'undefined' && window.matchMedia('(max-width: 639px)').matches;
+  if (useVerticalPlacement) {
+    return event.clientY - rect.top < rect.height / 2 ? 'before' : 'after';
+  }
+  return event.clientX - rect.left < rect.width / 2 ? 'before' : 'after';
+}
+
+function sameFigureOrder(a: FigureListItem[], b: FigureListItem[]) {
+  return a.length === b.length && a.every((item, index) => item.id === b[index]?.id);
+}
+
+function DropIndicator({ active, position }: { active: boolean; position: DropPosition }) {
+  if (!active) return null;
+  const isBefore = position === 'before';
+  return (
+    <div
+      className={`pointer-events-none absolute z-20 rounded-full bg-primary shadow-lg ring-4 ring-primary/20 ${
+        isBefore
+          ? 'inset-x-3 top-0 h-1 -translate-y-1/2 sm:inset-x-auto sm:inset-y-3 sm:left-0 sm:h-auto sm:w-1 sm:translate-y-0 sm:-translate-x-1/2'
+          : 'inset-x-3 bottom-0 h-1 translate-y-1/2 sm:inset-x-auto sm:inset-y-3 sm:right-0 sm:h-auto sm:w-1 sm:translate-y-0 sm:translate-x-1/2'
+      }`}
+      aria-hidden="true"
+    >
+      <span className="absolute left-1/2 top-1/2 h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full bg-primary ring-4 ring-background" />
+    </div>
+  );
 }
 
 const COLUMN_ROLE_OPTIONS = [
@@ -256,6 +291,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
   const [referenceFile, setReferenceFile] = useState<File | null>(null);
   const [visualizeStep, setVisualizeStep] = useState<'columns' | 'recommend' | 'build'>('columns');
   const [draggingFigureId, setDraggingFigureId] = useState<string | null>(null);
+  const [figureDropTarget, setFigureDropTarget] = useState<DropTarget>(null);
   const autoRecommendationKeyRef = useRef<string | null>(null);
   const aiRecommend = useMutation<ChartSuggestion[], Error, { silent?: boolean; refresh?: boolean; prompt?: string } | undefined>({
     mutationFn: (variables) => {
@@ -621,11 +657,20 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
 
   const datasetFigures = (figures ?? []).filter((f) => f.dataset_id === id);
 
-  function dropDatasetFigure(overId: string) {
-    if (!draggingFigureId || draggingFigureId === overId || datasetFigures.length === 0) return;
-    const nextDatasetFigures = moveFigure(datasetFigures, draggingFigureId, overId);
+  function updateFigureDropTarget(event: DragEvent<HTMLElement>, overId: string) {
+    if (!canEditDataset || !draggingFigureId || draggingFigureId === overId) return;
+    setFigureDropTarget({ id: overId, position: dragDropPosition(event) });
+  }
+
+  function dropDatasetFigure(overId: string, position: DropPosition) {
+    if (!draggingFigureId || draggingFigureId === overId || datasetFigures.length === 0) {
+      setFigureDropTarget(null);
+      return;
+    }
+    const nextDatasetFigures = moveFigure(datasetFigures, draggingFigureId, overId, position);
     setDraggingFigureId(null);
-    if (nextDatasetFigures === datasetFigures) return;
+    setFigureDropTarget(null);
+    if (nextDatasetFigures === datasetFigures || sameFigureOrder(datasetFigures, nextDatasetFigures)) return;
     const nextIds = nextDatasetFigures.map((figure) => figure.id);
     const subsetIds = new Set(nextIds);
     let cursor = 0;
@@ -1258,11 +1303,24 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                     key={f.id}
                     draggable={canEditDataset}
                     onDragStart={() => setDraggingFigureId(f.id)}
-                    onDragEnd={() => setDraggingFigureId(null)}
-                    onDragOver={(event) => { if (canEditDataset) event.preventDefault(); }}
-                    onDrop={() => dropDatasetFigure(f.id)}
-                    className={`overflow-hidden transition hover:shadow-md ${draggingFigureId === f.id ? 'opacity-50' : ''}`}
+                    onDragEnd={() => { setDraggingFigureId(null); setFigureDropTarget(null); }}
+                    onDragEnter={(event) => updateFigureDropTarget(event, f.id)}
+                    onDragOver={(event) => {
+                      if (!canEditDataset) return;
+                      event.preventDefault();
+                      updateFigureDropTarget(event, f.id);
+                    }}
+                    onDrop={(event) => {
+                      event.preventDefault();
+                      dropDatasetFigure(f.id, figureDropTarget?.id === f.id ? figureDropTarget.position : dragDropPosition(event));
+                    }}
+                    className={`relative overflow-hidden transition hover:shadow-md ${
+                      draggingFigureId === f.id ? 'opacity-50' : ''
+                    } ${
+                      figureDropTarget?.id === f.id && draggingFigureId !== f.id ? 'ring-2 ring-primary/30' : ''
+                    }`}
                   >
+                    <DropIndicator active={figureDropTarget?.id === f.id && draggingFigureId !== f.id} position={figureDropTarget?.position ?? 'before'} />
                     <Link href={`/figures/${f.id}`}>
                       {f.thumb_url && <img src={f.thumb_url} alt={f.name} loading="lazy" decoding="async" className="aspect-[4/3] w-full bg-white object-contain" />}
                     </Link>

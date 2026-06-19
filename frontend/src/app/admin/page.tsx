@@ -25,6 +25,10 @@ const usdFmt = new Intl.NumberFormat('en-US', {
   maximumFractionDigits: 4,
 });
 const passwordOk = (pw: string) => pw.length >= 10 && /[A-Za-z]/.test(pw) && /\d/.test(pw);
+const GEMINI_MODEL_OPTIONS = [
+  { value: 'gemini-3.1-flash-lite', label: 'Gemini 3.1 Flash-Lite' },
+  { value: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash' },
+];
 
 export default function AdminPage() {
   const qc = useQueryClient();
@@ -52,7 +56,7 @@ export default function AdminPage() {
   const [geminiKey, setGeminiKey] = useState('');
   const activeProvider = provider || aiCfg?.provider || 'claude';
   const activeClaudeModel = claudeModel || aiCfg?.claude_model || '';
-  const activeGeminiModel = geminiModel || aiCfg?.gemini_model || '';
+  const activeGeminiModel = geminiModel || aiCfg?.gemini_model || 'gemini-3.1-flash-lite';
   const saveAi = useMutation({
     mutationFn: () => updateAiConfig({
       provider: activeProvider, claude_model: activeClaudeModel, gemini_model: activeGeminiModel,
@@ -133,7 +137,12 @@ export default function AdminPage() {
                 </>
               ) : (
                 <>
-                  <div className="space-y-1"><Label>Gemini model</Label><Input value={activeGeminiModel} onChange={(e) => setGeminiModel(e.target.value)} placeholder="gemini-3.1-flash-lite" /></div>
+                  <div className="space-y-1">
+                    <Label>Gemini model</Label>
+                    <select className="w-full rounded-md border px-3 py-2 text-sm" value={activeGeminiModel} onChange={(e) => setGeminiModel(e.target.value)}>
+                      {GEMINI_MODEL_OPTIONS.map((model) => <option key={model.value} value={model.value}>{model.label}</option>)}
+                    </select>
+                  </div>
                   <div className="space-y-1"><Label>Gemini API key {aiCfg?.has_gemini_key && <span className="text-xs text-green-600">(set)</span>}</Label><Input type="password" value={geminiKey} onChange={(e) => setGeminiKey(e.target.value)} placeholder={aiCfg?.has_gemini_key ? '•••••• (leave blank to keep)' : 'AIza...'} /></div>
                 </>
               )}

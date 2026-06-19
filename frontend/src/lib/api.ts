@@ -216,6 +216,9 @@ export async function updateDataset(
 ): Promise<DatasetDetail> {
   return fetcher(`/api/datasets/${id}`, { method: 'PATCH', body: JSON.stringify(data) });
 }
+export async function reorderDatasets(datasetIds: string[]): Promise<DatasetListItem[]> {
+  return fetcher('/api/datasets/reorder', { method: 'POST', body: JSON.stringify({ dataset_ids: datasetIds }) });
+}
 export async function getPublicGallery(limit = 12): Promise<{ figures: import('./types').PublicFigure[] }> {
   return fetcher(`/api/public/gallery?limit=${limit}`);
 }

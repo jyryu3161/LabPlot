@@ -98,6 +98,7 @@ export interface DatasetListItem {
   n_rows: number;
   n_cols: number;
   project_id?: string;
+  display_order?: number | null;
   created_at: string;
 }
 

@@ -5,7 +5,7 @@ from numbers import Integral, Real
 from typing import Any
 
 import pandas as pd
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.common import storage
@@ -387,10 +387,15 @@ def create_dataset(db: Session, owner_id: uuid.UUID, filename: str, content: byt
         stored_path = os.path.join(settings.upload_dir, f"{dataset_id}.{fmt}")
         storage.write_bytes(stored_path, encoded, content_type="application/octet-stream")
 
+    next_display_order = (
+        (db.query(func.max(Dataset.display_order)).filter(Dataset.project_id == project_id).scalar() or -1) + 1
+    )
+
     dataset = Dataset(
         id=dataset_id,
         owner_id=owner_id,
         project_id=project_id,
+        display_order=next_display_order,
         name=name or os.path.splitext(filename)[0],
         description=description,
         original_filename=filename,
@@ -419,7 +424,34 @@ def list_datasets(db: Session, owner_id: uuid.UUID, project_id: uuid.UUID | None
     else:
         ids = project_service.accessible_project_ids(db, owner_id)
         q = db.query(Dataset).filter(or_(Dataset.owner_id == owner_id, Dataset.project_id.in_(ids)))
+    if project_id is not None:
+        return q.order_by(Dataset.display_order.is_(None), Dataset.display_order.asc(), Dataset.created_at.desc()).all()
     return q.order_by(Dataset.created_at.desc()).all()
+
+
+def reorder_datasets(db: Session, owner_id: uuid.UUID, dataset_ids: list[uuid.UUID]) -> list[Dataset]:
+    from app.projects import service as project_service
+
+    unique_ids = list(dict.fromkeys(dataset_ids))
+    if len(unique_ids) != len(dataset_ids):
+        raise BadRequestError("Dataset order contains duplicate items.", error_code="DUPLICATE_DATASET_ORDER")
+    datasets = db.query(Dataset).filter(Dataset.id.in_(unique_ids)).all()
+    if len(datasets) != len(unique_ids):
+        raise NotFoundError("Dataset", "reorder")
+    project_ids = {dataset.project_id for dataset in datasets}
+    if len(project_ids) != 1:
+        raise BadRequestError("Datasets can only be reordered within one project.", error_code="MIXED_PROJECT_REORDER")
+    project_id = next(iter(project_ids))
+    if project_id is not None:
+        project_service.require_project_write(db, project_id, owner_id)
+    elif any(dataset.owner_id != owner_id for dataset in datasets):
+        raise NotFoundError("Dataset", "reorder")
+
+    by_id = {dataset.id: dataset for dataset in datasets}
+    for index, dataset_id in enumerate(unique_ids):
+        by_id[dataset_id].display_order = index
+    db.commit()
+    return list_datasets(db, owner_id, project_id=project_id)
 
 
 def get_dataset(db: Session, dataset_id: uuid.UUID, owner_id: uuid.UUID) -> Dataset:

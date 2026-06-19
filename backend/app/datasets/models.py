@@ -26,6 +26,7 @@ class Dataset(Base):
     ingest_options = Column(JSONB, nullable=False, default=dict)
     focus_columns = Column(JSONB, nullable=False, default=list)
     project_id = Column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=True, index=True)
+    display_order = Column(Integer, nullable=True, index=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     owner = relationship("User", back_populates="datasets")

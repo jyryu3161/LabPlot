@@ -1,12 +1,12 @@
 'use client';
 
-import { use, useState } from 'react';
+import { use, useState, type DragEvent } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { addProjectCollaborator, getProject, updateProject, listDatasets, listFigures, deleteDataset, deleteFigure, downloadProjectPack, enhancePrompt, removeProjectCollaborator, updateFigure, reorderFigures } from '@/lib/api';
-import type { FigureListItem, ProjectInviteDraft } from '@/lib/types';
+import { addProjectCollaborator, getProject, updateProject, listDatasets, listFigures, deleteDataset, deleteFigure, downloadProjectPack, enhancePrompt, removeProjectCollaborator, updateDataset, updateFigure, reorderDatasets, reorderFigures } from '@/lib/api';
+import type { DatasetListItem, FigureListItem, ProjectInviteDraft } from '@/lib/types';
 import { AppHeader } from '@/components/layout/AppHeader';
 import { DatasetUploadWizard } from '@/components/datasets/DatasetUploadWizard';
 import { ProjectCollaboratorPicker } from '@/components/projects/ProjectCollaboratorPicker';
@@ -19,14 +19,50 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Check, GripVertical, Loader2, FileSpreadsheet, Trash2, Images, Database, Package, FlaskConical, Pencil, Sparkles, Users, X } from 'lucide-react';
 import { formatStylePreset } from '@/lib/style-presets';
 
-function moveFigure(items: FigureListItem[], activeId: string, overId: string): FigureListItem[] {
+type DropPosition = 'before' | 'after';
+type DropTarget = { id: string; position: DropPosition } | null;
+
+function moveItem<T extends { id: string }>(items: T[], activeId: string, overId: string, position: DropPosition): T[] {
   const from = items.findIndex((item) => item.id === activeId);
-  const to = items.findIndex((item) => item.id === overId);
-  if (from < 0 || to < 0 || from === to) return items;
+  const over = items.findIndex((item) => item.id === overId);
+  if (from < 0 || over < 0 || from === over) return items;
   const next = [...items];
   const [item] = next.splice(from, 1);
+  const overAfterRemove = next.findIndex((entry) => entry.id === overId);
+  if (overAfterRemove < 0) return items;
+  const to = position === 'after' ? overAfterRemove + 1 : overAfterRemove;
   next.splice(to, 0, item);
   return next;
+}
+
+function dragDropPosition(event: DragEvent<HTMLElement>): DropPosition {
+  const rect = event.currentTarget.getBoundingClientRect();
+  const useVerticalPlacement = typeof window !== 'undefined' && window.matchMedia('(max-width: 639px)').matches;
+  if (useVerticalPlacement) {
+    return event.clientY - rect.top < rect.height / 2 ? 'before' : 'after';
+  }
+  return event.clientX - rect.left < rect.width / 2 ? 'before' : 'after';
+}
+
+function sameOrder<T extends { id: string }>(a: T[], b: T[]) {
+  return a.length === b.length && a.every((item, index) => item.id === b[index]?.id);
+}
+
+function DropIndicator({ active, position }: { active: boolean; position: DropPosition }) {
+  if (!active) return null;
+  const isBefore = position === 'before';
+  return (
+    <div
+      className={`pointer-events-none absolute z-20 rounded-full bg-primary shadow-lg ring-4 ring-primary/20 ${
+        isBefore
+          ? 'inset-x-3 top-0 h-1 -translate-y-1/2 sm:inset-x-auto sm:inset-y-3 sm:left-0 sm:h-auto sm:w-1 sm:translate-y-0 sm:-translate-x-1/2'
+          : 'inset-x-3 bottom-0 h-1 translate-y-1/2 sm:inset-x-auto sm:inset-y-3 sm:right-0 sm:h-auto sm:w-1 sm:translate-y-0 sm:translate-x-1/2'
+      }`}
+      aria-hidden="true"
+    >
+      <span className="absolute left-1/2 top-1/2 h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full bg-primary ring-4 ring-background" />
+    </div>
+  );
 }
 
 export default function ProjectWorkspace({ params }: { params: Promise<{ id: string }> }) {
@@ -38,9 +74,14 @@ export default function ProjectWorkspace({ params }: { params: Promise<{ id: str
   const { data: figures } = useQuery({ queryKey: ['figures', id], queryFn: () => listFigures(id) });
   const [uploadDesc, setUploadDesc] = useState('');
   const [newCollaborators, setNewCollaborators] = useState<ProjectInviteDraft[]>([]);
+  const [editingDatasetId, setEditingDatasetId] = useState<string | null>(null);
+  const [editingDatasetName, setEditingDatasetName] = useState('');
+  const [draggingDatasetId, setDraggingDatasetId] = useState<string | null>(null);
+  const [datasetDropTarget, setDatasetDropTarget] = useState<DropTarget>(null);
   const [editingFigureId, setEditingFigureId] = useState<string | null>(null);
   const [editingFigureName, setEditingFigureName] = useState('');
   const [draggingFigureId, setDraggingFigureId] = useState<string | null>(null);
+  const [figureDropTarget, setFigureDropTarget] = useState<DropTarget>(null);
   const canEditProject = project?.role === 'owner' || project?.role === 'editor';
 
   const delDs = useMutation({ mutationFn: deleteDataset, onSuccess: () => { toast.success('Dataset deleted'); qc.invalidateQueries({ queryKey: ['datasets', id] }); } });
@@ -54,6 +95,25 @@ export default function ProjectWorkspace({ params }: { params: Promise<{ id: str
       qc.invalidateQueries({ queryKey: ['figures', id] });
     },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Rename failed'),
+  });
+  const renameDataset = useMutation({
+    mutationFn: ({ datasetId, name }: { datasetId: string; name: string }) => updateDataset(datasetId, { name }),
+    onSuccess: () => {
+      toast.success('Dataset renamed');
+      setEditingDatasetId(null);
+      setEditingDatasetName('');
+      qc.invalidateQueries({ queryKey: ['datasets', id] });
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Rename failed'),
+  });
+  const reorderDs = useMutation({
+    mutationFn: (datasetIds: string[]) => reorderDatasets(datasetIds),
+    onSuccess: (updated) => {
+      toast.success('Dataset order saved');
+      qc.setQueryData(['datasets', id], updated);
+      qc.invalidateQueries({ queryKey: ['datasets', id] });
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Reorder failed'),
   });
   const reorderFig = useMutation({
     mutationFn: (figureIds: string[]) => reorderFigures(figureIds),
@@ -119,11 +179,53 @@ export default function ProjectWorkspace({ params }: { params: Promise<{ id: str
     renameFig.mutate({ figureId: figure.id, name });
   }
 
-  function dropFigure(overId: string) {
-    if (!draggingFigureId || draggingFigureId === overId || !figures?.length) return;
-    const next = moveFigure(figures, draggingFigureId, overId);
+  function beginDatasetRename(dataset: DatasetListItem) {
+    setEditingDatasetId(dataset.id);
+    setEditingDatasetName(dataset.name);
+  }
+
+  function submitDatasetRename(dataset: DatasetListItem) {
+    const name = editingDatasetName.trim();
+    if (!name || name === dataset.name) {
+      setEditingDatasetId(null);
+      setEditingDatasetName('');
+      return;
+    }
+    renameDataset.mutate({ datasetId: dataset.id, name });
+  }
+
+  function updateDatasetDropTarget(event: DragEvent<HTMLElement>, overId: string) {
+    if (!canEditProject || !draggingDatasetId || draggingDatasetId === overId) return;
+    setDatasetDropTarget({ id: overId, position: dragDropPosition(event) });
+  }
+
+  function updateFigureDropTarget(event: DragEvent<HTMLElement>, overId: string) {
+    if (!canEditProject || !draggingFigureId || draggingFigureId === overId) return;
+    setFigureDropTarget({ id: overId, position: dragDropPosition(event) });
+  }
+
+  function dropDataset(overId: string, position: DropPosition) {
+    if (!draggingDatasetId || draggingDatasetId === overId || !datasets?.length) {
+      setDatasetDropTarget(null);
+      return;
+    }
+    const next = moveItem(datasets, draggingDatasetId, overId, position);
+    setDraggingDatasetId(null);
+    setDatasetDropTarget(null);
+    if (next === datasets || sameOrder(datasets, next)) return;
+    qc.setQueryData(['datasets', id], next);
+    reorderDs.mutate(next.map((dataset) => dataset.id));
+  }
+
+  function dropFigure(overId: string, position: DropPosition) {
+    if (!draggingFigureId || draggingFigureId === overId || !figures?.length) {
+      setFigureDropTarget(null);
+      return;
+    }
+    const next = moveItem(figures, draggingFigureId, overId, position);
     setDraggingFigureId(null);
-    if (next === figures) return;
+    setFigureDropTarget(null);
+    if (next === figures || sameOrder(figures, next)) return;
     qc.setQueryData(['figures', id], next);
     reorderFig.mutate(next.map((figure) => figure.id));
   }
@@ -238,11 +340,74 @@ export default function ProjectWorkspace({ params }: { params: Promise<{ id: str
               : (
                 <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
                   {datasets.map((d) => (
-                    <Card key={d.id} className="transition hover:shadow-md">
+                    <Card
+                      key={d.id}
+                      draggable={canEditProject}
+                      onDragStart={() => setDraggingDatasetId(d.id)}
+                      onDragEnd={() => { setDraggingDatasetId(null); setDatasetDropTarget(null); }}
+                      onDragEnter={(event) => updateDatasetDropTarget(event, d.id)}
+                      onDragOver={(event) => {
+                        if (!canEditProject) return;
+                        event.preventDefault();
+                        updateDatasetDropTarget(event, d.id);
+                      }}
+                      onDrop={(event) => {
+                        event.preventDefault();
+                        dropDataset(d.id, datasetDropTarget?.id === d.id ? datasetDropTarget.position : dragDropPosition(event));
+                      }}
+                      className={`relative transition hover:shadow-md ${
+                        draggingDatasetId === d.id ? 'opacity-50' : ''
+                      } ${
+                        datasetDropTarget?.id === d.id && draggingDatasetId !== d.id ? 'ring-2 ring-primary/30' : ''
+                      }`}
+                    >
+                      <DropIndicator active={datasetDropTarget?.id === d.id && draggingDatasetId !== d.id} position={datasetDropTarget?.position ?? 'before'} />
                       <CardHeader className="pb-2">
-                        <div className="flex items-start justify-between">
-                          <CardTitle className="flex items-center gap-2 text-base"><FileSpreadsheet className="h-4 w-4 text-primary" /> {d.name}</CardTitle>
-                          {canEditProject && <Button variant="ghost" size="sm" onClick={() => { if (confirm(`Delete ${d.name}?`)) delDs.mutate(d.id); }}><Trash2 className="h-4 w-4 text-muted-foreground" /></Button>}
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="flex min-w-0 flex-1 items-start gap-2">
+                            {canEditProject && <GripVertical className="mt-1 h-4 w-4 shrink-0 cursor-grab text-muted-foreground" />}
+                            <FileSpreadsheet className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+                            <div className="min-w-0 flex-1">
+                              {editingDatasetId === d.id ? (
+                                <div className="space-y-1">
+                                  <Input
+                                    className="h-8 text-sm"
+                                    value={editingDatasetName}
+                                    maxLength={255}
+                                    autoFocus
+                                    onChange={(event) => setEditingDatasetName(event.target.value)}
+                                    onKeyDown={(event) => {
+                                      if (event.key === 'Enter') submitDatasetRename(d);
+                                      if (event.key === 'Escape') {
+                                        setEditingDatasetId(null);
+                                        setEditingDatasetName('');
+                                      }
+                                    }}
+                                  />
+                                  <div className="flex gap-1">
+                                    <Button type="button" size="icon-xs" variant="secondary" disabled={renameDataset.isPending} onClick={() => submitDatasetRename(d)}>
+                                      {renameDataset.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}
+                                    </Button>
+                                    <Button type="button" size="icon-xs" variant="ghost" onClick={() => { setEditingDatasetId(null); setEditingDatasetName(''); }}>
+                                      <X className="h-3 w-3" />
+                                    </Button>
+                                  </div>
+                                </div>
+                              ) : (
+                                <CardTitle className="truncate text-base">{d.name}</CardTitle>
+                              )}
+                            </div>
+                          </div>
+                          {canEditProject && (
+                            <div className="flex shrink-0 items-center gap-1">
+                              <Button type="button" variant="ghost" size="sm" onClick={() => beginDatasetRename(d)} aria-label={`Rename ${d.name}`}>
+                                <Pencil className="h-4 w-4 text-muted-foreground" />
+                              </Button>
+                              <Button type="button" variant="ghost" size="sm" onClick={() => { if (confirm(`Delete ${d.name}?`)) delDs.mutate(d.id); }}>
+                                <Trash2 className="h-4 w-4 text-muted-foreground" />
+                              </Button>
+                            </div>
+                          )}
                         </div>
                       </CardHeader>
                       <CardContent>
@@ -267,11 +432,24 @@ export default function ProjectWorkspace({ params }: { params: Promise<{ id: str
                       key={f.id}
                       draggable={canEditProject}
                       onDragStart={() => setDraggingFigureId(f.id)}
-                      onDragEnd={() => setDraggingFigureId(null)}
-                      onDragOver={(event) => { if (canEditProject) event.preventDefault(); }}
-                      onDrop={() => dropFigure(f.id)}
-                      className={`group overflow-hidden transition hover:shadow-md ${draggingFigureId === f.id ? 'opacity-50' : ''}`}
+                      onDragEnd={() => { setDraggingFigureId(null); setFigureDropTarget(null); }}
+                      onDragEnter={(event) => updateFigureDropTarget(event, f.id)}
+                      onDragOver={(event) => {
+                        if (!canEditProject) return;
+                        event.preventDefault();
+                        updateFigureDropTarget(event, f.id);
+                      }}
+                      onDrop={(event) => {
+                        event.preventDefault();
+                        dropFigure(f.id, figureDropTarget?.id === f.id ? figureDropTarget.position : dragDropPosition(event));
+                      }}
+                      className={`group relative overflow-hidden transition hover:shadow-md ${
+                        draggingFigureId === f.id ? 'opacity-50' : ''
+                      } ${
+                        figureDropTarget?.id === f.id && draggingFigureId !== f.id ? 'ring-2 ring-primary/30' : ''
+                      }`}
                     >
+                      <DropIndicator active={figureDropTarget?.id === f.id && draggingFigureId !== f.id} position={figureDropTarget?.position ?? 'before'} />
                       <Link href={`/figures/${f.id}`}>
                         {f.thumb_url ? <img src={f.thumb_url} alt={f.name} loading="lazy" decoding="async" className="aspect-[4/3] w-full bg-white object-contain" />
                           : <div className="flex aspect-[4/3] items-center justify-center bg-muted text-muted-foreground"><Images className="h-7 w-7" /></div>}

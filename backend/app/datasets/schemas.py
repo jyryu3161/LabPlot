@@ -22,6 +22,10 @@ class DatasetUpdate(BaseModel):
     column_roles: dict[str, str] | None = None
 
 
+class DatasetReorderRequest(BaseModel):
+    dataset_ids: list[uuid.UUID] = Field(..., min_length=1, max_length=200)
+
+
 class DatasetPreviewResponse(BaseModel):
     filename: str
     format: str
@@ -46,6 +50,7 @@ class DatasetListItem(BaseModel):
     n_rows: int
     n_cols: int
     project_id: uuid.UUID | None = None
+    display_order: int | None = None
     created_at: datetime
 
 
@@ -60,6 +65,7 @@ class DatasetResponse(BaseModel):
     n_rows: int
     n_cols: int
     project_id: uuid.UUID | None = None
+    display_order: int | None = None
     column_profile: list[dict[str, Any]]
     preview: list[dict[str, Any]]
     statistics: dict[str, Any] | None = None

@@ -13,7 +13,7 @@ from app.common.quotas import enforce_storage_quota
 from app.common.security import rate_limit
 from app.config import settings
 from app.datasets import service
-from app.datasets.schemas import DatasetListItem, DatasetPreviewResponse, DatasetResponse, DatasetUpdate
+from app.datasets.schemas import DatasetListItem, DatasetPreviewResponse, DatasetReorderRequest, DatasetResponse, DatasetUpdate
 from app.projects import service as project_service
 from app.recommend import rules
 
@@ -147,6 +147,11 @@ async def upload_dataset(
 @router.get("", response_model=list[DatasetListItem])
 def list_datasets(project_id: uuid.UUID | None = None, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     return service.list_datasets(db, current_user.id, project_id=project_id)
+
+
+@router.post("/reorder", response_model=list[DatasetListItem])
+def reorder_datasets(data: DatasetReorderRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    return service.reorder_datasets(db, current_user.id, data.dataset_ids)
 
 
 @router.patch("/{dataset_id}", response_model=DatasetResponse)
