@@ -129,6 +129,9 @@ class FigureTemplateFavoriteItem(BaseModel):
     figure_name: str
     plot_type: str
     style_preset: str
+    source_version_number: int | None = None
+    mapping: dict[str, Any] = Field(default_factory=dict)
+    options: dict[str, Any] = Field(default_factory=dict)
     status: str
     dataset_id: uuid.UUID
     project_id: uuid.UUID | None = None

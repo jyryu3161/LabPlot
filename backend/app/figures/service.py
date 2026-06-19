@@ -33,7 +33,7 @@ _UNIVERSAL_OPTION_KEYS = {
     "palette_name", "size", "width_in", "height_in", "color_mode", "font_scale", "dpi",
     "title", "subtitle", "x_label", "y_label", "legend_title",
     "hide_legend", "log_x", "log_y", "flip_coords", "x_text_angle", "legend_position",
-    "y_min", "y_max",
+    "x_min", "x_max", "y_min", "y_max",
     "custom_palette_values", "custom_palette_label",
 }
 _OPTION_CHOICES = {
@@ -55,7 +55,7 @@ _BOOL_OPTIONS = {
 }
 _NUMBER_OPTIONS = {
     "fc_threshold", "p_threshold", "label_top", "font_scale", "dpi", "width_in", "height_in",
-    "bins", "sig_threshold", "bar_alpha", "bar_width", "x_text_angle", "y_min", "y_max",
+    "bins", "sig_threshold", "bar_alpha", "bar_width", "x_text_angle", "x_min", "x_max", "y_min", "y_max",
 }
 _MAX_SVG_BYTES = 5 * 1024 * 1024
 _BLOCKED_SVG_TAGS = {"script", "foreignobject", "iframe", "object", "embed", "link"}
@@ -274,19 +274,32 @@ def template_favorite_response(favorite: FigureTemplateFavorite) -> dict:
     version = _favorite_version(fig, favorite)
     thumb_path = None
     source_version_id = favorite.source_version_id
-    style_preset = fig.style_preset
+    source_version_number = favorite.source_version_number
+    plot_type = favorite.source_plot_type or fig.plot_type
+    style_preset = favorite.source_style_preset or fig.style_preset
+    mapping = favorite.source_mapping or {}
+    options = favorite.source_options or {}
     if version:
         thumb_path = version.png_path or version.svg_path
         source_version_id = version.id
-        style_preset = version.style_preset or fig.style_preset
+        source_version_number = source_version_number or version.version_number
+        plot_type = plot_type or fig.plot_type
+        style_preset = style_preset or version.style_preset or fig.style_preset
+        if not mapping:
+            mapping = version.mapping or {}
+        if not options:
+            options = version.options or {}
     return {
         "id": favorite.id,
         "figure_id": fig.id,
         "source_version_id": source_version_id,
+        "source_version_number": source_version_number,
         "name": favorite.name or fig.name,
         "figure_name": fig.name,
-        "plot_type": fig.plot_type,
+        "plot_type": plot_type,
         "style_preset": style_preset,
+        "mapping": mapping,
+        "options": options,
         "status": fig.status,
         "dataset_id": fig.dataset_id,
         "project_id": fig.project_id,
@@ -426,14 +439,28 @@ def save_template_favorite(
         FigureTemplateFavorite.figure_id == figure_id,
     ).first()
     cleaned_name = name.strip() if isinstance(name, str) and name.strip() else None
+    source_mapping = source_version.mapping if source_version else {}
+    source_options = source_version.options if source_version else {}
+    source_style_preset = (source_version.style_preset if source_version else None) or fig.style_preset
+    source_version_number = source_version.version_number if source_version else None
     if favorite:
         favorite.source_version_id = source_version.id if source_version else None
+        favorite.source_version_number = source_version_number
+        favorite.source_plot_type = fig.plot_type
+        favorite.source_style_preset = source_style_preset
+        favorite.source_mapping = source_mapping or {}
+        favorite.source_options = source_options or {}
         favorite.name = cleaned_name
     else:
         favorite = FigureTemplateFavorite(
             user_id=owner_id,
             figure_id=figure_id,
             source_version_id=source_version.id if source_version else None,
+            source_version_number=source_version_number,
+            source_plot_type=fig.plot_type,
+            source_style_preset=source_style_preset,
+            source_mapping=source_mapping or {},
+            source_options=source_options or {},
             name=cleaned_name,
         )
         db.add(favorite)
@@ -840,13 +867,15 @@ def _explicit_visual_patch_from_request(plot_type: str, request: str | None) -> 
         r"(-?\d+(?:\.\d+)?)(?!\s*%)\s*(?:~|–|—|to|부터|에서|-)\s*"
         r"(-?\d+(?:\.\d+)?)(?!\s*%)"
     )
+    x_range: re.Match[str] | None = None
     y_range: re.Match[str] | None = None
     for match in range_re.finditer(lowered):
         context_start = max(0, match.start() - 80)
         context_end = min(len(lowered), match.end() + 30)
         context = lowered[context_start:context_end]
         if re.search(r"(x\s*[- ]?\s*axis|x축)", context):
-            continue
+            x_range = match
+            break
         if re.search(r"(y\s*[- ]?\s*axis|y축|구간|range|limits?|범위)", context):
             y_range = match
             break
@@ -856,6 +885,13 @@ def _explicit_visual_patch_from_request(plot_type: str, request: str | None) -> 
             # Percent coordinates from mark summaries are excluded above.
             y_range = match
             break
+    if x_range:
+        x1 = float(x_range.group(1))
+        x2 = float(x_range.group(2))
+        if x1 != x2:
+            options["x_min"] = min(x1, x2)
+            options["x_max"] = max(x1, x2)
+            options["log_x"] = False
     if y_range:
         y1 = float(y_range.group(1))
         y2 = float(y_range.group(2))

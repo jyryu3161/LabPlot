@@ -300,6 +300,9 @@ export interface FigureTemplateFavoriteItem {
   figure_name: string;
   plot_type: string;
   style_preset: string;
+  source_version_number?: number | null;
+  mapping: Record<string, unknown>;
+  options: Record<string, unknown>;
   status: string;
   dataset_id: string;
   project_id?: string | null;

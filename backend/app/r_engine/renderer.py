@@ -105,16 +105,24 @@ pdf("figure.pdf", width = {w}, height = {h}, pointsize = 7); draw_plot(); invisi
             post += "p <- p + scale_y_log10()\n"
         if opts.get("log_x"):
             post += "p <- p + scale_x_log10()\n"
+        x_min = _finite_float_option(opts, "x_min")
+        x_max = _finite_float_option(opts, "x_max")
         y_min = _finite_float_option(opts, "y_min")
         y_max = _finite_float_option(opts, "y_max")
+        has_x_range = x_min is not None or x_max is not None
         has_y_range = y_min is not None or y_max is not None
+        coord_args = []
+        if has_x_range and (x_min is None or x_max is None or x_min < x_max):
+            lower = "-Inf" if x_min is None else f"{x_min:g}"
+            upper = "Inf" if x_max is None else f"{x_max:g}"
+            coord_args.append(f"xlim = c({lower}, {upper})")
         if has_y_range and (y_min is None or y_max is None or y_min < y_max):
             lower = "-Inf" if y_min is None else f"{y_min:g}"
             upper = "Inf" if y_max is None else f"{y_max:g}"
-            if opts.get("flip_coords"):
-                post += f"p <- p + coord_flip(ylim = c({lower}, {upper}))\n"
-            else:
-                post += f"p <- p + coord_cartesian(ylim = c({lower}, {upper}))\n"
+            coord_args.append(f"ylim = c({lower}, {upper})")
+        if coord_args:
+            coord_fn = "coord_flip" if opts.get("flip_coords") else "coord_cartesian"
+            post += f"p <- p + {coord_fn}({', '.join(coord_args)})\n"
         elif opts.get("flip_coords"):
             post += "p <- p + coord_flip()\n"
 

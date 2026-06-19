@@ -11,7 +11,7 @@ import {
   listFigureTemplateFavorites,
 } from '@/lib/api';
 import { Textarea } from '@/components/ui/textarea';
-import type { ChartSuggestion, FigureDetail, PlotTypeDef } from '@/lib/types';
+import type { ChartSuggestion, FigureDetail, FigureTemplateFavoriteItem, PlotTypeDef } from '@/lib/types';
 import { formatStylePreset } from '@/lib/style-presets';
 import { AppHeader } from '@/components/layout/AppHeader';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -153,6 +153,18 @@ function defaultOptions(def: PlotTypeDef | undefined) {
 
 function defaultBuildOptions(def: PlotTypeDef | undefined, paletteName = 'journal_muted') {
   return { ...defaultOptions(def), palette_name: paletteName };
+}
+
+function templateOptionSummary(options: Record<string, unknown> | undefined): string {
+  const o = options ?? {};
+  const parts: string[] = [];
+  if (o.x_min !== undefined || o.x_max !== undefined) parts.push(`x ${o.x_min ?? 'auto'}-${o.x_max ?? 'auto'}`);
+  if (o.y_min !== undefined || o.y_max !== undefined) parts.push(`y ${o.y_min ?? 'auto'}-${o.y_max ?? 'auto'}`);
+  if (typeof o.size === 'string') parts.push(o.size.replace(/_/g, ' '));
+  if (typeof o.palette_name === 'string') parts.push(o.palette_name.replace(/_/g, ' '));
+  if (typeof o.line_type === 'string') parts.push(`${o.line_type} line`);
+  if (typeof o.point_shape === 'string') parts.push(`${o.point_shape} points`);
+  return parts.slice(0, 4).join(' · ');
 }
 
 function remapTemplateMapping(def: PlotTypeDef | undefined, sourceMapping: Record<string, unknown>, columns: ColumnShape[]) {
@@ -415,11 +427,40 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
   const favoriteFormatFigures = useMemo(() => (templateFavorites ?? []).slice(0, 10), [templateFavorites]);
 
   const applyFigureFormat = useMutation({
-    mutationFn: async (variables: { figureId: string; versionId?: string | null; entryMode?: BuildEntryMode; showPicker?: boolean }) => ({
-      source: await getFigure(variables.figureId),
-      versionId: variables.versionId,
-    }),
-    onSuccess: ({ source, versionId }: { source: FigureDetail; versionId?: string | null }, variables) => {
+    mutationFn: async (variables: {
+      figureId: string;
+      versionId?: string | null;
+      template?: FigureTemplateFavoriteItem;
+      entryMode?: BuildEntryMode;
+      showPicker?: boolean;
+    }) => {
+      if (variables.template) return { source: null, versionId: variables.versionId, template: variables.template };
+      return {
+        source: await getFigure(variables.figureId),
+        versionId: variables.versionId,
+        template: null,
+      };
+    },
+    onSuccess: ({ source, versionId, template }: { source: FigureDetail | null; versionId?: string | null; template: FigureTemplateFavoriteItem | null }, variables) => {
+      if (template) {
+        const def = plotTypes.find((plot) => plot.type === template.plot_type);
+        setPlotType(template.plot_type);
+        setMapping(remapTemplateMapping(def, template.mapping ?? {}, columns));
+        setOptions({ ...defaultBuildOptions(def), ...(template.options ?? {}) });
+        setStyle(template.style_preset);
+        setName(`${ds?.name ?? 'figure'} - ${template.name} format`);
+        setFormatFigureId(template.figure_id);
+        setBuildEntryMode(variables?.entryMode ?? 'manual');
+        setShowFormatTemplatePicker(Boolean(variables?.showPicker));
+        setVisualizeStep('build');
+        toast.success('Saved template copied');
+        document.getElementById('builder')?.scrollIntoView({ behavior: 'smooth' });
+        return;
+      }
+      if (!source) {
+        toast.error('Selected figure is not available');
+        return;
+      }
       const version = source.versions.find((item) => item.id === versionId)
         ?? source.versions.find((item) => item.id === source.current_version_id)
         ?? source.versions[source.versions.length - 1];
@@ -948,7 +989,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                               data-testid="favorite-template-card"
                               aria-label={`Use favorite figure template ${figure.name}`}
                               disabled={applyFigureFormat.isPending}
-                              onClick={() => applyFigureFormat.mutate({ figureId: figure.figure_id, versionId: figure.source_version_id, entryMode: 'template', showPicker: false })}
+                              onClick={() => applyFigureFormat.mutate({ figureId: figure.figure_id, versionId: figure.source_version_id, template: figure, entryMode: 'template', showPicker: false })}
                               className={`overflow-hidden rounded-lg border bg-background text-left transition ${selected ? 'border-primary ring-2 ring-primary/20' : 'hover:border-primary hover:shadow-sm'} disabled:cursor-not-allowed disabled:opacity-55`}
                             >
                               {figure.thumb_url ? (
@@ -966,6 +1007,9 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                                   <Badge variant="outline">{formatStylePreset(figure.style_preset)}</Badge>
                                   {!compatible && <Badge variant="outline">check mappings</Badge>}
                                 </div>
+                                {templateOptionSummary(figure.options) && (
+                                  <p className="truncate text-[11px] text-muted-foreground">{templateOptionSummary(figure.options)}</p>
+                                )}
                               </div>
                             </button>
                           );
