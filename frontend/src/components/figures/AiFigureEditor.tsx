@@ -545,7 +545,7 @@ export function AiFigureEditor({
               </div>
             </div>
 
-            <div className="grid gap-3 md:grid-cols-[1fr_1fr]">
+            <div className="grid gap-3 md:grid-cols-[minmax(220px,0.72fr)_minmax(0,1.28fr)]">
               <div className="space-y-1">
                 <Label htmlFor="ai-editor-prompt" className="text-xs">{hasAnnotations ? 'Additional edit request (optional)' : 'Edit request'}</Label>
                 <Textarea
@@ -568,7 +568,7 @@ export function AiFigureEditor({
                     {selectedIds.length > 0 && <Badge variant="outline">{selectedIds.length} selected</Badge>}
                   </div>
                 </div>
-                <div className="max-h-44 space-y-2 overflow-y-auto rounded-md border bg-background p-2">
+                <div className="min-h-56 max-h-72 space-y-2 overflow-y-auto rounded-md border bg-background p-2">
                   {annotations.length === 0 ? (
                     <p className="px-1 py-2 text-xs text-muted-foreground">Draw a region, arrow, or note, then write what should change for each mark.</p>
                   ) : annotations.map((annotation, index) => (
@@ -594,6 +594,9 @@ export function AiFigureEditor({
                     </div>
                   ))}
                 </div>
+                {annotations.length > 3 && (
+                  <p className="text-xs text-muted-foreground">{annotations.length} marks total. Scroll the memo list to review the remaining marks.</p>
+                )}
                 <p className="text-xs leading-relaxed text-muted-foreground">
                   Select mode supports drag selection. Use Ctrl or Command when clicking marks to select more than one. Delete or Backspace removes selected marks.
                 </p>

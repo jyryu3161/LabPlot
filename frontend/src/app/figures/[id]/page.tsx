@@ -329,6 +329,7 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
             </CardContent></Card>
 
             <AiFigureEditor
+              key={version?.id ?? 'no-version'}
               imageUrl={version?.png_url ?? version?.svg_url}
               versionNumber={version?.version_number}
               prompt={improvePrompt}
