@@ -42,6 +42,7 @@ interface DraftDrag {
 
 interface AiFigureEditorProps {
   imageUrl?: string | null;
+  versionId?: string;
   versionNumber?: number;
   prompt: string;
   improvements: Improvement[] | null;
@@ -218,8 +219,27 @@ function intersects(a: ReturnType<typeof annotationBounds>, b: ReturnType<typeof
   return a.left <= b.right && a.right >= b.left && a.top <= b.bottom && a.bottom >= b.top;
 }
 
+function loadStoredAnnotations(key: string | null): Annotation[] {
+  if (!key || typeof window === 'undefined') return [];
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(key) || '[]');
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((item): item is Annotation => (
+      item
+      && ['region', 'arrow', 'note'].includes(item.type)
+      && typeof item.id === 'string'
+      && typeof item.x === 'number'
+      && typeof item.y === 'number'
+      && typeof item.text === 'string'
+    ));
+  } catch {
+    return [];
+  }
+}
+
 export function AiFigureEditor({
   imageUrl,
+  versionId,
   versionNumber,
   prompt,
   improvements,
@@ -234,8 +254,9 @@ export function AiFigureEditor({
   onApplySuggestions,
 }: AiFigureEditorProps) {
   const stageRef = useRef<HTMLDivElement>(null);
+  const annotationStorageKey = versionId ? `labplot.ai-editor.annotations.${versionId}` : null;
   const [tool, setTool] = useState<AnnotationTool>('select');
-  const [annotations, setAnnotations] = useState<Annotation[]>([]);
+  const [annotations, setAnnotations] = useState<Annotation[]>(() => loadStoredAnnotations(annotationStorageKey));
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [selectedImprovementIds, setSelectedImprovementIds] = useState<string[]>([]);
   const [isPreparingImage, setIsPreparingImage] = useState(false);
@@ -296,6 +317,15 @@ export function AiFigureEditor({
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [selectedIds]);
+
+  useEffect(() => {
+    if (!annotationStorageKey || typeof window === 'undefined') return;
+    if (annotations.length === 0) {
+      window.localStorage.removeItem(annotationStorageKey);
+      return;
+    }
+    window.localStorage.setItem(annotationStorageKey, JSON.stringify(annotations));
+  }, [annotationStorageKey, annotations]);
 
   function toggleSuggestion(id: string, checked: boolean) {
     setSelectedImprovementIds((current) => {
@@ -547,7 +577,9 @@ export function AiFigureEditor({
 
             <div className="grid gap-3 md:grid-cols-[minmax(220px,0.72fr)_minmax(0,1.28fr)]">
               <div className="space-y-1">
-                <Label htmlFor="ai-editor-prompt" className="text-xs">{hasAnnotations ? 'Additional edit request (optional)' : 'Edit request'}</Label>
+                <div className="flex h-6 items-center">
+                  <Label htmlFor="ai-editor-prompt" className="text-xs">{hasAnnotations ? 'Additional edit request (optional)' : 'Edit request'}</Label>
+                </div>
                 <Textarea
                   id="ai-editor-prompt"
                   value={prompt}
@@ -561,7 +593,7 @@ export function AiFigureEditor({
                 {hasAnnotations && <p className="text-xs text-muted-foreground">When marks have memos, this field can stay empty.</p>}
               </div>
               <div className="space-y-2">
-                <div className="flex items-center justify-between gap-2">
+                <div className="flex h-6 items-center justify-between gap-2">
                   <Label className="text-xs">Mark memos</Label>
                   <div className="flex gap-1">
                     <Badge variant="secondary">{annotations.length} marks</Badge>

@@ -836,12 +836,27 @@ def _explicit_visual_patch_from_request(plot_type: str, request: str | None) -> 
         elif re.search(r"(dotted|점\s*모양\s*선)", lowered):
             options["line_type"] = "dotted"
 
-    y_range = re.search(
-        r"(?:y\s*[- ]?\s*axis|y축|구간|range|limits?|범위)[^\n]{0,80}?"
-        r"(-?\d+(?:\.\d+)?)\s*(?:~|–|—|to|부터|에서|-)\s*(-?\d+(?:\.\d+)?)",
-        lowered,
+    range_re = re.compile(
+        r"(-?\d+(?:\.\d+)?)(?!\s*%)\s*(?:~|–|—|to|부터|에서|-)\s*"
+        r"(-?\d+(?:\.\d+)?)(?!\s*%)"
     )
-    if y_range and not re.search(r"(x\s*[- ]?\s*axis|x축)", y_range.group(0)):
+    y_range: re.Match[str] | None = None
+    for match in range_re.finditer(lowered):
+        context_start = max(0, match.start() - 80)
+        context_end = min(len(lowered), match.end() + 30)
+        context = lowered[context_start:context_end]
+        if re.search(r"(x\s*[- ]?\s*axis|x축)", context):
+            continue
+        if re.search(r"(y\s*[- ]?\s*axis|y축|구간|range|limits?|범위)", context):
+            y_range = match
+            break
+        if plot_type == "line":
+            # In line-plot AI editor marks, a plain numeric range such as
+            # "5~10으로 바꿔줘" almost always means the visible y-axis range.
+            # Percent coordinates from mark summaries are excluded above.
+            y_range = match
+            break
+    if y_range:
         y1 = float(y_range.group(1))
         y2 = float(y_range.group(2))
         if y1 != y2:
