@@ -1,7 +1,7 @@
 'use client';
 
-import { useMemo, useRef, useState, type PointerEvent } from 'react';
-import { ArrowRight, CheckCircle2, Eraser, Loader2, MessageSquareText, MousePointer2, SquareDashedMousePointer, Wand2 } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState, type PointerEvent } from 'react';
+import { ArrowRight, CheckCircle2, Eraser, Loader2, MessageSquareText, MousePointer2, SquareDashedMousePointer, Trash2, Wand2 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -10,8 +10,8 @@ import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import type { Improvement } from '@/lib/types';
 
-type AnnotationTool = 'region' | 'arrow' | 'note';
-type AnnotationType = AnnotationTool;
+type AnnotationTool = 'select' | 'region' | 'arrow' | 'note';
+type AnnotationType = Exclude<AnnotationTool, 'select'>;
 
 interface Annotation {
   id: string;
@@ -27,7 +27,7 @@ interface Annotation {
 
 interface DraftDrag {
   id: string;
-  type: 'region' | 'arrow';
+  type: 'select' | 'region' | 'arrow';
   x: number;
   y: number;
   x2: number;
@@ -70,12 +70,12 @@ function pointerPercent(event: PointerEvent<HTMLElement>, element: HTMLElement |
 function annotationSummary(annotation: Annotation, index: number): string {
   const label = annotation.text.trim() || '(no memo)';
   if (annotation.type === 'region') {
-    return `${index + 1}. Region x=${fmt(annotation.x)}, y=${fmt(annotation.y)}, width=${fmt(annotation.w ?? 0)}, height=${fmt(annotation.h ?? 0)}: ${label}`;
+    return `Mark #${index + 1} [region] bounds: left ${fmt(annotation.x)}, top ${fmt(annotation.y)}, width ${fmt(annotation.w ?? 0)}, height ${fmt(annotation.h ?? 0)}. User memo: ${label}`;
   }
   if (annotation.type === 'arrow') {
-    return `${index + 1}. Arrow from x=${fmt(annotation.x)}, y=${fmt(annotation.y)} to x=${fmt(annotation.x2 ?? annotation.x)}, y=${fmt(annotation.y2 ?? annotation.y)}: ${label}`;
+    return `Mark #${index + 1} [arrow] from ${fmt(annotation.x)}, ${fmt(annotation.y)} to ${fmt(annotation.x2 ?? annotation.x)}, ${fmt(annotation.y2 ?? annotation.y)}. User memo: ${label}`;
   }
-  return `${index + 1}. Note at x=${fmt(annotation.x)}, y=${fmt(annotation.y)}: ${label}`;
+  return `Mark #${index + 1} [note] at ${fmt(annotation.x)}, ${fmt(annotation.y)}. User memo: ${label}`;
 }
 
 function buildLocalizedPrompt(prompt: string, annotations: Annotation[]): string {
@@ -86,10 +86,41 @@ function buildLocalizedPrompt(prompt: string, annotations: Annotation[]): string
   return [
     base || 'Apply the localized edits marked on the figure preview.',
     '',
-    'Localized image editing annotations:',
-    'The user marked the rendered figure preview. Coordinates are percentages of the displayed image width and height. Use these annotations only to infer supported LabPlot R/ggplot parameter changes, labels, legend placement, palette, size, axis text, and existing visual options.',
+    'Localized image editing annotations for R-code regeneration:',
+    'The user marked the rendered figure preview. Coordinates are percentages of displayed image width and height. Interpret each mark as visual evidence for the requested change, then produce only supported LabPlot R/ggplot parameter patches.',
+    'Important constraints: preserve the data and statistics; do not perform pixel inpainting; do not invent findings; do not add unsupported annotations; translate localized requests into supported options such as axis labels, title/subtitle removal, legend placement, palette, color mode, size, width/height, x-axis text angle, point/bar/line options, or existing mapping changes only when an existing column name is available.',
+    'If several marks are present, satisfy all non-conflicting memos. If a memo is ambiguous, choose the smallest conservative manuscript-style change that addresses the marked region.',
     annotationText,
   ].join('\n');
+}
+
+function annotationBounds(annotation: Annotation) {
+  if (annotation.type === 'region') {
+    return {
+      left: annotation.x,
+      top: annotation.y,
+      right: annotation.x + (annotation.w ?? 0),
+      bottom: annotation.y + (annotation.h ?? 0),
+    };
+  }
+  if (annotation.type === 'arrow') {
+    return {
+      left: Math.min(annotation.x, annotation.x2 ?? annotation.x),
+      top: Math.min(annotation.y, annotation.y2 ?? annotation.y),
+      right: Math.max(annotation.x, annotation.x2 ?? annotation.x),
+      bottom: Math.max(annotation.y, annotation.y2 ?? annotation.y),
+    };
+  }
+  return {
+    left: annotation.x - 1.5,
+    top: annotation.y - 1.5,
+    right: annotation.x + 1.5,
+    bottom: annotation.y + 1.5,
+  };
+}
+
+function intersects(a: ReturnType<typeof annotationBounds>, b: ReturnType<typeof annotationBounds>) {
+  return a.left <= b.right && a.right >= b.left && a.top <= b.bottom && a.bottom >= b.top;
 }
 
 export function AiFigureEditor({
@@ -107,18 +138,68 @@ export function AiFigureEditor({
   onApplySuggestion,
 }: AiFigureEditorProps) {
   const stageRef = useRef<HTMLDivElement>(null);
-  const [tool, setTool] = useState<AnnotationTool>('region');
+  const [tool, setTool] = useState<AnnotationTool>('select');
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [drag, setDrag] = useState<DraftDrag | null>(null);
 
-  const selected = annotations.find((annotation) => annotation.id === selectedId) ?? null;
+  const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const combinedPrompt = useMemo(() => buildLocalizedPrompt(prompt, annotations), [annotations, prompt]);
   const canRun = canEdit && Boolean(imageUrl) && Boolean(combinedPrompt.trim());
 
-  function updateSelectedText(value: string) {
-    if (!selectedId) return;
-    setAnnotations((items) => items.map((item) => item.id === selectedId ? { ...item, text: value } : item));
+  function updateAnnotationText(id: string, value: string) {
+    setAnnotations((items) => items.map((item) => item.id === id ? { ...item, text: value } : item));
+  }
+
+  function removeAnnotations(ids: string[]) {
+    if (!ids.length) return;
+    const idSet = new Set(ids);
+    setAnnotations((items) => items.filter((annotation) => !idSet.has(annotation.id)));
+    setSelectedIds((current) => current.filter((id) => !idSet.has(id)));
+  }
+
+  function toggleAnnotationSelection(id: string, additive: boolean) {
+    setSelectedIds((current) => {
+      if (!additive) return [id];
+      return current.includes(id) ? current.filter((item) => item !== id) : [...current, id];
+    });
+  }
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (!selectedIds.length || event.defaultPrevented) return;
+      const target = event.target as HTMLElement | null;
+      const tagName = target?.tagName?.toLowerCase();
+      if (tagName === 'input' || tagName === 'textarea' || target?.isContentEditable) return;
+      if (event.key === 'Delete' || event.key === 'Backspace') {
+        event.preventDefault();
+        const idSet = new Set(selectedIds);
+        setAnnotations((items) => items.filter((annotation) => !idSet.has(annotation.id)));
+        setSelectedIds([]);
+      }
+      if (event.key === 'Escape') {
+        setSelectedIds([]);
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [selectedIds]);
+
+  function selectByDrag(selection: DraftDrag, additive: boolean) {
+    const bounds = annotationBounds({
+      id: selection.id,
+      type: 'region',
+      x: Math.min(selection.x, selection.x2),
+      y: Math.min(selection.y, selection.y2),
+      w: Math.abs(selection.x2 - selection.x),
+      h: Math.abs(selection.y2 - selection.y),
+      text: '',
+    });
+    const hits = annotations.filter((annotation) => intersects(annotationBounds(annotation), bounds)).map((annotation) => annotation.id);
+    setSelectedIds((current) => {
+      if (!additive) return hits;
+      return Array.from(new Set([...current, ...hits]));
+    });
   }
 
   function handlePointerDown(event: PointerEvent<HTMLDivElement>) {
@@ -129,8 +210,11 @@ export function AiFigureEditor({
     if (tool === 'note') {
       const note = { id, type: 'note' as const, x: point.x, y: point.y, text: '' };
       setAnnotations((items) => [...items, note]);
-      setSelectedId(id);
+      setSelectedIds([id]);
       return;
+    }
+    if (tool === 'select' && !(event.ctrlKey || event.metaKey || event.shiftKey)) {
+      setSelectedIds([]);
     }
     event.currentTarget.setPointerCapture(event.pointerId);
     setDrag({ id, type: tool, x: point.x, y: point.y, x2: point.x, y2: point.y });
@@ -146,6 +230,12 @@ export function AiFigureEditor({
   function handlePointerUp(event: PointerEvent<HTMLDivElement>) {
     if (!drag) return;
     event.currentTarget.releasePointerCapture(event.pointerId);
+    const additive = event.ctrlKey || event.metaKey || event.shiftKey;
+    if (drag.type === 'select') {
+      selectByDrag(drag, additive);
+      setDrag(null);
+      return;
+    }
     const x1 = Math.min(drag.x, drag.x2);
     const y1 = Math.min(drag.y, drag.y2);
     const x2 = Math.max(drag.x, drag.x2);
@@ -156,15 +246,13 @@ export function AiFigureEditor({
         ? { id: drag.id, type: 'region', x: x1, y: y1, w: x2 - x1, h: y2 - y1, text: '' }
         : { id: drag.id, type: 'arrow', x: drag.x, y: drag.y, x2: drag.x2, y2: drag.y2, text: '' };
       setAnnotations((items) => [...items, next]);
-      setSelectedId(next.id);
+      setSelectedIds([next.id]);
     }
     setDrag(null);
   }
 
   function removeSelected() {
-    if (!selectedId) return;
-    setAnnotations((items) => items.filter((annotation) => annotation.id !== selectedId));
-    setSelectedId(null);
+    removeAnnotations(selectedIds);
   }
 
   return (
@@ -182,6 +270,7 @@ export function AiFigureEditor({
           <>
             <div className="flex flex-wrap gap-2">
               {[
+                { key: 'select' as const, label: 'Select', icon: MousePointer2 },
                 { key: 'region' as const, label: 'Region', icon: SquareDashedMousePointer },
                 { key: 'arrow' as const, label: 'Arrow', icon: ArrowRight },
                 { key: 'note' as const, label: 'Note', icon: MessageSquareText },
@@ -194,7 +283,11 @@ export function AiFigureEditor({
                   </Button>
                 );
               })}
-              <Button type="button" size="sm" variant="ghost" onClick={() => { setAnnotations([]); setSelectedId(null); }} disabled={!annotations.length}>
+              <Button type="button" size="sm" variant="outline" onClick={removeSelected} disabled={!selectedIds.length}>
+                <Trash2 className="mr-1 h-3.5 w-3.5" />
+                Delete selected
+              </Button>
+              <Button type="button" size="sm" variant="ghost" onClick={() => { setAnnotations([]); setSelectedIds([]); }} disabled={!annotations.length}>
                 <Eraser className="mr-1 h-3.5 w-3.5" />
                 Clear
               </Button>
@@ -218,7 +311,7 @@ export function AiFigureEditor({
                     <path d="M0,0 L5,2.5 L0,5 z" fill="#2563eb" />
                   </marker>
                 </defs>
-                {[...annotations, ...(drag ? [{
+                {[...annotations, ...(drag && drag.type !== 'select' ? [{
                   id: drag.id,
                   type: drag.type,
                   x: drag.type === 'region' ? Math.min(drag.x, drag.x2) : drag.x,
@@ -237,8 +330,8 @@ export function AiFigureEditor({
                         width={annotation.w ?? 0}
                         height={annotation.h ?? 0}
                         fill="rgba(37, 99, 235, 0.10)"
-                        stroke={selectedId === annotation.id ? '#0f172a' : '#2563eb'}
-                        strokeWidth={selectedId === annotation.id ? 0.55 : 0.35}
+                        stroke={selectedIdSet.has(annotation.id) ? '#0f172a' : '#2563eb'}
+                        strokeWidth={selectedIdSet.has(annotation.id) ? 0.55 : 0.35}
                         strokeDasharray="1.2 0.8"
                       />
                     )}
@@ -248,8 +341,8 @@ export function AiFigureEditor({
                         y1={annotation.y}
                         x2={annotation.x2 ?? annotation.x}
                         y2={annotation.y2 ?? annotation.y}
-                        stroke={selectedId === annotation.id ? '#0f172a' : '#2563eb'}
-                        strokeWidth={selectedId === annotation.id ? 0.65 : 0.45}
+                        stroke={selectedIdSet.has(annotation.id) ? '#0f172a' : '#2563eb'}
+                        strokeWidth={selectedIdSet.has(annotation.id) ? 0.65 : 0.45}
                         markerEnd="url(#ai-editor-arrowhead)"
                       />
                     )}
@@ -257,14 +350,26 @@ export function AiFigureEditor({
                       <circle
                         cx={annotation.x}
                         cy={annotation.y}
-                        r={selectedId === annotation.id ? 1.75 : 1.45}
-                        fill={selectedId === annotation.id ? '#0f172a' : '#2563eb'}
+                        r={selectedIdSet.has(annotation.id) ? 1.75 : 1.45}
+                        fill={selectedIdSet.has(annotation.id) ? '#0f172a' : '#2563eb'}
                       />
                     )}
                     <circle cx={annotation.x} cy={annotation.y} r={1.55} fill="#ffffff" stroke="#2563eb" strokeWidth={0.25} />
                     <text x={annotation.x} y={annotation.y + 0.55} textAnchor="middle" fontSize="2.5" fill="#2563eb" fontWeight="700">{index + 1}</text>
                   </g>
                 ))}
+                {drag?.type === 'select' && (
+                  <rect
+                    x={Math.min(drag.x, drag.x2)}
+                    y={Math.min(drag.y, drag.y2)}
+                    width={Math.abs(drag.x2 - drag.x)}
+                    height={Math.abs(drag.y2 - drag.y)}
+                    fill="rgba(15, 23, 42, 0.08)"
+                    stroke="#0f172a"
+                    strokeWidth={0.35}
+                    strokeDasharray="1 0.8"
+                  />
+                )}
               </svg>
               <div className="absolute inset-0">
                 {annotations.map((annotation) => (
@@ -275,13 +380,16 @@ export function AiFigureEditor({
                     className="absolute h-8 w-8 -translate-x-1/2 -translate-y-1/2 rounded-full focus:outline-none focus:ring-2 focus:ring-primary/40"
                     style={{ left: `${annotation.x}%`, top: `${annotation.y}%` }}
                     onPointerDown={(event) => event.stopPropagation()}
-                    onClick={(event) => { event.stopPropagation(); setSelectedId(annotation.id); }}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      toggleAnnotationSelection(annotation.id, event.ctrlKey || event.metaKey || event.shiftKey);
+                    }}
                   />
                 ))}
               </div>
             </div>
 
-            <div className="grid gap-3 md:grid-cols-[1fr_0.8fr]">
+            <div className="grid gap-3 md:grid-cols-[1fr_1fr]">
               <div className="space-y-1">
                 <Label htmlFor="ai-editor-prompt" className="text-xs">Edit request</Label>
                 <Textarea
@@ -294,36 +402,62 @@ export function AiFigureEditor({
                 />
               </div>
               <div className="space-y-2">
-                <div className="space-y-1">
-                  <Label className="text-xs">Selected annotation memo</Label>
-                  <Input
-                    value={selected?.text ?? ''}
-                    onChange={(event) => updateSelectedText(event.target.value)}
-                    disabled={!selected}
-                    placeholder={selected ? 'Describe what to change here' : 'Select or draw a mark'}
-                  />
+                <div className="flex items-center justify-between gap-2">
+                  <Label className="text-xs">Mark memos</Label>
+                  <div className="flex gap-1">
+                    <Badge variant="secondary">{annotations.length} marks</Badge>
+                    {selectedIds.length > 0 && <Badge variant="outline">{selectedIds.length} selected</Badge>}
+                  </div>
                 </div>
-                <div className="flex flex-wrap gap-2">
-                  <Button type="button" size="sm" variant="outline" onClick={removeSelected} disabled={!selected}>
-                    Delete mark
-                  </Button>
-                  <Badge variant="secondary">{annotations.length} marks</Badge>
+                <div className="max-h-44 space-y-2 overflow-y-auto rounded-md border bg-background p-2">
+                  {annotations.length === 0 ? (
+                    <p className="px-1 py-2 text-xs text-muted-foreground">Draw a region, arrow, or note, then write what should change for each mark.</p>
+                  ) : annotations.map((annotation, index) => (
+                    <div key={annotation.id} className={`rounded border p-2 ${selectedIdSet.has(annotation.id) ? 'border-primary bg-primary/5' : 'bg-muted/20'}`}>
+                      <div className="mb-1 flex items-center justify-between gap-2">
+                        <button
+                          type="button"
+                          className="text-xs font-medium text-left"
+                          onClick={(event) => toggleAnnotationSelection(annotation.id, event.ctrlKey || event.metaKey || event.shiftKey)}
+                        >
+                          Mark #{index + 1} <span className="font-normal text-muted-foreground">({annotation.type})</span>
+                        </button>
+                        <Button type="button" variant="ghost" size="icon-xs" onClick={() => removeAnnotations([annotation.id])} aria-label={`Delete mark ${index + 1}`}>
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                      <Input
+                        value={annotation.text}
+                        onChange={(event) => updateAnnotationText(annotation.id, event.target.value)}
+                        placeholder="Describe what should change here"
+                        className="h-8 text-xs"
+                      />
+                    </div>
+                  ))}
                 </div>
                 <p className="text-xs leading-relaxed text-muted-foreground">
-                  This is region-based AI editing for reproducible R figures. Marks guide the AI; the result is a new R-rendered version, not a pixel-only inpaint.
+                  Select mode supports drag selection. Use Ctrl or Command when clicking marks to select more than one. Delete or Backspace removes selected marks.
                 </p>
               </div>
             </div>
 
-            <div className="grid gap-2 sm:grid-cols-2">
-              <Button type="button" onClick={() => onApplyPrompt(combinedPrompt)} disabled={!canRun || isApplyingPrompt || isSuggesting || isApplyingSuggestion}>
-                {isApplyingPrompt ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Wand2 className="mr-2 h-4 w-4" />}
-                Apply AI edit
-              </Button>
-              <Button type="button" variant="outline" onClick={() => onSuggest(combinedPrompt)} disabled={!canEdit || !imageUrl || isSuggesting || isApplyingPrompt}>
-                {isSuggesting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <MousePointer2 className="mr-2 h-4 w-4" />}
-                Suggest edits
-              </Button>
+            <div className="rounded-lg border bg-muted/20 p-3">
+              <div className="grid gap-2 sm:grid-cols-[1fr_auto] sm:items-center">
+                <div>
+                  <p className="text-sm font-medium">Create a new AI-edited version</p>
+                  <p className="text-xs text-muted-foreground">Recommended: apply the prompt and marks directly. Use suggestions first only when you want to review candidate changes before applying.</p>
+                </div>
+                <div className="grid gap-2 sm:min-w-56">
+                  <Button type="button" onClick={() => onApplyPrompt(combinedPrompt)} disabled={!canRun || isApplyingPrompt || isSuggesting || isApplyingSuggestion}>
+                    {isApplyingPrompt ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Wand2 className="mr-2 h-4 w-4" />}
+                    Apply annotated edit
+                  </Button>
+                  <Button type="button" variant="outline" onClick={() => onSuggest(combinedPrompt)} disabled={!canEdit || !imageUrl || isSuggesting || isApplyingPrompt}>
+                    {isSuggesting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <MousePointer2 className="mr-2 h-4 w-4" />}
+                    Preview suggestions
+                  </Button>
+                </div>
+              </div>
             </div>
           </>
         )}
