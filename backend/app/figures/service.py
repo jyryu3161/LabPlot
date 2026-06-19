@@ -31,6 +31,7 @@ _UNIVERSAL_OPTION_KEYS = {
     "palette_name", "size", "width_in", "height_in", "color_mode", "font_scale", "dpi",
     "title", "subtitle", "x_label", "y_label", "legend_title",
     "hide_legend", "log_x", "log_y", "flip_coords", "x_text_angle", "legend_position",
+    "y_min", "y_max",
     "custom_palette_values", "custom_palette_label",
 }
 _OPTION_CHOICES = {
@@ -42,6 +43,8 @@ _OPTION_CHOICES = {
     "corr_method": {"pearson", "spearman"},
     "layout": {"fr", "kk", "circle", "stress"},
     "legend_position": {"right", "bottom", "none"},
+    "line_type": {"solid", "dashed", "dotted", "dotdash", "longdash"},
+    "point_shape": {"circle", "square", "triangle", "diamond", "none"},
 }
 _BOOL_OPTIONS = {
     "show_points", "show_box", "error_bars", "scale_rows", "add_smooth", "show_density", "show_rug",
@@ -50,7 +53,7 @@ _BOOL_OPTIONS = {
 }
 _NUMBER_OPTIONS = {
     "fc_threshold", "p_threshold", "label_top", "font_scale", "dpi", "width_in", "height_in",
-    "bins", "sig_threshold", "bar_alpha", "bar_width", "x_text_angle",
+    "bins", "sig_threshold", "bar_alpha", "bar_width", "x_text_angle", "y_min", "y_max",
 }
 _MAX_SVG_BYTES = 5 * 1024 * 1024
 _BLOCKED_SVG_TAGS = {"script", "foreignobject", "iframe", "object", "embed", "link"}
@@ -1022,6 +1025,53 @@ def apply_improvement(db: Session, figure_id: uuid.UUID, improvement_id: uuid.UU
 
     result = rerender(db, figure_id, owner_id, _Req())
     imp.applied = True
+    db.commit()
+    return result
+
+
+def apply_improvements(db: Session, figure_id: uuid.UUID, improvement_ids: list[uuid.UUID], owner_id: uuid.UUID) -> dict:
+    if not improvement_ids:
+        raise BadRequestError("Select at least one AI suggestion to apply.", error_code="NO_IMPROVEMENTS_SELECTED")
+    if len(improvement_ids) > 20:
+        raise BadRequestError("Apply 20 or fewer AI suggestions at once.", error_code="TOO_MANY_IMPROVEMENTS")
+
+    fig = get_figure(db, figure_id, owner_id, write=True)
+    version_ids = {v.id for v in fig.versions}
+    improvements = db.query(Improvement).filter(Improvement.id.in_(improvement_ids)).all()
+    by_id = {imp.id: imp for imp in improvements}
+    ordered = [by_id.get(imp_id) for imp_id in improvement_ids]
+    if any(imp is None or imp.figure_version_id not in version_ids for imp in ordered):
+        raise NotFoundError("Improvement", "selected")
+
+    base_version_id = ordered[0].figure_version_id
+    if any(imp.figure_version_id != base_version_id for imp in ordered):
+        raise BadRequestError("Selected suggestions must come from the same figure version.", error_code="MIXED_IMPROVEMENT_BASES")
+
+    base = get_version(fig, base_version_id)
+    new_mapping = dict(base.mapping or {})
+    new_options = dict(base.options or {})
+    new_preset = base.style_preset or fig.style_preset
+    labels = []
+    for imp in ordered:
+        patch = imp.param_patch or {}
+        new_mapping.update(patch.get("mapping") or {})
+        new_options.update(patch.get("options") or {})
+        new_preset = patch.get("style_preset") or new_preset
+        if imp.suggestion_type:
+            labels.append(str(imp.suggestion_type))
+
+    class _Req:
+        mapping = new_mapping
+        options = new_options
+        style_preset = new_preset
+        change_note = (
+            f"Applied {len(ordered)} AI suggestions to v{base.version_number}: "
+            + (", ".join(labels[:3]) if labels else "improvements")
+        )
+
+    result = rerender(db, figure_id, owner_id, _Req())
+    for imp in ordered:
+        imp.applied = True
     db.commit()
     return result
 

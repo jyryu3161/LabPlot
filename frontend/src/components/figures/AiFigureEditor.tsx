@@ -5,6 +5,7 @@ import { ArrowRight, CheckCircle2, Eraser, Loader2, MessageSquareText, MousePoin
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
@@ -47,6 +48,7 @@ interface AiFigureEditorProps {
   onSuggest: (prompt: string) => void;
   onApplyPrompt: (prompt: string) => void;
   onApplySuggestion: (improvementId: string) => void;
+  onApplySuggestions: (improvementIds: string[]) => void;
 }
 
 function clampPercent(value: number): number {
@@ -136,14 +138,27 @@ export function AiFigureEditor({
   onSuggest,
   onApplyPrompt,
   onApplySuggestion,
+  onApplySuggestions,
 }: AiFigureEditorProps) {
   const stageRef = useRef<HTMLDivElement>(null);
   const [tool, setTool] = useState<AnnotationTool>('select');
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [selectedImprovementIds, setSelectedImprovementIds] = useState<string[]>([]);
   const [drag, setDrag] = useState<DraftDrag | null>(null);
 
   const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+  const selectableImprovementIds = useMemo(
+    () => (improvements ?? []).filter((imp) => !imp.applied).map((imp) => imp.id),
+    [improvements],
+  );
+  const validSelectedImprovementIds = useMemo(
+    () => selectedImprovementIds.filter((id) => selectableImprovementIds.includes(id)),
+    [selectableImprovementIds, selectedImprovementIds],
+  );
+  const selectedImprovementIdSet = useMemo(() => new Set(validSelectedImprovementIds), [validSelectedImprovementIds]);
+  const allSelectableSuggestionsChecked = selectableImprovementIds.length > 0
+    && selectableImprovementIds.every((id) => selectedImprovementIdSet.has(id));
   const combinedPrompt = useMemo(() => buildLocalizedPrompt(prompt, annotations), [annotations, prompt]);
   const canRun = canEdit && Boolean(imageUrl) && Boolean(combinedPrompt.trim());
 
@@ -184,6 +199,17 @@ export function AiFigureEditor({
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [selectedIds]);
+
+  function toggleSuggestion(id: string, checked: boolean) {
+    setSelectedImprovementIds((current) => {
+      if (checked) return Array.from(new Set([...current, id]));
+      return current.filter((item) => item !== id);
+    });
+  }
+
+  function toggleAllSuggestions(checked: boolean) {
+    setSelectedImprovementIds(checked ? selectableImprovementIds : []);
+  }
 
   function selectByDrag(selection: DraftDrag, additive: boolean) {
     const bounds = annotationBounds({
@@ -462,18 +488,67 @@ export function AiFigureEditor({
           </>
         )}
 
-        {improvements?.map((imp) => (
-          <div key={imp.id} className="rounded border p-2 text-sm">
-            <div className="flex items-center justify-between gap-2">
-              <span className="font-medium">{imp.suggestion_type}</span>
-              {imp.priority && <Badge variant="outline" className="text-xs">{imp.priority}</Badge>}
+        {improvements && improvements.length > 0 && (
+          <div className="rounded-lg border p-3">
+            <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <p className="text-sm font-medium">Previewed AI suggestions</p>
+                <p className="text-xs text-muted-foreground">Check one or more edits, then apply them together as a single regenerated R version.</p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => toggleAllSuggestions(!allSelectableSuggestionsChecked)}
+                  disabled={!selectableImprovementIds.length || isApplyingSuggestion}
+                >
+                  {allSelectableSuggestionsChecked ? 'Clear checked' : 'Check all'}
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={() => onApplySuggestions(validSelectedImprovementIds)}
+                  disabled={!canEdit || !validSelectedImprovementIds.length || isApplyingSuggestion}
+                >
+                  {isApplyingSuggestion ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="mr-1 h-3.5 w-3.5" />}
+                  Apply checked suggestions
+                </Button>
+              </div>
             </div>
-            {imp.recommended && <p className="mt-1 text-xs text-muted-foreground">{imp.recommended}</p>}
-            <Button size="sm" variant="secondary" className="mt-2 w-full" onClick={() => onApplySuggestion(imp.id)} disabled={!canEdit || isApplyingSuggestion || imp.applied}>
-              {imp.applied ? <><CheckCircle2 className="mr-1 h-3 w-3" /> Applied</> : 'Apply suggestion'}
-            </Button>
+            <div className="space-y-2">
+              {improvements.map((imp) => (
+                <div key={imp.id} className={`rounded border p-2 text-sm ${selectedImprovementIdSet.has(imp.id) ? 'border-primary bg-primary/5' : ''}`}>
+                  <div className="grid gap-2 sm:grid-cols-[auto_1fr_auto] sm:items-start">
+                    <Checkbox
+                      checked={selectedImprovementIdSet.has(imp.id)}
+                      onCheckedChange={(checked) => toggleSuggestion(imp.id, Boolean(checked))}
+                      disabled={imp.applied || isApplyingSuggestion}
+                      aria-label={`Select suggestion ${imp.suggestion_type ?? 'AI edit'}`}
+                      className="mt-0.5"
+                    />
+                    <div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-medium">{imp.suggestion_type || 'AI edit'}</span>
+                        {imp.priority && <Badge variant="outline" className="text-xs">{imp.priority}</Badge>}
+                        {imp.applied && <Badge variant="secondary" className="text-xs">Applied</Badge>}
+                      </div>
+                      {imp.recommended && <p className="mt-1 text-xs text-muted-foreground">{imp.recommended}</p>}
+                    </div>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => onApplySuggestion(imp.id)}
+                      disabled={!canEdit || isApplyingSuggestion || imp.applied}
+                    >
+                      Apply only this
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
-        ))}
+        )}
       </CardContent>
     </Card>
   );

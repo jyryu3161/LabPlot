@@ -1,6 +1,7 @@
 """Assemble a self-contained R script, execute it, collect output images."""
 from __future__ import annotations
 
+import math
 import os
 import shutil
 import subprocess
@@ -43,6 +44,14 @@ def _dimensions(options: dict) -> tuple[float, float, int]:
         w, h = _SIZES.get(size, _SIZES["wide"])
     dpi = int(options.get("dpi", 300) or 300)
     return w, h, dpi
+
+
+def _finite_float_option(options: dict, key: str) -> float | None:
+    try:
+        value = float(options.get(key))
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
 
 
 def build_script(plot_type: str, mapping: dict, options: dict, preset: str,
@@ -96,7 +105,17 @@ pdf("figure.pdf", width = {w}, height = {h}, pointsize = 7); draw_plot(); invisi
             post += "p <- p + scale_y_log10()\n"
         if opts.get("log_x"):
             post += "p <- p + scale_x_log10()\n"
-        if opts.get("flip_coords"):
+        y_min = _finite_float_option(opts, "y_min")
+        y_max = _finite_float_option(opts, "y_max")
+        has_y_range = y_min is not None or y_max is not None
+        if has_y_range and (y_min is None or y_max is None or y_min < y_max):
+            lower = "-Inf" if y_min is None else f"{y_min:g}"
+            upper = "Inf" if y_max is None else f"{y_max:g}"
+            if opts.get("flip_coords"):
+                post += f"p <- p + coord_flip(ylim = c({lower}, {upper}))\n"
+            else:
+                post += f"p <- p + coord_cartesian(ylim = c({lower}, {upper}))\n"
+        elif opts.get("flip_coords"):
             post += "p <- p + coord_flip()\n"
 
     export = f"""

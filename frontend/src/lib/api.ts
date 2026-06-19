@@ -366,6 +366,12 @@ export async function listImprovements(figureId: string, versionId: string): Pro
 export async function applyImprovement(figureId: string, improvementId: string): Promise<FigureVersion> {
   return fetcher(`/api/figures/${figureId}/improvements/${improvementId}/apply`, { method: 'POST' });
 }
+export async function applyImprovements(figureId: string, improvementIds: string[]): Promise<FigureVersion> {
+  return fetcher(`/api/figures/${figureId}/improvements/apply`, {
+    method: 'POST',
+    body: JSON.stringify({ improvement_ids: improvementIds }),
+  });
+}
 export function exportUrl(figureId: string, versionId: string, fmt: string): string {
   return `${BASE_URL}/api/figures/${figureId}/versions/${versionId}/export?format=${fmt}`;
 }

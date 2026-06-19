@@ -125,6 +125,8 @@ SCOPE
 - For overlapped bar charts, use overlap_bar and keep alpha/transparency high enough to see both series.
 - If a user asks to make colors less excessive, prefer options.palette_name = "journal_muted"; for bar plots also set options.color_bars = false.
 - Keep x-axis tick labels horizontal by default. Set options.x_text_angle to 45 or 90 only when labels are visibly overlapping, long, or crowded. Do not rotate short numeric/bin labels such as 0, 1, 2, ..., 10.
+- For line plots, use options.line_type for solid/dashed/dotted/dotdash/longdash lines and options.point_shape for circle/square/triangle/diamond/none markers. If the user asks for square points, set point_shape = "square"; if they ask for dashed lines, set line_type = "dashed".
+- If the user asks for a y-axis range or limit such as 1 to 10, set options.y_min and options.y_max as numbers. Do not use labels or free-form text for axis limits.
 - If the legend competes with plot area, set options.legend_position = "bottom" for wide figures or "right" for compact figures.
 - Keep font_scale at 1.0 unless the user explicitly requests larger text; adjust figure size rather than shrinking below 7 pt.
 - For automatic quality correction, return every supported patch needed to fix critical visual problems in one response.
@@ -133,8 +135,9 @@ VALID PATCH SHAPE
 param_patch may contain only:
 - "style_preset": one of nature, science, cell, minimal, colorblind.
 - "mapping": keys valid for the current plot type; values must be existing column names.
-- "options": valid plot-type options plus universal options: palette_name, size, width_in, height_in, color_mode, font_scale, dpi, title, subtitle, x_label, y_label, legend_title, hide_legend, log_x, log_y, flip_coords, x_text_angle, legend_position.
+- "options": valid plot-type options plus universal options: palette_name, size, width_in, height_in, color_mode, font_scale, dpi, title, subtitle, x_label, y_label, legend_title, hide_legend, log_x, log_y, flip_coords, x_text_angle, y_min, y_max, legend_position.
 - Bar plot options include stat, error_bars, and color_bars. Overlapped bar options include bar_alpha, bar_width, paired_rows_only, series_1_label, and series_2_label.
+- Line plot options include line_type and point_shape.
 - Valid palette_name values: preset, journal_muted, okabe_ito, tol_bright, set2, npg, tableau10.
 
 HARD CONSTRAINTS

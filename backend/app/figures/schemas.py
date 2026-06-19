@@ -67,6 +67,10 @@ class ImprovementRequest(BaseModel):
     prompt: str | None = Field(default=None, max_length=4000)
 
 
+class ImprovementApplyRequest(BaseModel):
+    improvement_ids: list[uuid.UUID] = Field(..., min_length=1, max_length=20)
+
+
 class VersionResponse(BaseModel):
     id: uuid.UUID
     version_number: int

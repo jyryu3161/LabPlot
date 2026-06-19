@@ -31,6 +31,14 @@ def _num(v, default):
 
 _VIRIDIS_OPTIONS = ("viridis", "magma", "inferno", "plasma", "cividis")
 _GRAPH_LAYOUTS = ("fr", "kk", "circle", "stress")
+_LINE_TYPES = ("solid", "dashed", "dotted", "dotdash", "longdash")
+_POINT_SHAPES = {
+    "circle": 16,
+    "square": 15,
+    "triangle": 17,
+    "diamond": 18,
+    "none": None,
+}
 _GEOM_TEXT_SIZE_7PT = 2.46
 
 
@@ -220,6 +228,10 @@ p <- ggplot(.plot, aes(x = .x_f, y = .value, fill = .series)) +
 def _line(m, o):
     x, y = m["x"], m["y"]
     group = m.get("group")
+    line_type = _choice(o.get("line_type"), _LINE_TYPES, "solid")
+    point_shape = _choice(o.get("point_shape"), tuple(_POINT_SHAPES.keys()), "circle")
+    point_r_shape = _POINT_SHAPES[point_shape]
+    point_layer = "" if point_r_shape is None else f"  geom_point(size = 1.8, shape = {point_r_shape}) +\n"
     if group:
         aes = f"aes(x = {_data(x)}, y = {_data(y)}, colour = factor({_data(group)}), group = factor({_data(group)}))"
         scale = "  scale_colour_manual(values = labplot_palette()) +\n"
@@ -230,9 +242,8 @@ def _line(m, o):
         guide = ""
     return f"""
 p <- ggplot(df, {aes}) +
-  geom_line(linewidth = 0.35) +
-  geom_point(size = 1.8) +
-{scale}  {_labs(o, x, y)}{guide}
+  geom_line(linewidth = 0.35, linetype = {rq(line_type)}) +
+{point_layer}{scale}  {_labs(o, x, y)}{guide}
 """
 
 
@@ -664,7 +675,12 @@ PLOT_TYPES = [
      "required": [{"key": "x", "label": "X (time/order)", "roles": ["time", "numeric", "category"]},
                   {"key": "y", "label": "Y (numeric)", "roles": ["numeric"]}],
      "optional": [{"key": "group", "label": "Group/Color", "roles": ["group", "category", "status"]}],
-     "options": []},
+     "options": [{"key": "line_type", "label": "Line type", "type": "select",
+                  "choices": list(_LINE_TYPES), "default": "solid"},
+                 {"key": "point_shape", "label": "Point shape", "type": "select",
+                  "choices": list(_POINT_SHAPES.keys()), "default": "circle"},
+                 {"key": "y_min", "label": "Y-axis minimum", "type": "number", "default": None},
+                 {"key": "y_max", "label": "Y-axis maximum", "type": "number", "default": None}]},
     {"type": "error_bar", "label": "Error bar plot",
      "required": [{"key": "x", "label": "X (group/time)", "roles": ["group", "category", "time", "numeric"]},
                   {"key": "y", "label": "Mean / value", "roles": ["numeric"]}],

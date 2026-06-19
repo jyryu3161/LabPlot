@@ -6,7 +6,7 @@ import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import {
   getFigure, getDataset, getPlotTypes, getStyles, getPalettes, rerenderFigure, reviewVersion,
-  improveVersion, applyImprovement, updateFigure, generateLegend, downloadExport, enhancePrompt,
+  improveVersion, applyImprovement, applyImprovements, updateFigure, generateLegend, downloadExport, enhancePrompt,
   deleteFigureVersion, getProject, saveFigureTemplateFavorite, deleteFigureTemplateFavorite,
   createCustomPalette, updateCustomPalette, deleteCustomPalette,
 } from '@/lib/api';
@@ -103,20 +103,29 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
     onSuccess: (v) => { toast.success(`Applied as v${v.version_number}; R script regenerated`); setSelectedVid(v.id); setReview(null); setImprovements(null); qc.invalidateQueries({ queryKey: ['figure', id] }); },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Apply failed'),
   });
+  const applyImps = useMutation({
+    mutationFn: (impIds: string[]) => applyImprovements(id, impIds),
+    onSuccess: (v) => { toast.success(`Applied checked suggestions as v${v.version_number}; R script regenerated`); setSelectedVid(v.id); setReview(null); setImprovements(null); qc.invalidateQueries({ queryKey: ['figure', id] }); qc.invalidateQueries({ queryKey: ['figures'] }); },
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Apply failed'),
+  });
   const directAiEdit = useMutation({
     mutationFn: async (promptOverride?: string) => {
       const prompt = (promptOverride ?? improvePrompt).trim();
       if (!prompt) throw new Error('Describe the edit you want first');
       if (!effectiveSelectedVid) throw new Error('No figure version selected');
       const suggestions = await improveVersion(id, effectiveSelectedVid, prompt);
-      const first = suggestions.find((item) => item.param_patch && Object.keys(item.param_patch).length > 0);
-      if (!first) throw new Error('AI did not return an applicable visual edit');
-      const version = await applyImprovement(id, first.id);
-      return { suggestions, appliedId: first.id, version };
+      const applicable = suggestions.filter((item) => item.param_patch && Object.keys(item.param_patch).length > 0);
+      if (!applicable.length) throw new Error('AI did not return an applicable visual edit');
+      const appliedIds = applicable.map((item) => item.id);
+      const version = appliedIds.length === 1
+        ? await applyImprovement(id, appliedIds[0])
+        : await applyImprovements(id, appliedIds);
+      return { suggestions, appliedIds, version };
     },
-    onSuccess: ({ suggestions, appliedId, version }) => {
+    onSuccess: ({ suggestions, appliedIds, version }) => {
       toast.success(`AI edit applied as v${version.version_number}; R script regenerated`);
-      setImprovements(suggestions.map((item) => item.id === appliedId ? { ...item, applied: true } : item));
+      const applied = new Set(appliedIds);
+      setImprovements(suggestions.map((item) => applied.has(item.id) ? { ...item, applied: true } : item));
       setSelectedVid(version.id);
       setReview(null);
       qc.invalidateQueries({ queryKey: ['figure', id] });
@@ -319,11 +328,12 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
               canEdit={canEditFigure}
               isSuggesting={runImprove.isPending}
               isApplyingPrompt={directAiEdit.isPending}
-              isApplyingSuggestion={applyImp.isPending}
+              isApplyingSuggestion={applyImp.isPending || applyImps.isPending}
               onPromptChange={setImprovePrompt}
               onSuggest={(prompt) => runImprove.mutate(prompt)}
               onApplyPrompt={(prompt) => directAiEdit.mutate(prompt)}
               onApplySuggestion={(improvementId) => applyImp.mutate(improvementId)}
+              onApplySuggestions={(improvementIds) => applyImps.mutate(improvementIds)}
             />
 
             <Card>

@@ -19,6 +19,7 @@ from app.figures.schemas import (
     FigureTemplateFavoriteItem,
     FigureUpdate,
     GalleryFigureItem,
+    ImprovementApplyRequest,
     ImprovementRequest,
     ImprovementResponse,
     LegendRequest,
@@ -263,6 +264,11 @@ def improve(figure_id: uuid.UUID, version_id: uuid.UUID, data: ImprovementReques
 @router.get("/{figure_id}/versions/{version_id}/improvements", response_model=list[ImprovementResponse])
 def list_improvements(figure_id: uuid.UUID, version_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     return service.list_improvements(db, figure_id, version_id, current_user.id)
+
+
+@router.post("/{figure_id}/improvements/apply", response_model=VersionResponse)
+def apply_improvements(figure_id: uuid.UUID, data: ImprovementApplyRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    return service.apply_improvements(db, figure_id, data.improvement_ids, current_user.id)
 
 
 @router.post("/{figure_id}/improvements/{improvement_id}/apply", response_model=VersionResponse)
