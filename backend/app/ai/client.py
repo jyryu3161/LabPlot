@@ -441,7 +441,13 @@ def improve_figure(db: Session, plot_type: str, mapping: dict, options: dict, st
             {"kind": "text", "text": (
                 "Attached image is the current rendered figure for visual grounding. "
                 "If it contains numbered blue marks, use those visible marks together with the mark summaries "
-                "in the user request to identify the local region to edit."
+                "in the user request to identify the local region to edit.\n"
+                "AI editor mark protocol:\n"
+                "- The blue numbered marks are editing annotations, not data and not final figure annotations.\n"
+                "- A [region] mark selects plot components inside or overlapping the rectangle.\n"
+                "- An [arrow] mark points to the target at the arrow head; the tail is context only.\n"
+                "- A [note] mark targets the nearest visible component at the point.\n"
+                "- Return supported param_patch changes only. The regenerated R code must implement the requested visual change; never propose pixel-level inpainting."
             )},
             {"kind": "image", "mime": image_mime, "b64": base64.standard_b64encode(image_bytes).decode("ascii")},
         ])

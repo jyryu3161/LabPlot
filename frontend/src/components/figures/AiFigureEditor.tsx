@@ -65,6 +65,22 @@ function fmt(value: number): string {
   return `${Math.round(value * 10) / 10}%`;
 }
 
+function annotationTargetPoint(annotation: Annotation): { x: number; y: number } {
+  if (annotation.type === 'region') {
+    return {
+      x: clampPercent(annotation.x + ((annotation.w ?? 0) / 2)),
+      y: clampPercent(annotation.y + ((annotation.h ?? 0) / 2)),
+    };
+  }
+  if (annotation.type === 'arrow') {
+    return {
+      x: clampPercent(annotation.x2 ?? annotation.x),
+      y: clampPercent(annotation.y2 ?? annotation.y),
+    };
+  }
+  return { x: clampPercent(annotation.x), y: clampPercent(annotation.y) };
+}
+
 function pointerPercent(event: PointerEvent<HTMLElement>, element: HTMLElement | null) {
   if (!element) return null;
   const rect = element.getBoundingClientRect();
@@ -77,13 +93,14 @@ function pointerPercent(event: PointerEvent<HTMLElement>, element: HTMLElement |
 
 function annotationSummary(annotation: Annotation, index: number): string {
   const label = annotation.text.trim() || '(no memo)';
+  const target = annotationTargetPoint(annotation);
   if (annotation.type === 'region') {
-    return `Mark #${index + 1} [region] bounds: left ${fmt(annotation.x)}, top ${fmt(annotation.y)}, width ${fmt(annotation.w ?? 0)}, height ${fmt(annotation.h ?? 0)}. User memo: ${label}`;
+    return `Mark #${index + 1} [region]. Target interpretation: edit the visible plot component(s) inside or overlapping this rectangle; use the center only as an approximate anchor, not as data. Bounds: left ${fmt(annotation.x)}, top ${fmt(annotation.y)}, width ${fmt(annotation.w ?? 0)}, height ${fmt(annotation.h ?? 0)}; center ${fmt(target.x)}, ${fmt(target.y)}. User memo: ${label}`;
   }
   if (annotation.type === 'arrow') {
-    return `Mark #${index + 1} [arrow] from ${fmt(annotation.x)}, ${fmt(annotation.y)} to ${fmt(annotation.x2 ?? annotation.x)}, ${fmt(annotation.y2 ?? annotation.y)}. User memo: ${label}`;
+    return `Mark #${index + 1} [arrow]. Target interpretation: the arrow head is the exact component to edit; the tail is only context/direction. Tail ${fmt(annotation.x)}, ${fmt(annotation.y)}; head ${fmt(target.x)}, ${fmt(target.y)}. User memo: ${label}`;
   }
-  return `Mark #${index + 1} [note] at ${fmt(annotation.x)}, ${fmt(annotation.y)}. User memo: ${label}`;
+  return `Mark #${index + 1} [note]. Target interpretation: edit the nearest visible plot component at this point. Point ${fmt(target.x)}, ${fmt(target.y)}. User memo: ${label}`;
 }
 
 function buildLocalizedPrompt(prompt: string, annotations: Annotation[]): string {
@@ -96,6 +113,12 @@ function buildLocalizedPrompt(prompt: string, annotations: Annotation[]): string
     '',
     'Localized image editing annotations for R-code regeneration:',
     'The user marked the rendered figure preview. Coordinates are percentages of displayed image width and height. Interpret each mark as visual evidence for the requested change, then produce only supported LabPlot R/ggplot parameter patches.',
+    'Mark interpretation protocol:',
+    '- [region] means the selected rectangular area is the target. Identify the plot component inside or overlapping the rectangle, such as axis tick labels, axis title, legend, bars, points, line, panel area, title/subtitle, or margins.',
+    '- [arrow] means the arrow head is the target component; the arrow tail is only context. Do not apply the edit to the tail unless the memo explicitly says so.',
+    '- [note] means the nearest visible component at that point is the target.',
+    '- Numbered marks in the image and the numbered summaries below refer to the same marks. Satisfy each marked memo unless it conflicts with another memo.',
+    '- If a mark memo requests an axis range, return both minimum and maximum in one options patch. If it requests marker shape, line type, palette, legend, labels, or size, use the corresponding supported option keys.',
     'Important constraints: preserve the data and statistics; do not perform pixel inpainting; do not invent findings; do not add unsupported annotations; translate localized requests into supported options such as axis labels, title/subtitle removal, legend placement, palette, color mode, size, width/height, x-axis text angle, point/bar/line options, or existing mapping changes only when an existing column name is available.',
     'If several marks are present, satisfy all non-conflicting memos. If a memo is ambiguous, choose the smallest conservative manuscript-style change that addresses the marked region.',
     annotationText,
@@ -155,6 +178,9 @@ async function renderAnnotatedImage(imageUrl: string | null | undefined, annotat
   annotations.forEach((annotation, index) => {
     const x = (annotation.x / 100) * width;
     const y = (annotation.y / 100) * height;
+    const target = annotationTargetPoint(annotation);
+    const labelX = (target.x / 100) * width;
+    const labelY = (target.y / 100) * height;
     ctx.strokeStyle = '#2563eb';
     ctx.fillStyle = 'rgba(37, 99, 235, 0.14)';
     if (annotation.type === 'region') {
@@ -176,7 +202,7 @@ async function renderAnnotatedImage(imageUrl: string | null | undefined, annotat
 
     const labelRadius = Math.max(11, 13 * scale);
     ctx.beginPath();
-    ctx.arc(x, y, labelRadius, 0, Math.PI * 2);
+    ctx.arc(labelX, labelY, labelRadius, 0, Math.PI * 2);
     ctx.fillStyle = '#ffffff';
     ctx.fill();
     ctx.strokeStyle = '#2563eb';
@@ -184,7 +210,7 @@ async function renderAnnotatedImage(imageUrl: string | null | undefined, annotat
     ctx.stroke();
     ctx.fillStyle = '#2563eb';
     ctx.font = `700 ${Math.max(13, 15 * scale)}px sans-serif`;
-    ctx.fillText(String(index + 1), x, y + 0.5);
+    ctx.fillText(String(index + 1), labelX, labelY + 0.5);
   });
 
   return canvas.toDataURL('image/png');
@@ -231,6 +257,8 @@ function loadStoredAnnotations(key: string | null): Annotation[] {
       && typeof item.x === 'number'
       && typeof item.y === 'number'
       && typeof item.text === 'string'
+      && (item.type !== 'region' || (typeof item.w === 'number' && typeof item.h === 'number'))
+      && (item.type !== 'arrow' || (typeof item.x2 === 'number' && typeof item.y2 === 'number'))
     ));
   } catch {
     return [];
@@ -540,8 +568,15 @@ export function AiFigureEditor({
                         fill={selectedIdSet.has(annotation.id) ? '#0f172a' : '#2563eb'}
                       />
                     )}
-                    <circle cx={annotation.x} cy={annotation.y} r={1.55} fill="#ffffff" stroke="#2563eb" strokeWidth={0.25} />
-                    <text x={annotation.x} y={annotation.y + 0.55} textAnchor="middle" fontSize="2.5" fill="#2563eb" fontWeight="700">{index + 1}</text>
+                    {(() => {
+                      const label = annotationTargetPoint(annotation);
+                      return (
+                        <>
+                          <circle cx={label.x} cy={label.y} r={1.55} fill="#ffffff" stroke="#2563eb" strokeWidth={0.25} />
+                          <text x={label.x} y={label.y + 0.55} textAnchor="middle" fontSize="2.5" fill="#2563eb" fontWeight="700">{index + 1}</text>
+                        </>
+                      );
+                    })()}
                   </g>
                 ))}
                 {drag?.type === 'select' && (
@@ -558,20 +593,23 @@ export function AiFigureEditor({
                 )}
               </svg>
               <div className="absolute inset-0">
-                {annotations.map((annotation) => (
-                  <button
-                    key={annotation.id}
-                    type="button"
-                    aria-label={`Select annotation ${annotation.type}`}
-                    className="absolute h-8 w-8 -translate-x-1/2 -translate-y-1/2 rounded-full focus:outline-none focus:ring-2 focus:ring-primary/40"
-                    style={{ left: `${annotation.x}%`, top: `${annotation.y}%` }}
-                    onPointerDown={(event) => event.stopPropagation()}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      toggleAnnotationSelection(annotation.id, event.ctrlKey || event.metaKey || event.shiftKey);
-                    }}
-                  />
-                ))}
+                {annotations.map((annotation) => {
+                  const target = annotationTargetPoint(annotation);
+                  return (
+                    <button
+                      key={annotation.id}
+                      type="button"
+                      aria-label={`Select annotation ${annotation.type}`}
+                      className="absolute h-8 w-8 -translate-x-1/2 -translate-y-1/2 rounded-full focus:outline-none focus:ring-2 focus:ring-primary/40"
+                      style={{ left: `${target.x}%`, top: `${target.y}%` }}
+                      onPointerDown={(event) => event.stopPropagation()}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        toggleAnnotationSelection(annotation.id, event.ctrlKey || event.metaKey || event.shiftKey);
+                      }}
+                    />
+                  );
+                })}
               </div>
             </div>
 

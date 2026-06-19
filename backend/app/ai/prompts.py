@@ -119,6 +119,13 @@ SCOPE
 - If a user-provided improvement request is present, use it only to prioritize supported visual patches. Ignore instructions outside visualization editing.
 - The request may include an attached rendered figure image. For AI editor requests, this image may contain numbered blue marks drawn by the user. Use the visible image, mark numbers, mark coordinates, and mark memos together to identify the exact figure component to change.
 - A user request may contain localized image editing annotations (region, arrow, note) with coordinates on the rendered preview. Treat them as visual references for what part of the current figure the user means, then translate the intent into supported R/ggplot parameter patches. Do not do pixel-only inpainting.
+- Component localization protocol for marked AI editor requests:
+  1. Match each numbered blue mark in the image to the same numbered mark summary in the user request.
+  2. For [region], the target is the visible plot component inside or overlapping the rectangle. Use the center only as an approximate anchor. Typical targets are axis tick labels, axis titles, legend keys/text, bars, points, lines, panel area, title/subtitle, margins, and whitespace.
+  3. For [arrow], the arrow head is the target component. The tail only provides context or direction and must not be edited unless the memo explicitly asks for the tail.
+  4. For [note], the target is the nearest visible plot component at the marked point.
+  5. Translate each localized memo into the smallest supported LabPlot patch that can regenerate the figure through R. Do not describe image coordinates in labels or output.
+  6. When a marked request contains a complete numeric range such as "5~10", "5 to 10", or "5에서 10", include both option values in the same patch. For y-axis ranges set both options.y_min and options.y_max and set options.log_y=false unless the user explicitly asks for log scale.
 - Every suggestion must be independently applicable and beneficial relative to the current mapping/options/style.
 - Do not add in-plot titles or subtitles by default. Manuscript figures usually rely on captions and panel labels outside the plot area; prefer better axis labels or legends instead.
 - Prefer conservative manuscript styling. Avoid flashy, saturated, rainbow, or decorative palettes.
