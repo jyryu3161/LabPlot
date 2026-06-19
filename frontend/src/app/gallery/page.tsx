@@ -5,6 +5,7 @@ import { useQuery } from '@tanstack/react-query';
 import { getPublicGallery } from '@/lib/api';
 import type { PublicFigure } from '@/lib/types';
 import { useAuthContext } from '@/components/auth/AuthProvider';
+import { AppHeader } from '@/components/layout/AppHeader';
 import { PublicHeader } from '@/components/layout/PublicHeader';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -56,12 +57,12 @@ export default function GalleryPage() {
 
   return (
     <div className="min-h-screen bg-background">
-      <PublicHeader />
+      {isAuthenticated ? <AppHeader /> : <PublicHeader />}
       <main className="mx-auto max-w-6xl px-4 py-14">
         <div className="mb-10 text-center">
           <h1 className="text-3xl font-bold tracking-tight">Gallery</h1>
           <p className="mx-auto mt-3 max-w-xl text-muted-foreground">
-            Publication-ready figures made with LabPlot AI — organized by field. Browse freely, no account needed.
+            Publication-ready figures made with LabPlot AI — organized by field.
           </p>
           {!isAuthenticated && <Link href="/register"><Button className="mt-5">Create your own →</Button></Link>}
         </div>
