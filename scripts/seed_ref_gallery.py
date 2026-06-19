@@ -133,6 +133,28 @@ def _overlapped_bar_distribution() -> pd.DataFrame:
     })
 
 
+def _benchmark_grouped_bar() -> pd.DataFrame:
+    rows = [
+        ("Dataset A", "Baseline", 0.782),
+        ("Dataset A", "Method 1", 0.821),
+        ("Dataset A", "Method 2", 0.846),
+        ("Dataset A", "Method 3", 0.858),
+        ("Dataset B", "Baseline", 0.731),
+        ("Dataset B", "Method 1", 0.764),
+        ("Dataset B", "Method 2", 0.792),
+        ("Dataset B", "Method 3", 0.801),
+        ("Dataset C", "Baseline", 0.812),
+        ("Dataset C", "Method 1", 0.835),
+        ("Dataset C", "Method 2", 0.861),
+        ("Dataset C", "Method 3", 0.872),
+        ("Dataset D", "Baseline", 0.694),
+        ("Dataset D", "Method 1", 0.727),
+        ("Dataset D", "Method 2", 0.758),
+        ("Dataset D", "Method 3", 0.769),
+    ]
+    return pd.DataFrame(rows, columns=["Benchmark", "Method", "Score"])
+
+
 def _pca_columns() -> list[str]:
     return [f"Gene_{idx}" for idx in range(1, 101)]
 
@@ -869,6 +891,23 @@ SEEDS = [
         plot_type="error_bar",
         mapping={"x": "Group", "y": "Mean_Cell_Viability", "error": "SEM"},
         options={**COMMON_OPTIONS, "x_label": "Group", "y_label": "Cell viability (%)", "connect_points": False},
+    ),
+    GallerySeed(
+        key="grouped_bar_benchmark",
+        figure_name="Grouped bar chart",
+        dataset_name="Gallery seed - grouped bar chart",
+        dataframe_factory=_benchmark_grouped_bar,
+        plot_type="grouped_bar",
+        mapping={"x": "Benchmark", "y": "Score", "group": "Method"},
+        options={
+            **COMMON_OPTIONS,
+            "palette_name": "journal_muted",
+            "x_label": "Benchmark dataset",
+            "y_label": "Performance score",
+            "legend_title": "Method",
+            "stat": "mean",
+            "bar_width": 0.68,
+        },
     ),
     GallerySeed(
         key="overlapped_distribution_bar",

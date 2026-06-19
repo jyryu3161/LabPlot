@@ -166,6 +166,30 @@ p <- ggplot(.summ, aes(x = .grp, y = .val{fill_aes})) +
 """
 
 
+def _grouped_bar(m, o):
+    x, y, group = m["x"], m["y"], m["group"]
+    stat = o.get("stat", "mean")
+    fun = "sum" if stat == "sum" else "mean"
+    width = max(0.2, min(1.0, _num(o.get("bar_width"), 0.68)))
+    legend = o.get("legend_title") or group
+    return f"""
+{_ORDERED_FACTOR_R}
+.plot <- df %>%
+  dplyr::transmute(.x_raw = {_data(x)},
+                   .value_raw = suppressWarnings(as.numeric({_data(y)})),
+                   .series = factor({_data(group)})) %>%
+  dplyr::filter(!is.na(.x_raw), !is.na(.value_raw), !is.na(.series)) %>%
+  dplyr::group_by(.x_raw, .series) %>%
+  dplyr::summarise(.value = {fun}(.value_raw, na.rm = TRUE), .groups = "drop") %>%
+  dplyr::mutate(.x = .labplot_ordered_factor(.x_raw))
+p <- ggplot(.plot, aes(x = .x, y = .value, fill = .series)) +
+  geom_col(position = position_dodge(width = 0.76), width = {width}, alpha = 0.9,
+           colour = "grey25", linewidth = 0.25) +
+  scale_fill_manual(values = labplot_palette()) +
+  {_labs(o, x, y)} + guides(fill = guide_legend(title = {rq(legend)}))
+"""
+
+
 def _overlap_bar(m, o):
     x = m["x"]
     y = m["y"]
@@ -620,6 +644,7 @@ _BUILDERS = {
     "violin": _violin,
     "scatter": _scatter,
     "bar": _bar,
+    "grouped_bar": _grouped_bar,
     "overlap_bar": _overlap_bar,
     "line": _line,
     "error_bar": _error_bar,
@@ -664,6 +689,13 @@ PLOT_TYPES = [
      "options": [{"key": "stat", "label": "Statistic", "type": "select", "choices": ["mean", "sum", "count"], "default": "mean"},
                  {"key": "error_bars", "label": "Error bars (SD)", "type": "bool", "default": True},
                  {"key": "color_bars", "label": "Color bars by category", "type": "bool", "default": False}]},
+    {"type": "grouped_bar", "label": "Grouped bar chart",
+     "required": [{"key": "x", "label": "Category / benchmark (X)", "roles": ["group", "category", "status", "time", "numeric"]},
+                  {"key": "y", "label": "Value / score (Y)", "roles": ["numeric", "log2fc"]},
+                  {"key": "group", "label": "Series / method", "roles": ["group", "category", "status"]}],
+     "optional": [],
+     "options": [{"key": "stat", "label": "Statistic", "type": "select", "choices": ["mean", "sum"], "default": "mean"},
+                 {"key": "bar_width", "label": "Bar width", "type": "number", "default": 0.68}]},
     {"type": "overlap_bar", "label": "Overlapped bar chart",
      "required": [{"key": "x", "label": "X / bin", "roles": ["numeric", "group", "category", "time"]},
                   {"key": "y", "label": "Value / count", "roles": ["numeric"]}],
@@ -1444,7 +1476,7 @@ PLOT_TYPES += [
 ]
 
 PLOT_DOMAINS = {
-    "box": "basic", "violin": "basic", "scatter": "basic", "bar": "basic", "overlap_bar": "basic", "line": "basic",
+    "box": "basic", "violin": "basic", "scatter": "basic", "bar": "basic", "grouped_bar": "basic", "overlap_bar": "basic", "line": "basic",
     "histogram": "basic", "density": "basic", "correlation_heatmap": "basic", "heatmap": "basic",
     "error_bar": "engineering", "ribbon": "engineering", "contour": "engineering", "radar": "engineering",
     "volcano": "omics", "pca": "omics",

@@ -1,23 +1,37 @@
 'use client';
 
+import { useState } from 'react';
 import Link from 'next/link';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { deleteFigureTemplateFavorite, listFigures, deleteFigure, saveFigureTemplateFavorite } from '@/lib/api';
+import { deleteFigureTemplateFavorite, listFigures, deleteFigure, saveFigureTemplateFavorite, updateFigure } from '@/lib/api';
 import { AppHeader } from '@/components/layout/AppHeader';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { Loader2, Images, Star, Trash2 } from 'lucide-react';
+import { Input } from '@/components/ui/input';
+import { Check, Images, Loader2, Pencil, Star, Trash2, X } from 'lucide-react';
 import { formatStylePreset } from '@/lib/style-presets';
 
 export default function FiguresPage() {
   const qc = useQueryClient();
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingName, setEditingName] = useState('');
   const { data: figures, isLoading } = useQuery({ queryKey: ['figures'], queryFn: () => listFigures() });
   const del = useMutation({
     mutationFn: deleteFigure,
     onSuccess: () => { toast.success('Figure deleted'); qc.invalidateQueries({ queryKey: ['figures'] }); },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Delete failed'),
+  });
+  const rename = useMutation({
+    mutationFn: ({ id, name }: { id: string; name: string }) => updateFigure(id, { name }),
+    onSuccess: () => {
+      toast.success('Figure renamed');
+      setEditingId(null);
+      setEditingName('');
+      qc.invalidateQueries({ queryKey: ['figures'] });
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Rename failed'),
   });
   const favorite = useMutation({
     mutationFn: async ({ id, next }: { id: string; next: boolean }) => {
@@ -35,6 +49,21 @@ export default function FiguresPage() {
     },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Template update failed'),
   });
+
+  function beginRename(id: string, name: string) {
+    setEditingId(id);
+    setEditingName(name);
+  }
+
+  function submitRename(id: string, fallbackName: string) {
+    const name = editingName.trim();
+    if (!name || name === fallbackName) {
+      setEditingId(null);
+      setEditingName('');
+      return;
+    }
+    rename.mutate({ id, name });
+  }
 
   return (
     <div className="min-h-screen bg-muted/20">
@@ -58,11 +87,51 @@ export default function FiguresPage() {
                 </Link>
                 <CardContent className="p-3">
                   <div className="flex items-start justify-between gap-2">
-                    <Link href={`/figures/${f.id}`} className="min-w-0">
-                      <p className="truncate text-sm font-medium">{f.name}</p>
-                      <p className="text-xs text-muted-foreground">{f.plot_type}</p>
-                    </Link>
+                    <div className="min-w-0 flex-1">
+                      {editingId === f.id ? (
+                        <div className="space-y-1">
+                          <Input
+                            className="h-8 text-sm"
+                            value={editingName}
+                            maxLength={255}
+                            autoFocus
+                            onChange={(event) => setEditingName(event.target.value)}
+                            onKeyDown={(event) => {
+                              if (event.key === 'Enter') submitRename(f.id, f.name);
+                              if (event.key === 'Escape') {
+                                setEditingId(null);
+                                setEditingName('');
+                              }
+                            }}
+                          />
+                          <div className="flex gap-1">
+                            <Button type="button" size="icon-xs" variant="secondary" disabled={rename.isPending} onClick={() => submitRename(f.id, f.name)}>
+                              {rename.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}
+                            </Button>
+                            <Button type="button" size="icon-xs" variant="ghost" onClick={() => { setEditingId(null); setEditingName(''); }}>
+                              <X className="h-3 w-3" />
+                            </Button>
+                          </div>
+                        </div>
+                      ) : (
+                        <Link href={`/figures/${f.id}`} className="block min-w-0">
+                          <p className="truncate text-sm font-medium">{f.name}</p>
+                          <p className="text-xs text-muted-foreground">{f.plot_type}</p>
+                        </Link>
+                      )}
+                    </div>
                     <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      aria-label={`Rename ${f.name}`}
+                      onClick={() => beginRename(f.id, f.name)}
+                      disabled={rename.isPending && editingId === f.id}
+                    >
+                      <Pencil className="h-4 w-4 text-muted-foreground" />
+                    </Button>
+                    <Button
+                      type="button"
                       variant="ghost"
                       size="sm"
                       aria-label={f.is_favorite ? `Remove ${f.name} from saved templates` : `Save ${f.name} as template`}
@@ -71,7 +140,7 @@ export default function FiguresPage() {
                     >
                       <Star className={`h-4 w-4 ${f.is_favorite ? 'fill-amber-400 text-amber-500' : 'text-muted-foreground'}`} />
                     </Button>
-                    <Button variant="ghost" size="sm" onClick={() => { if (confirm(`Delete ${f.name}?`)) del.mutate(f.id); }}>
+                    <Button type="button" variant="ghost" size="sm" onClick={() => { if (confirm(`Delete ${f.name}?`)) del.mutate(f.id); }}>
                       <Trash2 className="h-4 w-4 text-muted-foreground" />
                     </Button>
                   </div>

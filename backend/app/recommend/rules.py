@@ -180,6 +180,18 @@ def suggest_charts(columns: list[dict[str, Any]], limit: int = MAX_RULE_SUGGESTI
             "strong")
 
     if primary_group and numeric:
+        if len(group_cols) >= 2:
+            x_group = _match(group_cols, r"\b(benchmark|dataset|task|metric|scenario|category|endpoint)\b") or primary_group
+            series_group = (
+                _match([c for c in group_cols if c["name"] != x_group], r"\b(model|method|algorithm|series|condition|group|treatment)\b")
+                or next((c["name"] for c in group_cols if c["name"] != x_group), None)
+            )
+            if series_group:
+                add("grouped_bar", "Grouped bar chart", 0.95,
+                    f"Compare '{numeric[0]}' across '{x_group}' with side-by-side bars for '{series_group}'.",
+                    {"x": x_group, "y": numeric[0], "group": series_group},
+                    {"x": group[:4], "y": numeric[:5], "group": group[:4]},
+                    "strong")
         add("box", "Box plot", 0.92,
             f"Compare the distribution of '{numeric[0]}' across categorical groups in '{primary_group}'.",
             {"x": primary_group, "y": numeric[0], "color": primary_group},

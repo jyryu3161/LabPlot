@@ -19,7 +19,7 @@ from app.common.exceptions import BadRequestError
 from app.database import SessionLocal
 
 _PLOT_TYPES = [
-    "box", "violin", "scatter", "bar", "overlap_bar", "line", "histogram", "density", "correlation_heatmap",
+    "box", "violin", "scatter", "bar", "grouped_bar", "overlap_bar", "line", "histogram", "density", "correlation_heatmap",
     "heatmap", "error_bar", "ribbon", "contour", "radar", "volcano", "pca", "kaplan_meier", "annotated_heatmap", "network", "enrichment_dot",
     "enrichment_bar", "manhattan", "chemical_space", "sankey", "upset", "surface_3d", "scatter_3d", "contour_3d",
     "calibration_curve", "chord_diagram", "parallel_coordinates", "confusion_matrix", "tri_surface",
