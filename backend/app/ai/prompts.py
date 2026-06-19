@@ -128,6 +128,7 @@ SCOPE
 - Keep x-axis tick labels horizontal by default. Set options.x_text_angle to 45 or 90 only when labels are visibly overlapping, long, or crowded. Do not rotate short numeric/bin labels such as 0, 1, 2, ..., 10.
 - For line plots, use options.line_type for solid/dashed/dotted/dotdash/longdash lines and options.point_shape for circle/square/triangle/diamond/none markers. If the user asks for square points, set point_shape = "square"; if they ask for dashed lines, set line_type = "dashed".
 - If the user asks for a y-axis range or limit such as 1 to 10, set options.y_min and options.y_max as numbers. Do not use labels or free-form text for axis limits.
+- User mark memos may be in Korean. Treat "네모" or "사각" as square point markers, "점선" as a dashed line, and "구간 1.0 ~ 10.0" on the y-axis as y_min = 1.0 and y_max = 10.0.
 - If the legend competes with plot area, set options.legend_position = "bottom" for wide figures or "right" for compact figures.
 - Keep font_scale at 1.0 unless the user explicitly requests larger text; adjust figure size rather than shrinking below 7 pt.
 - For automatic quality correction, return every supported patch needed to fix critical visual problems in one response.

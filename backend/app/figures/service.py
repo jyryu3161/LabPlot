@@ -818,6 +818,50 @@ def _x_axis_labels_need_rotation(df, mapping: dict[str, Any], options: dict[str,
     )
 
 
+def _explicit_visual_patch_from_request(plot_type: str, request: str | None) -> dict[str, Any]:
+    text = (request or "").strip()
+    if not text:
+        return {}
+    lowered = text.lower()
+    options: dict[str, Any] = {}
+
+    # Deterministic safety net for explicit, supported visual edits. The LLM
+    # still receives the rendered image and marks; these rules prevent clearly
+    # stated UI edits from silently degrading into a generic fallback.
+    if plot_type == "line":
+        if re.search(r"(네모|사각|square)", lowered):
+            options["point_shape"] = "square"
+        if re.search(r"(점선|dashed)", lowered):
+            options["line_type"] = "dashed"
+        elif re.search(r"(dotted|점\s*모양\s*선)", lowered):
+            options["line_type"] = "dotted"
+
+    y_range = re.search(
+        r"(?:y\s*[- ]?\s*axis|y축|구간|range|limits?|범위)[^\n]{0,80}?"
+        r"(-?\d+(?:\.\d+)?)\s*(?:~|–|—|to|부터|에서|-)\s*(-?\d+(?:\.\d+)?)",
+        lowered,
+    )
+    if y_range and not re.search(r"(x\s*[- ]?\s*axis|x축)", y_range.group(0)):
+        y1 = float(y_range.group(1))
+        y2 = float(y_range.group(2))
+        if y1 != y2:
+            options["y_min"] = min(y1, y2)
+            options["y_max"] = max(y1, y2)
+            options["log_y"] = False
+
+    return {"options": options} if options else {}
+
+
+def _patch_changes_version(patch: dict[str, Any], version: FigureVersion) -> bool:
+    if patch.get("style_preset") and patch["style_preset"] != version.style_preset:
+        return True
+    base_mapping = version.mapping or {}
+    if any(base_mapping.get(k) != v for k, v in (patch.get("mapping") or {}).items()):
+        return True
+    base_options = version.options or {}
+    return any(base_options.get(k) != v for k, v in (patch.get("options") or {}).items())
+
+
 def rerender(db: Session, figure_id: uuid.UUID, owner_id: uuid.UUID, req) -> dict:
     owner = db.query(User).filter(User.id == owner_id).first()
     if owner:
@@ -1003,6 +1047,7 @@ def improve_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, ow
         rendered_image=image_payload,
         r_code=v.r_code,
     )
+    user_intent = bool((prompt or "").strip() or annotated_image)
     rows = []
     for s in suggestions:
         patch = _sanitize_param_patch(s.get("param_patch", {}), pdef, v.mapping or {})
@@ -1018,7 +1063,25 @@ def improve_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, ow
         )
         db.add(imp)
         rows.append(imp)
-    if not rows:
+
+    explicit_patch = _sanitize_param_patch(
+        _explicit_visual_patch_from_request(fig.plot_type, prompt),
+        pdef,
+        v.mapping or {},
+    )
+    if explicit_patch and _patch_changes_version(explicit_patch, v):
+        imp = Improvement(
+            figure_version_id=version_id,
+            suggestion_type="Marked edit request",
+            current_state="Current figure does not yet reflect the explicit marked edit request.",
+            recommended="Apply the visual options explicitly requested in the mark memos and edit request.",
+            param_patch=explicit_patch,
+            priority="high",
+        )
+        db.add(imp)
+        rows.append(imp)
+
+    if not rows and not user_intent:
         imp = Improvement(
             figure_version_id=version_id,
             suggestion_type="Publication export settings",
@@ -1029,6 +1092,8 @@ def improve_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, ow
         )
         db.add(imp)
         rows.append(imp)
+    if not rows:
+        return []
     db.commit()
     for r in rows:
         db.refresh(r)
