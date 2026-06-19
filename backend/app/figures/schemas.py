@@ -34,6 +34,10 @@ class FigureUpdate(BaseModel):
     is_favorite: bool | None = None
 
 
+class FigureReorderRequest(BaseModel):
+    figure_ids: list[uuid.UUID] = Field(..., min_length=1, max_length=200)
+
+
 class TemplateFavoriteRequest(BaseModel):
     source_version_id: uuid.UUID | None = None
     name: str | None = Field(default=None, max_length=255)
@@ -97,6 +101,7 @@ class FigureListItem(BaseModel):
     project_id: uuid.UUID | None = None
     created_at: datetime
     updated_at: datetime
+    display_order: int | None = None
     is_favorite: bool = False
     thumb_url: str | None = None
 

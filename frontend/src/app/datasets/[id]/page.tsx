@@ -8,10 +8,10 @@ import { toast } from 'sonner';
 import {
   getDataset, getSavedChartRecommendations, recommendCharts, getPlotTypes, getStyles, getPalettes,
   createFigure, getFigure, getProject, listFigures, updateDataset, recommendChartsFromImage,
-  listFigureTemplateFavorites,
+  listFigureTemplateFavorites, reorderFigures,
 } from '@/lib/api';
 import { Textarea } from '@/components/ui/textarea';
-import type { ChartSuggestion, FigureDetail, FigureTemplateFavoriteItem, PlotTypeDef } from '@/lib/types';
+import type { ChartSuggestion, FigureDetail, FigureListItem, FigureTemplateFavoriteItem, PlotTypeDef } from '@/lib/types';
 import { formatStylePreset } from '@/lib/style-presets';
 import { AppHeader } from '@/components/layout/AppHeader';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -21,7 +21,7 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { CheckCircle2, Clipboard, Columns3, ImageIcon, Loader2, Sparkles, Star, Wand2, ArrowRight, X } from 'lucide-react';
+import { CheckCircle2, Clipboard, Columns3, GripVertical, ImageIcon, Loader2, Sparkles, Star, Wand2, ArrowRight, X } from 'lucide-react';
 
 const ROLE_COLORS: Record<string, string> = {
   numeric: 'bg-blue-100 text-blue-700', group: 'bg-green-100 text-green-700',
@@ -32,6 +32,16 @@ const ROLE_COLORS: Record<string, string> = {
 
 type ColumnShape = { name: string; role: string; dtype: string; sample_values?: unknown[] };
 type BuildEntryMode = 'manual' | 'recommendation' | 'template';
+
+function moveFigure(items: FigureListItem[], activeId: string, overId: string): FigureListItem[] {
+  const from = items.findIndex((item) => item.id === activeId);
+  const to = items.findIndex((item) => item.id === overId);
+  if (from < 0 || to < 0 || from === to) return items;
+  const next = [...items];
+  const [item] = next.splice(from, 1);
+  next.splice(to, 0, item);
+  return next;
+}
 
 const COLUMN_ROLE_OPTIONS = [
   { value: 'numeric', label: 'Numeric' },
@@ -245,6 +255,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
   const [recommendPrompt, setRecommendPrompt] = useState('');
   const [referenceFile, setReferenceFile] = useState<File | null>(null);
   const [visualizeStep, setVisualizeStep] = useState<'columns' | 'recommend' | 'build'>('columns');
+  const [draggingFigureId, setDraggingFigureId] = useState<string | null>(null);
   const autoRecommendationKeyRef = useRef<string | null>(null);
   const aiRecommend = useMutation<ChartSuggestion[], Error, { silent?: boolean; refresh?: boolean; prompt?: string } | undefined>({
     mutationFn: (variables) => {
@@ -594,12 +605,36 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
     onSuccess: (fig) => { toast.success('Figure created'); router.push(`/figures/${fig.id}`); },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Render failed'),
   });
+  const reorderFig = useMutation({
+    mutationFn: (figureIds: string[]) => reorderFigures(figureIds),
+    onSuccess: (updated) => {
+      toast.success('Figure order saved');
+      qc.setQueryData(['figures', ds?.project_id ?? 'all'], updated);
+      qc.invalidateQueries({ queryKey: ['figures', ds?.project_id ?? 'all'] });
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Reorder failed'),
+  });
 
   if (isLoading || !ds) {
     return (<div className="min-h-screen bg-muted/20"><AppHeader /><div className="flex justify-center py-20"><Loader2 className="h-6 w-6 animate-spin" /></div></div>);
   }
 
   const datasetFigures = (figures ?? []).filter((f) => f.dataset_id === id);
+
+  function dropDatasetFigure(overId: string) {
+    if (!draggingFigureId || draggingFigureId === overId || datasetFigures.length === 0) return;
+    const nextDatasetFigures = moveFigure(datasetFigures, draggingFigureId, overId);
+    setDraggingFigureId(null);
+    if (nextDatasetFigures === datasetFigures) return;
+    const nextIds = nextDatasetFigures.map((figure) => figure.id);
+    const subsetIds = new Set(nextIds);
+    let cursor = 0;
+    const optimistic = (figures ?? []).map((figure) => (
+      subsetIds.has(figure.id) ? nextDatasetFigures[cursor++] : figure
+    ));
+    qc.setQueryData(['figures', ds?.project_id ?? 'all'], optimistic);
+    reorderFig.mutate(nextIds);
+  }
 
   return (
     <div className="min-h-screen bg-muted/20">
@@ -1219,15 +1254,28 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
             ) : (
               <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
                 {datasetFigures.map((f) => (
-                  <Link key={f.id} href={`/figures/${f.id}`}>
-                    <Card className="overflow-hidden transition hover:shadow-md">
+                  <Card
+                    key={f.id}
+                    draggable={canEditDataset}
+                    onDragStart={() => setDraggingFigureId(f.id)}
+                    onDragEnd={() => setDraggingFigureId(null)}
+                    onDragOver={(event) => { if (canEditDataset) event.preventDefault(); }}
+                    onDrop={() => dropDatasetFigure(f.id)}
+                    className={`overflow-hidden transition hover:shadow-md ${draggingFigureId === f.id ? 'opacity-50' : ''}`}
+                  >
+                    <Link href={`/figures/${f.id}`}>
                       {f.thumb_url && <img src={f.thumb_url} alt={f.name} loading="lazy" decoding="async" className="aspect-[4/3] w-full bg-white object-contain" />}
-                      <CardContent className="p-3">
-                        <p className="truncate text-sm font-medium">{f.name}</p>
-                        <p className="text-xs text-muted-foreground">{f.plot_type} · {formatStylePreset(f.style_preset)}</p>
-                      </CardContent>
-                    </Card>
-                  </Link>
+                    </Link>
+                    <CardContent className="p-3">
+                      <div className="flex items-start gap-2">
+                        {canEditDataset && <GripVertical className="mt-1 h-4 w-4 shrink-0 cursor-grab text-muted-foreground" />}
+                        <Link href={`/figures/${f.id}`} className="min-w-0 flex-1">
+                          <p className="truncate text-sm font-medium">{f.name}</p>
+                          <p className="text-xs text-muted-foreground">{f.plot_type} · {formatStylePreset(f.style_preset)}</p>
+                        </Link>
+                      </div>
+                    </CardContent>
+                  </Card>
                 ))}
               </div>
             )}

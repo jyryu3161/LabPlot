@@ -27,6 +27,7 @@ class Figure(Base):
     description = Column(Text, nullable=True)   # user-written interpretation
     legend = Column(Text, nullable=True)        # figure legend (AI or user)
     is_favorite = Column(Boolean, nullable=False, default=False)
+    display_order = Column(Integer, nullable=True, index=True)
     created_at = Column(DateTime(timezone=True), default=_now)
     updated_at = Column(DateTime(timezone=True), default=_now, onupdate=_now)
 

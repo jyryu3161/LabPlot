@@ -319,6 +319,9 @@ export async function createFigure(p: FigureCreatePayload): Promise<FigureDetail
 export async function listFigures(projectId?: string): Promise<FigureListItem[]> {
   return fetcher(`/api/figures${projectId ? `?project_id=${projectId}` : ''}`);
 }
+export async function reorderFigures(figureIds: string[]): Promise<FigureListItem[]> {
+  return fetcher('/api/figures/reorder', { method: 'POST', body: JSON.stringify({ figure_ids: figureIds }) });
+}
 export async function listGalleryFigures(limit = 200): Promise<GalleryFigureItem[]> {
   return fetcher(`/api/figures/gallery?limit=${limit}`);
 }

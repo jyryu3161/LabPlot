@@ -98,7 +98,8 @@ pdf("figure.pdf", width = {w}, height = {h}, pointsize = 7); draw_plot(); invisi
                 angle = max(0, min(90, float(x_angle)))
                 hjust = 1 if angle >= 30 else 0.5
                 vjust = 0.5 if angle >= 30 else 1
-                post += f"p <- p + theme(axis.text.x = element_text(angle = {angle:g}, hjust = {hjust}, vjust = {vjust}))\n"
+                title_margin = ", axis.title.x = element_text(margin = margin(t = 8))" if angle >= 30 else ""
+                post += f"p <- p + theme(axis.text.x = element_text(angle = {angle:g}, hjust = {hjust}, vjust = {vjust}){title_margin})\n"
             except (TypeError, ValueError):
                 pass
         if opts.get("log_y"):

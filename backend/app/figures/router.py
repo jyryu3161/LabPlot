@@ -16,6 +16,7 @@ from app.figures.schemas import (
     FigureCreate,
     FigureDetail,
     FigureListItem,
+    FigureReorderRequest,
     FigureTemplateFavoriteItem,
     FigureUpdate,
     GalleryFigureItem,
@@ -116,6 +117,11 @@ def create_figure(data: FigureCreate, request: Request, db: Session = Depends(ge
 @router.get("", response_model=list[FigureListItem])
 def list_figures(project_id: uuid.UUID | None = None, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     return service.list_figures(db, current_user.id, project_id=project_id)
+
+
+@router.post("/reorder", response_model=list[FigureListItem])
+def reorder_figures(data: FigureReorderRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    return service.reorder_figures(db, current_user.id, data.figure_ids)
 
 
 @router.get("/gallery", response_model=list[GalleryFigureItem])

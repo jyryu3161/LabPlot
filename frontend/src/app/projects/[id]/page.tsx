@@ -5,18 +5,29 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { addProjectCollaborator, getProject, updateProject, listDatasets, listFigures, deleteDataset, deleteFigure, downloadProjectPack, enhancePrompt, removeProjectCollaborator } from '@/lib/api';
-import type { ProjectInviteDraft } from '@/lib/types';
+import { addProjectCollaborator, getProject, updateProject, listDatasets, listFigures, deleteDataset, deleteFigure, downloadProjectPack, enhancePrompt, removeProjectCollaborator, updateFigure, reorderFigures } from '@/lib/api';
+import type { FigureListItem, ProjectInviteDraft } from '@/lib/types';
 import { AppHeader } from '@/components/layout/AppHeader';
 import { DatasetUploadWizard } from '@/components/datasets/DatasetUploadWizard';
 import { ProjectCollaboratorPicker } from '@/components/projects/ProjectCollaboratorPicker';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Loader2, FileSpreadsheet, Trash2, Images, Database, Package, FlaskConical, Sparkles, Users } from 'lucide-react';
+import { Check, GripVertical, Loader2, FileSpreadsheet, Trash2, Images, Database, Package, FlaskConical, Pencil, Sparkles, Users, X } from 'lucide-react';
 import { formatStylePreset } from '@/lib/style-presets';
+
+function moveFigure(items: FigureListItem[], activeId: string, overId: string): FigureListItem[] {
+  const from = items.findIndex((item) => item.id === activeId);
+  const to = items.findIndex((item) => item.id === overId);
+  if (from < 0 || to < 0 || from === to) return items;
+  const next = [...items];
+  const [item] = next.splice(from, 1);
+  next.splice(to, 0, item);
+  return next;
+}
 
 export default function ProjectWorkspace({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -27,10 +38,32 @@ export default function ProjectWorkspace({ params }: { params: Promise<{ id: str
   const { data: figures } = useQuery({ queryKey: ['figures', id], queryFn: () => listFigures(id) });
   const [uploadDesc, setUploadDesc] = useState('');
   const [newCollaborators, setNewCollaborators] = useState<ProjectInviteDraft[]>([]);
+  const [editingFigureId, setEditingFigureId] = useState<string | null>(null);
+  const [editingFigureName, setEditingFigureName] = useState('');
+  const [draggingFigureId, setDraggingFigureId] = useState<string | null>(null);
   const canEditProject = project?.role === 'owner' || project?.role === 'editor';
 
   const delDs = useMutation({ mutationFn: deleteDataset, onSuccess: () => { toast.success('Dataset deleted'); qc.invalidateQueries({ queryKey: ['datasets', id] }); } });
   const delFig = useMutation({ mutationFn: deleteFigure, onSuccess: () => { toast.success('Figure deleted'); qc.invalidateQueries({ queryKey: ['figures', id] }); } });
+  const renameFig = useMutation({
+    mutationFn: ({ figureId, name }: { figureId: string; name: string }) => updateFigure(figureId, { name }),
+    onSuccess: () => {
+      toast.success('Figure renamed');
+      setEditingFigureId(null);
+      setEditingFigureName('');
+      qc.invalidateQueries({ queryKey: ['figures', id] });
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Rename failed'),
+  });
+  const reorderFig = useMutation({
+    mutationFn: (figureIds: string[]) => reorderFigures(figureIds),
+    onSuccess: (updated) => {
+      toast.success('Figure order saved');
+      qc.setQueryData(['figures', id], updated);
+      qc.invalidateQueries({ queryKey: ['figures', id] });
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Reorder failed'),
+  });
   const addCollaborators = useMutation({
     mutationFn: async () => {
       for (const user of newCollaborators) await addProjectCollaborator(id, user.id, user.role);
@@ -70,6 +103,30 @@ export default function ProjectWorkspace({ params }: { params: Promise<{ id: str
     onSuccess: (r) => { setUploadDesc(r.enhanced); toast.success('Enhanced'); },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Enhance failed'),
   });
+
+  function beginFigureRename(figure: FigureListItem) {
+    setEditingFigureId(figure.id);
+    setEditingFigureName(figure.name);
+  }
+
+  function submitFigureRename(figure: FigureListItem) {
+    const name = editingFigureName.trim();
+    if (!name || name === figure.name) {
+      setEditingFigureId(null);
+      setEditingFigureName('');
+      return;
+    }
+    renameFig.mutate({ figureId: figure.id, name });
+  }
+
+  function dropFigure(overId: string) {
+    if (!draggingFigureId || draggingFigureId === overId || !figures?.length) return;
+    const next = moveFigure(figures, draggingFigureId, overId);
+    setDraggingFigureId(null);
+    if (next === figures) return;
+    qc.setQueryData(['figures', id], next);
+    reorderFig.mutate(next.map((figure) => figure.id));
+  }
 
   return (
     <div className="min-h-screen bg-muted/20">
@@ -206,15 +263,65 @@ export default function ProjectWorkspace({ params }: { params: Promise<{ id: str
               : (
                 <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
                   {figures.map((f) => (
-                    <Card key={f.id} className="group overflow-hidden transition hover:shadow-md">
+                    <Card
+                      key={f.id}
+                      draggable={canEditProject}
+                      onDragStart={() => setDraggingFigureId(f.id)}
+                      onDragEnd={() => setDraggingFigureId(null)}
+                      onDragOver={(event) => { if (canEditProject) event.preventDefault(); }}
+                      onDrop={() => dropFigure(f.id)}
+                      className={`group overflow-hidden transition hover:shadow-md ${draggingFigureId === f.id ? 'opacity-50' : ''}`}
+                    >
                       <Link href={`/figures/${f.id}`}>
                         {f.thumb_url ? <img src={f.thumb_url} alt={f.name} loading="lazy" decoding="async" className="aspect-[4/3] w-full bg-white object-contain" />
                           : <div className="flex aspect-[4/3] items-center justify-center bg-muted text-muted-foreground"><Images className="h-7 w-7" /></div>}
                       </Link>
                       <CardContent className="p-3">
-                        <div className="flex items-start justify-between gap-2">
-                          <Link href={`/figures/${f.id}`} className="min-w-0"><p className="truncate text-sm font-medium">{f.name}</p><p className="text-xs text-muted-foreground">{f.plot_type} · {formatStylePreset(f.style_preset)}</p></Link>
-                          {canEditProject && <Button variant="ghost" size="sm" onClick={() => { if (confirm(`Delete ${f.name}?`)) delFig.mutate(f.id); }}><Trash2 className="h-4 w-4 text-muted-foreground" /></Button>}
+                        <div className="flex items-start justify-between gap-1">
+                          {canEditProject && <GripVertical className="mt-1 h-4 w-4 shrink-0 cursor-grab text-muted-foreground" />}
+                          <div className="min-w-0 flex-1">
+                            {editingFigureId === f.id ? (
+                              <div className="space-y-1">
+                                <Input
+                                  className="h-8 text-sm"
+                                  value={editingFigureName}
+                                  maxLength={255}
+                                  autoFocus
+                                  onChange={(event) => setEditingFigureName(event.target.value)}
+                                  onKeyDown={(event) => {
+                                    if (event.key === 'Enter') submitFigureRename(f);
+                                    if (event.key === 'Escape') {
+                                      setEditingFigureId(null);
+                                      setEditingFigureName('');
+                                    }
+                                  }}
+                                />
+                                <div className="flex gap-1">
+                                  <Button type="button" size="icon-xs" variant="secondary" disabled={renameFig.isPending} onClick={() => submitFigureRename(f)}>
+                                    {renameFig.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}
+                                  </Button>
+                                  <Button type="button" size="icon-xs" variant="ghost" onClick={() => { setEditingFigureId(null); setEditingFigureName(''); }}>
+                                    <X className="h-3 w-3" />
+                                  </Button>
+                                </div>
+                              </div>
+                            ) : (
+                              <Link href={`/figures/${f.id}`} className="block min-w-0">
+                                <p className="truncate text-sm font-medium">{f.name}</p>
+                                <p className="text-xs text-muted-foreground">{f.plot_type} · {formatStylePreset(f.style_preset)}</p>
+                              </Link>
+                            )}
+                          </div>
+                          {canEditProject && (
+                            <>
+                              <Button type="button" variant="ghost" size="sm" onClick={() => beginFigureRename(f)} aria-label={`Rename ${f.name}`}>
+                                <Pencil className="h-4 w-4 text-muted-foreground" />
+                              </Button>
+                              <Button type="button" variant="ghost" size="sm" onClick={() => { if (confirm(`Delete ${f.name}?`)) delFig.mutate(f.id); }}>
+                                <Trash2 className="h-4 w-4 text-muted-foreground" />
+                              </Button>
+                            </>
+                          )}
                         </div>
                       </CardContent>
                     </Card>

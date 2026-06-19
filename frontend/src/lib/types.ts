@@ -279,6 +279,7 @@ export interface FigureListItem {
   project_id?: string;
   created_at: string;
   updated_at: string;
+  display_order?: number | null;
   is_favorite: boolean;
   thumb_url?: string;
 }

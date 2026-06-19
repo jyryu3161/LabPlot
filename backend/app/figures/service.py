@@ -324,7 +324,10 @@ def list_figures(db: Session, owner_id: uuid.UUID, project_id: uuid.UUID | None 
     else:
         ids = project_service.accessible_project_ids(db, owner_id)
         q = q.filter(or_(Figure.owner_id == owner_id, Figure.project_id.in_(ids)))
-    rows = q.order_by(Figure.updated_at.desc()).all()
+    if project_id is not None:
+        rows = q.order_by(Figure.display_order.is_(None), Figure.display_order.asc(), Figure.updated_at.desc()).all()
+    else:
+        rows = q.order_by(Figure.updated_at.desc()).all()
     favorite_ids = _favorite_figure_ids(db, owner_id, [f.id for f, _ in rows])
     out = []
     for f, png_path in rows:
@@ -332,10 +335,38 @@ def list_figures(db: Session, owner_id: uuid.UUID, project_id: uuid.UUID | None 
             "id": f.id, "name": f.name, "plot_type": f.plot_type, "style_preset": f.style_preset,
             "status": f.status, "dataset_id": f.dataset_id, "project_id": f.project_id,
             "created_at": f.created_at, "updated_at": f.updated_at,
+            "display_order": f.display_order,
             "is_favorite": f.id in favorite_ids,
             "thumb_url": _url(png_path),
         })
+    if project_id is not None:
+        return out
     return sorted(out, key=lambda item: (item["is_favorite"], item["updated_at"]), reverse=True)
+
+
+def reorder_figures(db: Session, owner_id: uuid.UUID, figure_ids: list[uuid.UUID]) -> list[dict]:
+    from app.projects import service as project_service
+
+    unique_ids = list(dict.fromkeys(figure_ids))
+    if len(unique_ids) != len(figure_ids):
+        raise BadRequestError("Figure order contains duplicate items.", error_code="DUPLICATE_FIGURE_ORDER")
+    figures = db.query(Figure).filter(Figure.id.in_(unique_ids)).all()
+    if len(figures) != len(unique_ids):
+        raise NotFoundError("Figure", "reorder")
+    project_ids = {fig.project_id for fig in figures}
+    if len(project_ids) != 1:
+        raise BadRequestError("Figures can only be reordered within one project.", error_code="MIXED_PROJECT_REORDER")
+    project_id = next(iter(project_ids))
+    if project_id is not None:
+        project_service.require_project_write(db, project_id, owner_id)
+    elif any(fig.owner_id != owner_id for fig in figures):
+        raise NotFoundError("Figure", "reorder")
+
+    by_id = {fig.id: fig for fig in figures}
+    for index, figure_id in enumerate(unique_ids):
+        by_id[figure_id].display_order = index
+    db.commit()
+    return list_figures(db, owner_id, project_id=project_id)
 
 
 def list_template_favorites(db: Session, owner_id: uuid.UUID) -> list[dict]:
@@ -630,11 +661,14 @@ def create_figure(db: Session, owner_id: uuid.UUID, data) -> dict:
     figure_id = uuid.uuid4()
     version_id = uuid.uuid4()
     res, _ = _render_into_version(df, data.plot_type, data.mapping, options, preset, figure_id, version_id)
+    next_display_order = (
+        (db.query(func.max(Figure.display_order)).filter(Figure.project_id == ds.project_id).scalar() or -1) + 1
+    )
 
     fig = Figure(
         id=figure_id, owner_id=owner_id, dataset_id=ds.id, project_id=ds.project_id, name=data.name,
         plot_type=data.plot_type, style_preset=preset, status="ready",
-        current_version_id=version_id,
+        current_version_id=version_id, display_order=next_display_order,
     )
     db.add(fig)
     db.flush()
@@ -1241,6 +1275,8 @@ def _known_mapping_values(mapping: dict[str, Any]) -> set[str]:
 
 
 def _sanitize_option(key: str, value: Any) -> Any:
+    if key in {"x_label", "y_label"} and value == "":
+        return ""
     if value in (None, ""):
         return None
     if key == "palette_name":

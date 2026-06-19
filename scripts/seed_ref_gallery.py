@@ -902,7 +902,7 @@ SEEDS = [
         options={
             **COMMON_OPTIONS,
             "palette_name": "journal_muted",
-            "x_label": "Benchmark dataset",
+            "x_label": "",
             "y_label": "Performance score",
             "legend_title": "Method",
             "stat": "mean",
