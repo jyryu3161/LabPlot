@@ -49,6 +49,7 @@ class GallerySeed:
     transform: Callable[[pd.DataFrame], pd.DataFrame] | None = None
     column_roles: dict[str, str] | None = None
     style_preset: str = "nature"
+    lock_final_options: bool = False
 
 
 def _read_ref(rel_csv: str) -> pd.DataFrame:
@@ -292,6 +293,130 @@ def _water_radar(df: pd.DataFrame) -> pd.DataFrame:
         out["Contaminant"].str.replace("_Removal_pct", "", regex=False).str.replace("HeavyMetal", "Heavy metal", regex=False)
     )
     return out
+
+
+def _gaussian(x: float, center: float, width: float, amplitude: float) -> float:
+    return amplitude * math.exp(-0.5 * ((x - center) / width) ** 2)
+
+
+def _xrd_stacked_patterns() -> pd.DataFrame:
+    rng = random.Random(5201)
+    rows: list[dict] = []
+    peaks = [
+        (18.3, 0.30, 0.42),
+        (30.1, 0.24, 1.00),
+        (35.5, 0.28, 0.74),
+        (43.2, 0.35, 0.54),
+        (57.1, 0.42, 0.38),
+        (62.7, 0.40, 0.31),
+        (74.0, 0.52, 0.24),
+    ]
+    samples = [
+        ("As prepared", 0.0, 1.00, 0.10, 0.00),
+        ("Annealed 400C", 1.2, 1.12, 0.08, 0.04),
+        ("Annealed 600C", 2.4, 1.26, 0.06, -0.03),
+        ("Doped film", 3.6, 0.90, 0.14, 0.08),
+    ]
+    for sample, offset, scale, broadening, shift in samples:
+        for idx in range(701):
+            two_theta = 10.0 + idx * 0.1
+            baseline = 0.07 + 0.0009 * (two_theta - 10.0)
+            intensity = baseline
+            for center, width, amplitude in peaks:
+                local_amp = amplitude * scale * (1 + 0.04 * math.sin(center + offset))
+                local_width = width + broadening
+                intensity += _gaussian(two_theta, center + shift, local_width, local_amp)
+            intensity += rng.gauss(0, 0.006)
+            rows.append({
+                "TwoTheta_deg": round(two_theta, 3),
+                "Intensity": round(max(0, intensity), 5),
+                "Intensity_Offset": round(max(0, intensity) + offset, 5),
+                "Sample": sample,
+            })
+    return pd.DataFrame(rows)
+
+
+def _raman_spectra_overlay() -> pd.DataFrame:
+    rng = random.Random(5202)
+    rows: list[dict] = []
+    samples = [
+        ("Reference film", 0.0, 1.00, 0.0),
+        ("Plasma treated", 0.75, 1.10, -3.0),
+        ("Thermal aged", 1.50, 0.92, 4.5),
+    ]
+    peaks = [
+        (480, 22, 0.34),
+        (620, 28, 0.24),
+        (1348, 38, 0.55),
+        (1584, 32, 0.90),
+    ]
+    for sample, offset, scale, shift in samples:
+        for idx in range(801):
+            shift_cm = 250 + idx * 2
+            baseline = 0.06 + 0.00005 * (shift_cm - 250)
+            signal = baseline
+            for center, width, amplitude in peaks:
+                signal += _gaussian(shift_cm, center + shift, width, amplitude * scale)
+            signal += rng.gauss(0, 0.004)
+            rows.append({
+                "Raman_Shift_cm1": shift_cm,
+                "Intensity": round(max(0, signal), 5),
+                "Intensity_Offset": round(max(0, signal) + offset, 5),
+                "Sample": sample,
+            })
+    return pd.DataFrame(rows)
+
+
+def _bode_phase() -> pd.DataFrame:
+    rows: list[dict] = []
+    conditions = [
+        ("Fresh electrode", 40, 0.55, -6),
+        ("After cycling", 260, 0.70, -14),
+        ("Coated electrode", 95, 0.48, -9),
+    ]
+    for condition, fc, shoulder, offset in conditions:
+        for idx in range(130):
+            exponent = -1 + idx * (7 / 129)
+            frequency = 10 ** exponent
+            phase = (
+                offset
+                - math.degrees(math.atan((frequency / fc) ** shoulder))
+                - 18 * math.exp(-0.5 * ((math.log10(frequency) - 4.2) / 0.85) ** 2)
+            )
+            rows.append({
+                "Frequency_Hz": round(frequency, 5),
+                "Phase_deg": round(phase, 4),
+                "Condition": condition,
+            })
+    return pd.DataFrame(rows)
+
+
+def _cyclic_voltammetry() -> pd.DataFrame:
+    rows: list[dict] = []
+    scan_rates = [
+        ("25 mV/s", 0.72),
+        ("100 mV/s", 1.42),
+    ]
+    forward = [-0.2 + i * 0.01 for i in range(101)]
+    reverse = [0.8 - i * 0.01 for i in range(101)]
+    for rate, scale in scan_rates:
+        for direction, potentials in [("forward", forward), ("reverse", reverse)]:
+            for potential in potentials:
+                capacitive = 0.18 * scale * potential
+                if direction == "forward":
+                    faradaic = _gaussian(potential, 0.44, 0.075, 1.15 * scale)
+                    current = capacitive + faradaic - 0.05
+                else:
+                    faradaic = _gaussian(potential, 0.22, 0.085, -0.95 * scale)
+                    current = capacitive + faradaic + 0.04
+                rows.append({
+                    "Potential_V": round(potential, 4),
+                    "Current_mA": round(current, 5),
+                    "Scan_Rate": rate,
+                    "Direction": direction,
+                    "Trace": f"{rate} {direction}",
+                })
+    return pd.DataFrame(rows)
 
 
 def _qq(df: pd.DataFrame) -> pd.DataFrame:
@@ -1363,6 +1488,74 @@ SEEDS = [
         style_preset="colorblind",
     ),
     GallerySeed(
+        key="xrd_stacked_patterns",
+        figure_name="XRD stacked patterns",
+        dataset_name="Gallery seed - XRD stacked patterns",
+        dataframe_factory=_xrd_stacked_patterns,
+        plot_type="line",
+        mapping={"x": "TwoTheta_deg", "y": "Intensity_Offset", "group": "Sample"},
+        options={
+            **COMMON_OPTIONS,
+            "x_label": "2theta (degree)",
+            "y_label": "Intensity + offset (a.u.)",
+            "point_shape": "none",
+            "legend_position": "bottom",
+            "palette_name": "journal_muted",
+        },
+        lock_final_options=True,
+    ),
+    GallerySeed(
+        key="raman_spectra_overlay",
+        figure_name="Raman spectra overlay",
+        dataset_name="Gallery seed - Raman spectra overlay",
+        dataframe_factory=_raman_spectra_overlay,
+        plot_type="line",
+        mapping={"x": "Raman_Shift_cm1", "y": "Intensity_Offset", "group": "Sample"},
+        options={
+            **COMMON_OPTIONS,
+            "x_label": "Raman shift (cm-1)",
+            "y_label": "Intensity + offset (a.u.)",
+            "point_shape": "none",
+            "legend_position": "bottom",
+            "palette_name": "journal_muted",
+        },
+        lock_final_options=True,
+    ),
+    GallerySeed(
+        key="bode_phase",
+        figure_name="Bode phase plot",
+        dataset_name="Gallery seed - Bode phase plot",
+        dataframe_factory=_bode_phase,
+        plot_type="line",
+        mapping={"x": "Frequency_Hz", "y": "Phase_deg", "group": "Condition"},
+        options={
+            **COMMON_OPTIONS,
+            "x_label": "Frequency (Hz)",
+            "y_label": "Phase (degree)",
+            "log_x": True,
+            "point_shape": "none",
+            "legend_position": "bottom",
+        },
+        lock_final_options=True,
+    ),
+    GallerySeed(
+        key="cyclic_voltammetry",
+        figure_name="Cyclic voltammogram",
+        dataset_name="Gallery seed - cyclic voltammogram",
+        dataframe_factory=_cyclic_voltammetry,
+        plot_type="line",
+        mapping={"x": "Potential_V", "y": "Current_mA", "group": "Trace"},
+        options={
+            **COMMON_OPTIONS,
+            "x_label": "Potential (V)",
+            "y_label": "Current (mA)",
+            "point_shape": "none",
+            "legend_position": "bottom",
+            "palette_name": "journal_muted",
+        },
+        lock_final_options=True,
+    ),
+    GallerySeed(
         key="correlation_heatmap",
         figure_name="Feature correlation heatmap",
         dataset_name="Gallery seed - feature correlation heatmap",
@@ -1802,7 +1995,7 @@ def seed_one(db, root: User, seed: GallerySeed, replace: bool) -> str:
         description="Curated public gallery seed derived from ref_data.",
         column_roles=seed.column_roles,
     )
-    figure_service.create_figure(
+    detail = figure_service.create_figure(
         db,
         root.id,
         SimpleNamespace(
@@ -1814,6 +2007,19 @@ def seed_one(db, root: User, seed: GallerySeed, replace: bool) -> str:
             style_preset=seed.style_preset,
         ),
     )
+    if seed.lock_final_options:
+        figure_service.rerender(
+            db,
+            detail["id"],
+            root.id,
+            SimpleNamespace(
+                plot_type=seed.plot_type,
+                mapping=seed.mapping,
+                options=seed.options,
+                style_preset=seed.style_preset,
+                change_note="Pinned gallery seed options",
+            ),
+        )
     db.commit()
     return "created"
 

@@ -254,7 +254,7 @@ def active_provider_label(db: Session, user_id: uuid.UUID | None = None) -> str:
 
         user = db.query(User).filter(User.id == user_id).first()
     provider, model, _, org_id = _ready(db, user)
-    scope = f"org:{org_id}" if org_id else "global"
+    scope = f"org:{str(org_id)[:8]}" if org_id else "global"
     return f"{provider}:{model}:{scope}"
 
 
