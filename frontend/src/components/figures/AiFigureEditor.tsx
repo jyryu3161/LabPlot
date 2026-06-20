@@ -22,6 +22,7 @@ interface AiEditPayload {
 interface Annotation {
   id: string;
   type: AnnotationType;
+  displayNumber?: number;
   x: number;
   y: number;
   w?: number;
@@ -82,11 +83,27 @@ function annotationTargetPoint(annotation: Annotation): { x: number; y: number }
 }
 
 function annotationBadgePoint(annotation: Annotation): { x: number; y: number } {
+  if (annotation.type === 'arrow') {
+    return {
+      x: Math.max(3, Math.min(97, clampPercent(annotation.x))),
+      y: Math.max(3, Math.min(97, clampPercent(annotation.y))),
+    };
+  }
   const target = annotationTargetPoint(annotation);
   return {
     x: Math.max(3, Math.min(97, target.x)),
     y: Math.max(3, Math.min(97, target.y)),
   };
+}
+
+function annotationDisplayNumber(annotation: Annotation, index: number): number {
+  return Number.isFinite(annotation.displayNumber) ? annotation.displayNumber! : index + 1;
+}
+
+function nextAnnotationNumber(annotations: Annotation[]): number {
+  return annotations.reduce((max, annotation, index) => (
+    Math.max(max, annotationDisplayNumber(annotation, index))
+  ), 0) + 1;
 }
 
 function pointerPercent(event: PointerEvent<HTMLElement>, element: HTMLElement | null) {
@@ -102,13 +119,14 @@ function pointerPercent(event: PointerEvent<HTMLElement>, element: HTMLElement |
 function annotationSummary(annotation: Annotation, index: number): string {
   const label = annotation.text.trim() || '(no memo)';
   const target = annotationTargetPoint(annotation);
+  const markNumber = annotationDisplayNumber(annotation, index);
   if (annotation.type === 'region') {
-    return `Mark #${index + 1} [region]. Target interpretation: edit the visible plot component(s) inside or overlapping this rectangle; use the center only as an approximate anchor, not as data. Bounds: left ${fmt(annotation.x)}, top ${fmt(annotation.y)}, width ${fmt(annotation.w ?? 0)}, height ${fmt(annotation.h ?? 0)}; center ${fmt(target.x)}, ${fmt(target.y)}. User memo: ${label}`;
+    return `Mark #${markNumber} [region]. Target interpretation: edit the visible plot component(s) inside or overlapping this rectangle; use the center only as an approximate anchor, not as data. Bounds: left ${fmt(annotation.x)}, top ${fmt(annotation.y)}, width ${fmt(annotation.w ?? 0)}, height ${fmt(annotation.h ?? 0)}; center ${fmt(target.x)}, ${fmt(target.y)}. User memo: ${label}`;
   }
   if (annotation.type === 'arrow') {
-    return `Mark #${index + 1} [arrow]. Target interpretation: the arrow head is the exact component to edit; the tail is only context/direction. Tail ${fmt(annotation.x)}, ${fmt(annotation.y)}; head ${fmt(target.x)}, ${fmt(target.y)}. User memo: ${label}`;
+    return `Mark #${markNumber} [arrow]. Target interpretation: the arrow head is the exact component to edit; the tail is only context/direction. Tail ${fmt(annotation.x)}, ${fmt(annotation.y)}; head ${fmt(target.x)}, ${fmt(target.y)}. User memo: ${label}`;
   }
-  return `Mark #${index + 1} [note]. Target interpretation: edit the nearest visible plot component at this point. Point ${fmt(target.x)}, ${fmt(target.y)}. User memo: ${label}`;
+  return `Mark #${markNumber} [note]. Target interpretation: edit the nearest visible plot component at this point. Point ${fmt(target.x)}, ${fmt(target.y)}. User memo: ${label}`;
 }
 
 function buildLocalizedPrompt(prompt: string, annotations: Annotation[]): string {
@@ -186,9 +204,9 @@ async function renderAnnotatedImage(imageUrl: string | null | undefined, annotat
   annotations.forEach((annotation, index) => {
     const x = (annotation.x / 100) * width;
     const y = (annotation.y / 100) * height;
-    const target = annotationTargetPoint(annotation);
-    const labelX = (target.x / 100) * width;
-    const labelY = (target.y / 100) * height;
+    const badge = annotationBadgePoint(annotation);
+    const labelX = (badge.x / 100) * width;
+    const labelY = (badge.y / 100) * height;
     ctx.strokeStyle = '#2563eb';
     ctx.fillStyle = 'rgba(37, 99, 235, 0.14)';
     if (annotation.type === 'region') {
@@ -218,7 +236,7 @@ async function renderAnnotatedImage(imageUrl: string | null | undefined, annotat
     ctx.stroke();
     ctx.fillStyle = '#2563eb';
     ctx.font = `700 ${Math.max(13, 15 * scale)}px sans-serif`;
-    ctx.fillText(String(index + 1), labelX, labelY + 0.5);
+    ctx.fillText(String(annotationDisplayNumber(annotation, index)), labelX, labelY + 0.5);
   });
 
   return canvas.toDataURL('image/png');
@@ -269,8 +287,11 @@ function loadStoredAnnotations(key: string | null): Annotation[] {
       && typeof item.x === 'number'
       && typeof item.y === 'number'
       && typeof item.text === 'string'
+      && (item.displayNumber === undefined || typeof item.displayNumber === 'number')
       && (item.type !== 'region' || (typeof item.w === 'number' && typeof item.h === 'number'))
       && (item.type !== 'arrow' || (typeof item.x2 === 'number' && typeof item.y2 === 'number'))
+    )).map((item, index) => (
+      item.displayNumber === undefined ? { ...item, displayNumber: index + 1 } : item
     ));
   } catch {
     return [];
@@ -295,6 +316,7 @@ export function AiFigureEditor({
 }: AiFigureEditorProps) {
   const stageRef = useRef<HTMLDivElement>(null);
   const annotationStorageKey = versionId ? `labplot.ai-editor.annotations.${versionId}` : null;
+  const skipNextAnnotationPersistRef = useRef(false);
   const [tool, setTool] = useState<AnnotationTool>('select');
   const [annotations, setAnnotations] = useState<Annotation[]>(() => loadStoredAnnotations(annotationStorageKey));
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -370,6 +392,16 @@ export function AiFigureEditor({
   }, [selectedIds]);
 
   useEffect(() => {
+    skipNextAnnotationPersistRef.current = true;
+    setAnnotations(loadStoredAnnotations(annotationStorageKey));
+    setSelectedIds([]);
+  }, [annotationStorageKey]);
+
+  useEffect(() => {
+    if (skipNextAnnotationPersistRef.current) {
+      skipNextAnnotationPersistRef.current = false;
+      return;
+    }
     if (!annotationStorageKey || typeof window === 'undefined') return;
     if (annotations.length === 0) {
       window.localStorage.removeItem(annotationStorageKey);
@@ -412,8 +444,9 @@ export function AiFigureEditor({
     const point = pointerPercent(event, stageRef.current);
     if (!point) return;
     const id = crypto.randomUUID();
+    const displayNumber = nextAnnotationNumber(annotations);
     if (tool === 'note') {
-      const note = { id, type: 'note' as const, x: point.x, y: point.y, text: '' };
+      const note = { id, displayNumber, type: 'note' as const, x: point.x, y: point.y, text: '' };
       setAnnotations((items) => [...items, note]);
       setSelectedIds([id]);
       return;
@@ -450,8 +483,26 @@ export function AiFigureEditor({
     const tooSmall = Math.abs(drag.x2 - drag.x) < 1.5 && Math.abs(drag.y2 - drag.y) < 1.5;
     if (!tooSmall) {
       const next: Annotation = drag.type === 'region'
-        ? { id: drag.id, type: 'region', x: x1, y: y1, w: x2 - x1, h: y2 - y1, text: '' }
-        : { id: drag.id, type: 'arrow', x: drag.x, y: drag.y, x2: drag.x2, y2: drag.y2, text: '' };
+        ? {
+          id: drag.id,
+          displayNumber: nextAnnotationNumber(annotations),
+          type: 'region',
+          x: x1,
+          y: y1,
+          w: x2 - x1,
+          h: y2 - y1,
+          text: '',
+        }
+        : {
+          id: drag.id,
+          displayNumber: nextAnnotationNumber(annotations),
+          type: 'arrow',
+          x: drag.x,
+          y: drag.y,
+          x2: drag.x2,
+          y2: drag.y2,
+          text: '',
+        };
       setAnnotations((items) => [...items, next]);
       setSelectedIds([next.id]);
     }
@@ -611,12 +662,13 @@ export function AiFigureEditor({
                 {annotations.map((annotation) => {
                   const target = annotationBadgePoint(annotation);
                   const index = annotations.findIndex((item) => item.id === annotation.id);
+                  const markNumber = annotationDisplayNumber(annotation, index);
                   const selected = selectedIdSet.has(annotation.id);
                   return (
                     <button
                       key={annotation.id}
                       type="button"
-                      aria-label={`Select annotation ${annotation.type}`}
+                      aria-label={`Select mark ${markNumber} ${annotation.type}`}
                       className={`pointer-events-auto absolute flex h-7 min-w-7 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border-2 px-1 text-[11px] font-bold shadow-sm transition focus:outline-none focus:ring-2 focus:ring-primary/40 ${
                         selected ? 'border-slate-900 bg-slate-900 text-white' : 'border-white bg-blue-600 text-white'
                       }`}
@@ -630,7 +682,7 @@ export function AiFigureEditor({
                         toggleAnnotationSelection(annotation.id, event.ctrlKey || event.metaKey || event.shiftKey);
                       }}
                     >
-                      {index + 1}
+                      {markNumber}
                     </button>
                   );
                 })}
@@ -665,28 +717,31 @@ export function AiFigureEditor({
                 <div className="min-h-56 max-h-72 space-y-2 overflow-y-auto rounded-md border bg-background p-2">
                   {annotations.length === 0 ? (
                     <p className="px-1 py-2 text-xs text-muted-foreground">Draw a region, arrow, or note, then write what should change for each mark.</p>
-                  ) : annotations.map((annotation, index) => (
-                    <div key={annotation.id} className={`rounded border p-2 ${selectedIdSet.has(annotation.id) ? 'border-primary bg-primary/5' : 'bg-muted/20'}`}>
-                      <div className="mb-1 flex items-center justify-between gap-2">
-                        <button
-                          type="button"
-                          className="text-xs font-medium text-left"
-                          onClick={(event) => toggleAnnotationSelection(annotation.id, event.ctrlKey || event.metaKey || event.shiftKey)}
-                        >
-                          Mark #{index + 1} <span className="font-normal text-muted-foreground">({annotation.type})</span>
-                        </button>
-                        <Button type="button" variant="ghost" size="icon-xs" onClick={() => removeAnnotations([annotation.id])} aria-label={`Delete mark ${index + 1}`}>
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </Button>
+                  ) : annotations.map((annotation, index) => {
+                    const markNumber = annotationDisplayNumber(annotation, index);
+                    return (
+                      <div key={annotation.id} className={`rounded border p-2 ${selectedIdSet.has(annotation.id) ? 'border-primary bg-primary/5' : 'bg-muted/20'}`}>
+                        <div className="mb-1 flex items-center justify-between gap-2">
+                          <button
+                            type="button"
+                            className="text-xs font-medium text-left"
+                            onClick={(event) => toggleAnnotationSelection(annotation.id, event.ctrlKey || event.metaKey || event.shiftKey)}
+                          >
+                            Mark #{markNumber} <span className="font-normal text-muted-foreground">({annotation.type})</span>
+                          </button>
+                          <Button type="button" variant="ghost" size="icon-xs" onClick={() => removeAnnotations([annotation.id])} aria-label={`Delete mark ${markNumber}`}>
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </Button>
+                        </div>
+                        <Input
+                          value={annotation.text}
+                          onChange={(event) => updateAnnotationText(annotation.id, event.target.value)}
+                          placeholder="Describe what should change here"
+                          className="h-8 text-xs"
+                        />
                       </div>
-                      <Input
-                        value={annotation.text}
-                        onChange={(event) => updateAnnotationText(annotation.id, event.target.value)}
-                        placeholder="Describe what should change here"
-                        className="h-8 text-xs"
-                      />
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
                 {annotations.length > 3 && (
                   <p className="text-xs text-muted-foreground">{annotations.length} marks total. Scroll the memo list to review the remaining marks.</p>

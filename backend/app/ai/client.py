@@ -57,6 +57,7 @@ _OPTIONS_PATCH_SCHEMA = {
         "palette": {"type": "string", "enum": ["viridis", "magma", "inferno", "plasma", "cividis"]},
         "line_type": {"type": "string", "enum": ["solid", "dashed", "dotted", "dotdash", "longdash"]},
         "point_shape": {"type": "string", "enum": ["circle", "square", "triangle", "diamond", "none"]},
+        "line_color": {"type": "string"},
         "bins": {"type": "integer"}, "bar_alpha": {"type": "number"}, "bar_width": {"type": "number"},
         "x_text_angle": {"type": "number"}, "x_min": {"type": "number"}, "x_max": {"type": "number"},
         "y_min": {"type": "number"}, "y_max": {"type": "number"},
@@ -177,7 +178,8 @@ def _record_usage(user_id: uuid.UUID | None, organization_id: uuid.UUID | None, 
 
 
 def _run_logged(db: Session, user_id: uuid.UUID | None, feature: str, system: str, content: list[dict],
-                schema: dict, tool_name: str, max_tokens: int) -> dict:
+                schema: dict, tool_name: str, max_tokens: int,
+                gemini_thinking_level: str | None = None) -> dict:
     user = None
     if user_id:
         from app.auth.models import User
@@ -188,7 +190,7 @@ def _run_logged(db: Session, user_id: uuid.UUID | None, feature: str, system: st
             enforce_ai_quota(db, user)
     provider, model, key, organization_id = _ready(db, user)
     payload, usage = providers.run_structured_with_usage(
-        provider, model, key, system, content, schema, tool_name, max_tokens
+        provider, model, key, system, content, schema, tool_name, max_tokens, gemini_thinking_level
     )
     _record_usage(user_id, organization_id, provider, model, feature, usage)
     return payload
@@ -436,7 +438,12 @@ def improve_figure(db: Session, plot_type: str, mapping: dict, options: dict, st
            "prior_review": review or {}}
     content = _ctx_block(project_context) + [{"kind": "text", "text": "Context:\n" + json.dumps(ctx, ensure_ascii=False)}]
     if r_code:
-        content.append({"kind": "text", "text": "Current generated R code for orientation:\n```r\n" + r_code[:20000] + "\n```"})
+        content.append({"kind": "text", "text": (
+            "Current generated R code for orientation and verification. Treat this as the source of truth for "
+            "the existing ggplot layers, theme, labels, scales, and export settings. Do not rewrite the full R script; "
+            "infer the smallest supported mapping/options patch that would regenerate the requested visual change.\n"
+            "```r\n" + r_code[:20000] + "\n```"
+        )})
     if rendered_image is not None:
         image_bytes, image_mime = rendered_image
         content.extend([
@@ -449,7 +456,11 @@ def improve_figure(db: Session, plot_type: str, mapping: dict, options: dict, st
                 "- A [region] mark selects plot components inside or overlapping the rectangle.\n"
                 "- An [arrow] mark points to the target at the arrow head; the tail is context only.\n"
                 "- A [note] mark targets the nearest visible component at the point.\n"
-                "- Return supported param_patch changes only. The regenerated R code must implement the requested visual change; never propose pixel-level inpainting."
+                "- First infer, internally, the current figure components in no more than five short observations.\n"
+                "- Then map each user request or Mark # memo to the specific supported mapping/options keys needed to render it.\n"
+                "- Return supported param_patch changes only. Do not return a full R script or prose outside JSON. "
+                "Use the suggestion current/recommended fields to briefly explain the visual diagnosis and request-to-patch mapping. "
+                "The regenerated R code must implement the requested visual change; never propose pixel-level inpainting."
             )},
             {"kind": "image", "mime": image_mime, "b64": base64.standard_b64encode(image_bytes).decode("ascii")},
         ])
@@ -464,7 +475,10 @@ def improve_figure(db: Session, plot_type: str, mapping: dict, options: dict, st
             + "\n</figure_improvement_request>"
         )})
     try:
-        out = _run_logged(db, user_id, "figure_improvements", system, content, schema, "figure_improvements", 2000)
+        out = _run_logged(
+            db, user_id, "figure_improvements", system, content, schema, "figure_improvements", 2600,
+            gemini_thinking_level="high" if rendered_image is not None else None,
+        )
     except BadRequestError as e:
         if getattr(e, "error_code", None) == "AI_BAD_RESPONSE":
             return _fallback_improvements(options, style_preset)

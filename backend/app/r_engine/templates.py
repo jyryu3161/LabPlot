@@ -255,18 +255,23 @@ def _line(m, o):
     line_type = _choice(o.get("line_type"), _LINE_TYPES, "solid")
     point_shape = _choice(o.get("point_shape"), tuple(_POINT_SHAPES.keys()), "circle")
     point_r_shape = _POINT_SHAPES[point_shape]
-    point_layer = "" if point_r_shape is None else f"  geom_point(size = 1.8, shape = {point_r_shape}) +\n"
+    line_color = o.get("line_color") if isinstance(o.get("line_color"), str) and o.get("line_color") else None
     if group:
         aes = f"aes(x = {_data(x)}, y = {_data(y)}, colour = factor({_data(group)}), group = factor({_data(group)}))"
         scale = "  scale_colour_manual(values = labplot_palette()) +\n"
         guide = f" + guides(colour = guide_legend(title = {rq(group)}))"
+        line_color_arg = ""
+        point_color_arg = ""
     else:
         aes = f"aes(x = {_data(x)}, y = {_data(y)}, group = 1)"
         scale = ""
         guide = ""
+        line_color_arg = f", colour = {rq(line_color)}" if line_color else ""
+        point_color_arg = f", colour = {rq(line_color)}" if line_color else ""
+    point_layer = "" if point_r_shape is None else f"  geom_point(size = 1.8, shape = {point_r_shape}{point_color_arg}) +\n"
     return f"""
 p <- ggplot(df, {aes}) +
-  geom_line(linewidth = 0.35, linetype = {rq(line_type)}) +
+  geom_line(linewidth = 0.35, linetype = {rq(line_type)}{line_color_arg}) +
 {point_layer}{scale}  {_labs(o, x, y)}{guide}
 """
 
@@ -715,6 +720,7 @@ PLOT_TYPES = [
                  "choices": list(_LINE_TYPES), "default": "solid"},
                  {"key": "point_shape", "label": "Point shape", "type": "select",
                   "choices": list(_POINT_SHAPES.keys()), "default": "circle"},
+                 {"key": "line_color", "label": "Line color", "type": "text", "default": ""},
                  {"key": "x_min", "label": "X-axis minimum", "type": "number", "default": None},
                  {"key": "x_max", "label": "X-axis maximum", "type": "number", "default": None},
                  {"key": "y_min", "label": "Y-axis minimum", "type": "number", "default": None},

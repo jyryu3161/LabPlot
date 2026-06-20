@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 import os
 import re
 import shutil
@@ -56,6 +57,36 @@ _BOOL_OPTIONS = {
 _NUMBER_OPTIONS = {
     "fc_threshold", "p_threshold", "label_top", "font_scale", "dpi", "width_in", "height_in",
     "bins", "sig_threshold", "bar_alpha", "bar_width", "x_text_angle", "x_min", "x_max", "y_min", "y_max",
+}
+_COLOR_WORDS = {
+    "blue": "#2563EB",
+    "파란": "#2563EB",
+    "파란색": "#2563EB",
+    "red": "#DC2626",
+    "빨간": "#DC2626",
+    "빨간색": "#DC2626",
+    "black": "#111827",
+    "검정": "#111827",
+    "검은색": "#111827",
+    "gray": "#6B7280",
+    "grey": "#6B7280",
+    "회색": "#6B7280",
+    "green": "#16A34A",
+    "초록": "#16A34A",
+    "초록색": "#16A34A",
+}
+_LINE_COMPONENT_RE = re.compile(r"(line|선|라인)")
+_NON_LINE_COLOR_TARGET_RE = re.compile(
+    r"(axis|축|tick|눈금|label|라벨|legend|범례|text|텍스트|글씨|point|marker|점|마커|bar|막대|category|group|그룹)"
+)
+_LOCALIZED_EDIT_MARKER = "Localized image editing annotations for R-code regeneration:"
+_DEFAULT_LOCALIZED_EDIT_PROMPT = "Apply the localized edits marked on the figure preview."
+_R_POINT_SHAPES = {
+    "circle": 16,
+    "square": 15,
+    "triangle": 17,
+    "diamond": 18,
+    "none": None,
 }
 _MAX_SVG_BYTES = 5 * 1024 * 1024
 _BLOCKED_SVG_TAGS = {"script", "foreignobject", "iframe", "object", "embed", "link"}
@@ -883,7 +914,8 @@ def _explicit_visual_patch_from_request(plot_type: str, request: str | None) -> 
     text = (request or "").strip()
     if not text:
         return {}
-    lowered = text.lower()
+    intent_text = _user_edit_intent_text(text)
+    lowered = intent_text.lower()
     options: dict[str, Any] = {}
 
     # Deterministic safety net for explicit, supported visual edits. The LLM
@@ -896,6 +928,9 @@ def _explicit_visual_patch_from_request(plot_type: str, request: str | None) -> 
             options["line_type"] = "dashed"
         elif re.search(r"(dotted|점\s*모양\s*선)", lowered):
             options["line_type"] = "dotted"
+        requested_color = _color_from_request_text(lowered)
+        if requested_color and _line_color_request_targets_line(lowered):
+            options["line_color"] = requested_color
 
     range_re = re.compile(
         r"(-?\d+(?:\.\d+)?)(?!\s*%)\s*(?:~|–|—|to|부터|에서|-)\s*"
@@ -937,6 +972,39 @@ def _explicit_visual_patch_from_request(plot_type: str, request: str | None) -> 
     return {"options": options} if options else {}
 
 
+def _professionalized_edit_request(plot_type: str, request: str | None) -> str | None:
+    text = (request or "").strip()
+    if not text:
+        return None
+    intent_text = _user_edit_intent_text(text)
+    lowered = intent_text.lower()
+    instructions: list[str] = []
+
+    if plot_type == "line":
+        requested_color = _color_from_request_text(lowered)
+        if requested_color and _line_color_request_targets_line(lowered):
+            instructions.append(
+                f"Set the ungrouped line stroke color to {requested_color} using options.line_color; "
+                "preserve the current data mapping, theme, line width, point style, axis labels, and export size."
+            )
+        if re.search(r"(점선|dashed)", lowered):
+            instructions.append("Set the line type to dashed using options.line_type = \"dashed\".")
+        elif re.search(r"(dotted|점\s*모양\s*선)", lowered):
+            instructions.append("Set the line type to dotted using options.line_type = \"dotted\".")
+        if re.search(r"(네모|사각|square)", lowered):
+            instructions.append("Set point markers to square using options.point_shape = \"square\".")
+
+    if not instructions:
+        return text
+    return "\n".join([
+        text,
+        "",
+        "INTERNAL PROFESSIONALIZED EDIT INSTRUCTION",
+        "Use the following normalized English instruction as the operational edit request while preserving the user's original intent:",
+        *instructions,
+    ])
+
+
 def _patch_changes_version(patch: dict[str, Any], version: FigureVersion) -> bool:
     if patch.get("style_preset") and patch["style_preset"] != version.style_preset:
         return True
@@ -945,6 +1013,156 @@ def _patch_changes_version(patch: dict[str, Any], version: FigureVersion) -> boo
         return True
     base_options = version.options or {}
     return any(base_options.get(k) != v for k, v in (patch.get("options") or {}).items())
+
+
+def _color_from_request_text(text: str) -> str | None:
+    explicit_hex = re.search(r"#[0-9A-Fa-f]{6}", text)
+    if explicit_hex:
+        return explicit_hex.group(0).upper()
+    for word, color in _COLOR_WORDS.items():
+        if word in text:
+            return color
+    return None
+
+
+def _user_edit_intent_text(text: str) -> str:
+    if _LOCALIZED_EDIT_MARKER not in text:
+        return text
+    parts: list[str] = []
+    head = text.split(_LOCALIZED_EDIT_MARKER, 1)[0].strip()
+    if head and head != _DEFAULT_LOCALIZED_EDIT_PROMPT:
+        parts.append(head)
+    for memo in re.findall(r"User memo:\s*(.*)", text):
+        clean = memo.strip()
+        if clean and clean != "(no memo)":
+            parts.append(clean)
+    return "\n".join(parts) or text
+
+
+def _line_color_request_targets_line(text: str) -> bool:
+    if _LINE_COMPONENT_RE.search(text):
+        return True
+    return not _NON_LINE_COLOR_TARGET_RE.search(text)
+
+
+def _values_match(expected: Any, actual: Any) -> bool:
+    if isinstance(expected, (int, float)) and isinstance(actual, (int, float)):
+        return abs(float(expected) - float(actual)) < 1e-9
+    if isinstance(expected, dict) and isinstance(actual, dict):
+        return all(_values_match(v, actual.get(k)) for k, v in expected.items())
+    return expected == actual
+
+
+def _format_patch_value(value: Any) -> str:
+    if isinstance(value, dict):
+        return ", ".join(f"{k}={v}" for k, v in value.items())
+    return str(value)
+
+
+def _r_number_literal(value: Any) -> str | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return f"{number:g}"
+
+
+def _r_code_check_for_patch(section: str, key: str, expected: Any, version: FigureVersion) -> tuple[bool | None, str]:
+    r_code = version.r_code or ""
+    if not r_code:
+        return None, "R code was not available for text verification."
+    text = str(expected)
+    quoted = rq(text)
+    if section == "mapping":
+        return (quoted in r_code or text in r_code), f"Looked for mapped column {text!r} in generated R code."
+    if key == "x_text_angle":
+        try:
+            angle = float(expected)
+            pattern = rf"axis\.text\.x\s*=\s*element_text\(angle\s*=\s*{angle:g}\b"
+            return bool(re.search(pattern, r_code)), f"Looked for axis.text.x angle = {angle:g}."
+        except (TypeError, ValueError):
+            return None, "Could not normalize x-axis text angle for R-code verification."
+    if key in {"x_min", "x_max"}:
+        number = _r_number_literal(expected)
+        if number is None:
+            return None, "Could not normalize x-axis limit for R-code verification."
+        pattern = rf"xlim\s*=\s*c\([^)]*\b{re.escape(number)}\b"
+        return bool(re.search(pattern, r_code)), f"Looked for xlim containing {number}."
+    if key in {"y_min", "y_max"}:
+        number = _r_number_literal(expected)
+        if number is None:
+            return None, "Could not normalize y-axis limit for R-code verification."
+        pattern = rf"ylim\s*=\s*c\([^)]*\b{re.escape(number)}\b"
+        return bool(re.search(pattern, r_code)), f"Looked for ylim containing {number}."
+    if key == "legend_position":
+        return f'legend.position = "{expected}"' in r_code, f"Looked for legend.position = {expected!r}."
+    if key in {"legend_title", "x_label", "y_label", "title", "subtitle", "series_1_label", "series_2_label"}:
+        return quoted in r_code or text in r_code, f"Looked for label text {text!r} in generated R code."
+    if key == "line_type":
+        return f"linetype = {quoted}" in r_code, f"Looked for line type {text!r} in generated R code."
+    if key == "point_shape":
+        shape = _R_POINT_SHAPES.get(text)
+        if shape is None and text == "none":
+            return "geom_point(" not in r_code, "Looked for omitted point layer."
+        if shape is None:
+            return None, "Could not map point shape to an R shape code for verification."
+        return f"shape = {shape}" in r_code, f"Looked for point shape {text!r} as R shape {shape}."
+    if key == "line_color":
+        return quoted in r_code or text.upper() in r_code.upper(), f"Looked for line color {text!r} in generated R code."
+    if key in {"palette_name", "color_mode", "size", "dpi", "width_in", "height_in", "font_scale"}:
+        return None, "Setting matched the regenerated version; exact R text is template-dependent."
+    if isinstance(expected, dict):
+        missing = [str(v) for v in expected.values() if str(v) not in r_code]
+        return len(missing) == 0, "Looked for custom values in generated R code."
+    return None, "Setting matched the regenerated version; no specific R-code string check is defined for this option."
+
+
+def _ai_edit_checklist(improvements: list[Improvement], version: FigureVersion) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for index, imp in enumerate(improvements, start=1):
+        patch = imp.param_patch or {}
+        label = imp.suggestion_type or f"AI suggestion {index}"
+        items: list[tuple[str, str, Any, Any]] = []
+        if patch.get("style_preset"):
+            items.append(("style_preset", "style_preset", patch["style_preset"], version.style_preset))
+        for key, expected in (patch.get("mapping") or {}).items():
+            items.append(("mapping", key, expected, (version.mapping or {}).get(key)))
+        for key, expected in (patch.get("options") or {}).items():
+            items.append(("options", key, expected, (version.options or {}).get(key)))
+
+        if not items:
+            rows.append({
+                "label": label,
+                "path": "param_patch",
+                "status": "warning",
+                "expected": "non-empty patch",
+                "actual": "empty patch",
+                "r_code_check": "No patch was available to verify against the regenerated R code.",
+            })
+            continue
+
+        for section, key, expected, actual in items:
+            settings_match = _values_match(expected, actual)
+            r_code_match, r_code_note = _r_code_check_for_patch(section, key, expected, version)
+            status = "applied" if settings_match and r_code_match is not False else "warning"
+            rows.append({
+                "label": label,
+                "path": key if section == "style_preset" else f"{section}.{key}",
+                "status": status,
+                "expected": _format_patch_value(expected),
+                "actual": _format_patch_value(actual),
+                "r_code_check": r_code_note,
+                "r_code_evidence": r_code_match,
+            })
+    return rows
+
+
+def _append_internal_ai_edit_checklist(version: FigureVersion, improvements: list[Improvement]) -> None:
+    checklist = _ai_edit_checklist(improvements, version)
+    if not checklist:
+        return
+    note = "AI edit internal checklist:\n" + json.dumps(checklist, ensure_ascii=False, indent=2)
+    version.render_log = ((version.render_log or "").rstrip() + "\n" + note).strip()
 
 
 def rerender(db: Session, figure_id: uuid.UUID, owner_id: uuid.UUID, req) -> dict:
@@ -1128,7 +1346,7 @@ def improve_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, ow
         db, fig.plot_type, v.mapping or {}, v.options or {}, fig.style_preset,
         last_review.payload if last_review else None, [available],
         project_context=_project_context(db, fig.project_id), user_id=owner_id,
-        user_request=(prompt or "").strip() or None,
+        user_request=_professionalized_edit_request(fig.plot_type, prompt),
         rendered_image=image_payload,
         r_code=v.r_code,
     )
@@ -1212,6 +1430,9 @@ def apply_improvement(db: Session, figure_id: uuid.UUID, improvement_id: uuid.UU
         change_note = f"Applied AI suggestion to v{base.version_number}: {imp.suggestion_type or 'improvement'}"
 
     result = rerender(db, figure_id, owner_id, _Req())
+    new_version = db.query(FigureVersion).filter(FigureVersion.id == result["id"]).first()
+    if new_version:
+        _append_internal_ai_edit_checklist(new_version, [imp])
     imp.applied = True
     db.commit()
     return result
@@ -1258,6 +1479,9 @@ def apply_improvements(db: Session, figure_id: uuid.UUID, improvement_ids: list[
         )
 
     result = rerender(db, figure_id, owner_id, _Req())
+    new_version = db.query(FigureVersion).filter(FigureVersion.id == result["id"]).first()
+    if new_version:
+        _append_internal_ai_edit_checklist(new_version, [imp for imp in ordered if imp is not None])
     for imp in ordered:
         imp.applied = True
     db.commit()
@@ -1294,6 +1518,13 @@ def _sanitize_option(key: str, value: Any) -> Any:
             if len(clean) >= 80:
                 break
         return clean or None
+    if key == "line_color":
+        if not isinstance(value, str):
+            return None
+        color = value.strip().upper()
+        if re.fullmatch(r"#[0-9A-F]{6}", color):
+            return color
+        return None
     if value in (None, ""):
         return None
     if key == "palette_name":

@@ -19,18 +19,21 @@ _GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:g
 
 def run_structured(provider: str, model: str, key: str | None, system: str,
                    content: list[dict], schema: dict, tool_name: str = "result",
-                   max_tokens: int = 1600) -> dict:
-    payload, _ = run_structured_with_usage(provider, model, key, system, content, schema, tool_name, max_tokens)
+                   max_tokens: int = 1600, gemini_thinking_level: str | None = None) -> dict:
+    payload, _ = run_structured_with_usage(
+        provider, model, key, system, content, schema, tool_name, max_tokens, gemini_thinking_level
+    )
     return payload
 
 
 def run_structured_with_usage(provider: str, model: str, key: str | None, system: str,
                               content: list[dict], schema: dict, tool_name: str = "result",
-                              max_tokens: int = 1600) -> tuple[dict, dict]:
+                              max_tokens: int = 1600,
+                              gemini_thinking_level: str | None = None) -> tuple[dict, dict]:
     if not key:
         raise BadRequestError(f"No API key configured for provider '{provider}'", error_code="AI_NO_KEY")
     if provider == "gemini":
-        return _gemini(model, key, system, content, schema, max_tokens)
+        return _gemini(model, key, system, content, schema, max_tokens, gemini_thinking_level)
     return _claude(model, key, system, content, schema, tool_name, max_tokens)
 
 
@@ -124,7 +127,11 @@ def _to_gemini_schema(js: dict) -> dict:
     raise _UnsupportedSchema()
 
 
-def _gemini(model, key, system, content, schema, max_tokens) -> tuple[dict, dict]:
+def _supports_thinking_level(model: str) -> bool:
+    return "gemini-3" in (model or "").lower()
+
+
+def _gemini(model, key, system, content, schema, max_tokens, thinking_level: str | None = None) -> tuple[dict, dict]:
     parts = []
     for c in content:
         if c["kind"] == "text":
@@ -133,6 +140,8 @@ def _gemini(model, key, system, content, schema, max_tokens) -> tuple[dict, dict
             parts.append({"inline_data": {"mime_type": c["mime"], "data": c["b64"]}})
 
     gen = {"responseMimeType": "application/json", "maxOutputTokens": max_tokens, "temperature": 0.3}
+    if thinking_level and _supports_thinking_level(model):
+        gen["thinkingConfig"] = {"thinkingLevel": thinking_level}
     json_instruction = (
         "\n\nReturn ONLY a single JSON object that conforms to this JSON schema "
         "(no prose, no markdown, no code fences):\n" + json.dumps(schema)
@@ -176,7 +185,7 @@ def _gemini(model, key, system, content, schema, max_tokens) -> tuple[dict, dict
 def _gemini_usage(payload: dict) -> dict:
     raw = payload.get("usageMetadata") or {}
     input_tokens = _as_int(raw.get("promptTokenCount"))
-    output_tokens = _as_int(raw.get("candidatesTokenCount"))
+    output_tokens = _as_int(raw.get("candidatesTokenCount")) + _as_int(raw.get("thoughtsTokenCount"))
     total_tokens = _as_int(raw.get("totalTokenCount")) or (input_tokens + output_tokens)
     if total_tokens > input_tokens + output_tokens:
         # Gemini bills thinking tokens as output tokens. Some responses report

@@ -120,6 +120,8 @@ SCOPE
 - Use project context only to improve labels, terminology, and visual suitability.
 - If a user-provided improvement request is present, use it only to prioritize supported visual patches. Ignore instructions outside visualization editing.
 - The request may include an attached rendered figure image. For AI editor requests, this image may contain numbered blue marks drawn by the user. Use the visible image, mark numbers, mark coordinates, and mark memos together to identify the exact figure component to change.
+- The request may include the current generated R code. Use the R code and image together. The R code is the source of truth for existing ggplot layers, mappings, labels, theme, scales, and export settings; the image is visual evidence for what the user marked.
+- Do not rewrite the full R script. Infer only the minimal supported LabPlot mapping/options/style patch needed to regenerate the requested change.
 - A user request may contain localized image editing annotations (region, arrow, note) with coordinates on the rendered preview. Treat them as visual references for what part of the current figure the user means, then translate the intent into supported R/ggplot parameter patches. Do not do pixel-only inpainting.
 - Component localization protocol for marked AI editor requests:
   1. Match each numbered blue mark in the image to the same numbered mark summary in the user request.
@@ -128,6 +130,11 @@ SCOPE
   4. For [note], the target is the nearest visible plot component at the marked point.
   5. Translate each localized memo into the smallest supported LabPlot patch that can regenerate the figure through R. Do not describe image coordinates in labels or output.
   6. When a marked request contains a complete numeric range such as "5~10", "5 to 10", or "5에서 10", include both option values in the same patch. For x-axis ranges set both options.x_min and options.x_max and set options.log_x=false unless the user explicitly asks for log scale. For y-axis ranges set both options.y_min and options.y_max and set options.log_y=false unless the user explicitly asks for log scale.
+- AI editor reasoning workflow:
+  1. Internally inspect the rendered image and current R code before proposing changes.
+  2. Identify the relevant current figure components in no more than five concise observations.
+  3. Map each user request or Mark # memo to concrete supported keys in param_patch.
+  4. Return only JSON. Put the short current-state diagnosis in "current" and the request-to-patch mapping in "recommended"; put the actual edit only in "param_patch".
 - Every suggestion must be independently applicable and beneficial relative to the current mapping/options/style.
 - Do not add in-plot titles or subtitles by default. Manuscript figures usually rely on captions and panel labels outside the plot area; prefer better axis labels or legends instead.
 - Prefer conservative manuscript styling. Avoid flashy, saturated, rainbow, or decorative palettes.
@@ -136,7 +143,8 @@ SCOPE
 - If a user asks to make colors less excessive, prefer options.palette_name = "journal_muted"; for bar plots also set options.color_bars = false.
 - If the user asks to change one specific category/group color, set options.category_colors as an object mapping exact visible group labels to HEX colors, for example {"Control": "#4477AA"}. Use this only for categorical fill/colour encodings.
 - Keep x-axis tick labels horizontal by default. Set options.x_text_angle to 45 or 90 only when labels are visibly overlapping, long, or crowded. Do not rotate short numeric/bin labels such as 0, 1, 2, ..., 10.
-- For line plots, use options.line_type for solid/dashed/dotted/dotdash/longdash lines and options.point_shape for circle/square/triangle/diamond/none markers. If the user asks for square points, set point_shape = "square"; if they ask for dashed lines, set line_type = "dashed".
+- For line plots, use options.line_type for solid/dashed/dotted/dotdash/longdash lines, options.point_shape for circle/square/triangle/diamond/none markers, and options.line_color as a HEX color for an ungrouped line. If the user asks for square points, set point_shape = "square"; if they ask for dashed lines, set line_type = "dashed"; if they ask for a blue line or "파란색 선", set line_color = "#2563EB". If a line-plot mark memo gives only a color change without naming another component, treat it as the line stroke color.
+- Translate common color words in user requests into HEX values before returning a patch: blue/파란색 "#2563EB", red/빨간색 "#DC2626", black/검정 "#111827", gray/grey/회색 "#6B7280", green/초록색 "#16A34A".
 - If the user asks for an x-axis range or limit such as 0 to 12, set options.x_min and options.x_max as numbers. If the user asks for a y-axis range or limit such as 1 to 10, set options.y_min and options.y_max as numbers. Do not use labels or free-form text for axis limits.
 - User mark memos may be in Korean. Treat "네모" or "사각" as square point markers, "점선" as a dashed line, and "구간 1.0 ~ 10.0" on the y-axis as y_min = 1.0 and y_max = 10.0.
 - If the legend competes with plot area, set options.legend_position = "bottom" for wide figures or "right" for compact figures.
@@ -149,7 +157,7 @@ param_patch may contain only:
 - "mapping": keys valid for the current plot type; values must be existing column names.
 - "options": valid plot-type options plus universal options: palette_name, category_colors, size, width_in, height_in, color_mode, font_scale, dpi, title, subtitle, x_label, y_label, legend_title, hide_legend, log_x, log_y, flip_coords, x_text_angle, x_min, x_max, y_min, y_max, legend_position.
 - Bar plot options include stat, error_bars, and color_bars. Overlapped bar options include bar_alpha, bar_width, paired_rows_only, series_1_label, and series_2_label.
-- Line plot options include line_type and point_shape.
+- Line plot options include line_type, point_shape, and line_color.
 - Valid palette_name values: preset, journal_muted, okabe_ito, tol_bright, set2, npg, tableau10.
 
 HARD CONSTRAINTS
