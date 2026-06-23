@@ -7,7 +7,9 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "lighthouse": "lighthouse",
+    "lighthouse:home": "lighthouse https://labplotai.com --chrome-flags=\"--headless --no-sandbox\" --only-categories=performance,accessibility,best-practices,seo --output=json --output-path=../lighthouse-home.json"
   },
   "dependencies": {
     "@base-ui/react": "^1.3.0",
@@ -40,6 +42,7 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.1.6",
+    "lighthouse": "^12.8.2",
     "tailwindcss": "^4",
     "typescript": "^5"
   }

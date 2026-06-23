@@ -1,11 +1,3 @@
-'use client';
-
-import { useState } from 'react';
-import Link from 'next/link';
-import Image from 'next/image';
-import { useQuery } from '@tanstack/react-query';
-import { getPublicGallery } from '@/lib/api';
-import { Button } from '@/components/ui/button';
 import { GalleryHorizontal, PencilRuler, Sparkles } from 'lucide-react';
 
 const CAPTURES = [
@@ -13,40 +5,26 @@ const CAPTURES = [
     label: 'Gallery',
     src: '/landing/capture-gallery.png',
     detail: 'Browse real rendered examples before starting.',
-    fit: 'contain',
     position: 'center top',
-    zoom: 1,
-    origin: 'center top',
     icon: GalleryHorizontal,
   },
   {
     label: 'Generate',
     src: '/landing/capture-generate.png',
     detail: 'Map columns, compare ranked suggestions, and render.',
-    fit: 'contain',
     position: 'center top',
-    zoom: 1,
-    origin: 'center top',
     icon: Sparkles,
   },
   {
     label: 'Edit',
     src: '/landing/capture-editing.png',
     detail: 'Polish SVG labels, colors, and layout with version history.',
-    fit: 'contain',
     position: 'center top',
-    zoom: 1,
-    origin: 'center top',
     icon: PencilRuler,
   },
 ] as const;
 
 export function LandingGalleryStrip() {
-  const [active, setActive] = useState(2);
-  const { data } = useQuery({ queryKey: ['public-gallery', 8], queryFn: () => getPublicGallery(8) });
-  const figures = data?.figures ?? [];
-  const activeCapture = CAPTURES[active];
-
   return (
     <section className="border-b bg-background py-10 sm:py-12">
       <div className="mx-auto max-w-6xl px-4">
@@ -60,78 +38,43 @@ export function LandingGalleryStrip() {
           </p>
         </div>
 
-        <div className="mb-5 flex justify-center">
-          <div className="grid w-full max-w-xl grid-cols-3 rounded-lg border bg-muted p-1">
-            {CAPTURES.map((capture, index) => {
-              const Icon = capture.icon;
-              const selected = index === active;
-              return (
-                <button
-                  key={capture.label}
-                  type="button"
-                  onClick={() => setActive(index)}
-                  aria-pressed={selected}
-                  className={`inline-flex h-10 items-center justify-center gap-2 rounded-md px-3 text-sm font-medium transition ${
-                    selected ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
-                  }`}
-                >
-                  <Icon className="h-4 w-4" />
-                  {capture.label}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        <div className="overflow-hidden rounded-lg border bg-background shadow-xl shadow-slate-900/5">
-          <div className="flex min-h-12 flex-col gap-1 border-b px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
-            <p className="text-sm font-semibold">{activeCapture.label}</p>
-            <p className="text-sm text-muted-foreground">{activeCapture.detail}</p>
-          </div>
-          <div className="relative h-[320px] bg-white sm:h-[430px] lg:h-[520px]">
-            <Image
-              src={activeCapture.src}
-              alt={`${activeCapture.label} screenshot`}
-              fill
-              loading="lazy"
-              sizes="(min-width: 1024px) 1024px, 100vw"
-              className="transition-transform duration-300"
-              style={{
-                objectFit: activeCapture.fit,
-                objectPosition: activeCapture.position,
-                transform: `scale(${activeCapture.zoom})`,
-                transformOrigin: activeCapture.origin,
-              }}
-            />
-          </div>
-        </div>
-
-        {figures.length > 0 && (
-          <div className="mt-8">
-            <div className="mb-4 flex items-center justify-between gap-3">
-              <h3 className="text-sm font-semibold text-slate-900">Classic gallery examples</h3>
-              <Link href="/gallery">
-                <Button variant="ghost" size="sm">View all</Button>
-              </Link>
-            </div>
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-              {figures.slice(0, 4).map((f, i) => (
-                <div key={`${f.thumb_url}-${i}`} className="overflow-hidden rounded-lg border bg-background">
+        <div className="grid gap-4 lg:grid-cols-3">
+          {CAPTURES.map((capture) => {
+            const Icon = capture.icon;
+            return (
+              <article key={capture.label} className="overflow-hidden rounded-lg border bg-background shadow-lg shadow-slate-900/5">
+                <div className="flex min-h-16 flex-col gap-1 border-b px-4 py-3">
+                  <p className="inline-flex items-center gap-2 text-sm font-semibold">
+                    <Icon className="h-4 w-4 text-primary" />
+                    {capture.label}
+                  </p>
+                  <p className="text-sm text-muted-foreground">{capture.detail}</p>
+                </div>
+                <div className="relative h-[260px] bg-white sm:h-[320px] lg:h-[300px]">
                   <img
-                    src={f.thumb_url}
-                    alt={f.name}
+                    src={capture.src}
+                    alt={`${capture.label} screenshot`}
                     loading="lazy"
                     decoding="async"
-                    className="aspect-[4/3] w-full bg-white object-contain"
+                    width={720}
+                    height={540}
+                    className="h-full w-full object-contain"
+                    style={{ objectPosition: capture.position }}
                   />
-                  <div className="border-t px-2.5 py-1.5 text-xs capitalize text-muted-foreground">
-                    {f.plot_type.replace('_', ' ')}
-                  </div>
                 </div>
-              ))}
-            </div>
-          </div>
-        )}
+              </article>
+            );
+          })}
+        </div>
+
+        <div className="mt-7 text-center">
+          <a
+            href="/gallery"
+            className="inline-flex h-10 items-center justify-center rounded-md px-4 text-sm font-medium text-primary transition hover:bg-primary/10"
+          >
+            View curated gallery examples
+          </a>
+        </div>
       </div>
     </section>
   );

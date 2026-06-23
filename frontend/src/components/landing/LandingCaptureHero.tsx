@@ -1,5 +1,3 @@
-import Link from 'next/link';
-import { Button } from '@/components/ui/button';
 import { LandingPrimaryCta } from '@/components/landing/LandingPrimaryCta';
 import { ArrowRight, Check, Sparkles } from 'lucide-react';
 
@@ -30,12 +28,13 @@ export function LandingCaptureHero() {
 
         <div className="mt-7 flex flex-wrap items-center justify-center gap-3">
           <LandingPrimaryCta />
-          <Link href="/gallery">
-            <Button size="lg" variant="secondary" className="h-11 px-6">
-              Explore the gallery
-              <ArrowRight className="ml-2 h-4 w-4" />
-            </Button>
-          </Link>
+          <a
+            href="/gallery"
+            className="inline-flex h-11 items-center justify-center rounded-md bg-white px-6 text-sm font-medium text-zinc-950 shadow-sm transition hover:bg-white/90"
+          >
+            Explore the gallery
+            <ArrowRight className="ml-2 h-4 w-4" />
+          </a>
         </div>
 
         <div className="mt-7 flex flex-wrap items-center justify-center gap-x-6 gap-y-2 text-sm text-white/72">

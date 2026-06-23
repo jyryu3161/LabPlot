@@ -2,8 +2,6 @@
 
 import { useEffect } from 'react';
 
-import { reportClientError } from '@/lib/api';
-
 function messageFromReason(reason: unknown): string {
   if (reason instanceof Error) return reason.message;
   if (typeof reason === 'string') return reason;
@@ -22,6 +20,13 @@ export function ClientErrorReporter() {
   useEffect(() => {
     let last = '';
     let lastAt = 0;
+    const reportClientError = async (payload: { source: string; message: string; path?: string; stack?: string }) => {
+      await fetch('/api/client-errors', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+    };
     const send = (source: string, message: string, stack?: string) => {
       const path = window.location.pathname + window.location.search;
       const key = `${source}:${message}:${path}`;

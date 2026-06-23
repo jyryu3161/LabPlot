@@ -28,5 +28,9 @@ docs/.bkit-memory.json
 scripts/*.log
 *.log
 
+# lighthouse reports
+lighthouse-*.json
+lighthouse-*.html
+
 # os
 .DS_Store
