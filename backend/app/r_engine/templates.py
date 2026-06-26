@@ -30,6 +30,7 @@ def _num(v, default):
 
 
 _VIRIDIS_OPTIONS = ("viridis", "magma", "inferno", "plasma", "cividis")
+_HEATMAP_OPTIONS = _VIRIDIS_OPTIONS + ("blue_red",)
 _GRAPH_LAYOUTS = ("fr", "kk", "circle", "stress")
 _LINE_TYPES = ("solid", "dashed", "dotted", "dotdash", "longdash")
 _POINT_SHAPES = {
@@ -106,7 +107,7 @@ p <- ggplot(df, aes(x = factor({_data(x)}), y = {_data(y)}, fill = factor({_data
 def _scatter(m, o):
     x, y = m["x"], m["y"]
     color = m.get("color")
-    smooth = '  geom_smooth(method = "lm", se = TRUE, colour = "#3C5488", fill = "grey80", alpha = 0.4, linewidth = 0.35) +\n' if o.get("add_smooth", False) else ""
+    smooth = '  geom_smooth(method = "lm", se = TRUE, colour = "#4C6F91", fill = "grey80", alpha = 0.4, linewidth = 0.35) +\n' if o.get("add_smooth", False) else ""
     if color:
         aes = f"aes(x = {_data(x)}, y = {_data(y)}, colour = factor({_data(color)}))"
         scale = "  scale_colour_manual(values = labplot_palette()) +\n"
@@ -343,7 +344,7 @@ colnames(.long) <- c("x", "y", "value")
 .long$y <- factor(.long$y, levels = rev(.cols))
 p <- ggplot(.long, aes(x = x, y = y, fill = value)) +
   geom_tile(colour = "white", linewidth = 0.2) +
-  scale_fill_gradient2(low = "#3C5488", mid = "white", high = "#E64B35", midpoint = 0,
+  scale_fill_gradient2(low = "#4C6F91", mid = "white", high = "#B24745", midpoint = 0,
                        limits = c(-1, 1), name = "r") +
   {_labs(o, "", "")} +
   coord_equal() +
@@ -368,10 +369,13 @@ def _heatmap(m, o):
     scale_rows = ""
     if o.get("scale_rows", False):
         scale_rows = ".mat <- t(scale(t(.mat)));\n"
+    palette = _choice(o.get("palette"), _HEATMAP_OPTIONS, "blue_red")
     if o.get("color_mode") == "grayscale":
         fill_scale = 'scale_fill_gradient(low = "grey92", high = "grey15", na.value = "grey85")'
+    elif palette == "blue_red":
+        fill_scale = 'scale_fill_gradient2(low = "#4C6F91", mid = "white", high = "#B24745", midpoint = 0, na.value = "grey90")'
     else:
-        fill_scale = f"scale_fill_viridis_c(option = {rq(_choice(o.get('palette'), _VIRIDIS_OPTIONS, 'viridis'))}, na.value = \"grey85\")"
+        fill_scale = f"scale_fill_viridis_c(option = {rq(palette)}, na.value = \"grey85\")"
     return f"""
 .cols <- {col_vec}
 .mat <- as.matrix(df[, .cols, drop = FALSE])
@@ -418,7 +422,7 @@ if (!is.finite(.minp)) .minp <- 1e-300
 .d$.sig <- factor(.d$.sig, levels = c("Down", "NS", "Up"))
 p <- ggplot(.d, aes(x = .lfc, y = .neglogp, colour = .sig)) +
   geom_point(alpha = 0.75, size = 1.6) +
-  {'scale_colour_manual(values = c(Down = "grey60", NS = "grey85", Up = "black"))' if o.get("color_mode") == "grayscale" else 'scale_colour_manual(values = c(Down = "#4DBBD5", NS = "grey70", Up = "#E64B35"))'} +
+  {'scale_colour_manual(values = c(Down = "grey60", NS = "grey85", Up = "black"))' if o.get("color_mode") == "grayscale" else 'scale_colour_manual(values = c(Down = "#6C9EB3", NS = "grey70", Up = "#B24745"))'} +
   geom_vline(xintercept = c(-{fc_t}, {fc_t}), linetype = "dashed", colour = "grey50", linewidth = 0.25) +
   geom_hline(yintercept = -log10({p_t}), linetype = "dashed", colour = "grey50", linewidth = 0.25) +
   {_labs(o, "log2 fold change", "-log10(p-value)")} +
@@ -441,7 +445,7 @@ p <- ggplot(.scores, aes(x = PC1, y = PC2, colour = grp)) +
     else:
         color_block = """
 p <- ggplot(.scores, aes(x = PC1, y = PC2)) +
-  geom_point(size = 2.4, alpha = 0.85, colour = "#3C5488") +
+  geom_point(size = 2.4, alpha = 0.85, colour = "#4C6F91") +
 """
     title = rq(o.get("title")) if o.get("title") else "NULL"
     return f"""
@@ -771,7 +775,7 @@ PLOT_TYPES = [
      "required": [{"key": "columns", "label": "Value columns (matrix)", "roles": ["numeric", "log2fc", "pvalue"], "multi": True}],
      "optional": [{"key": "row_label", "label": "Row label", "roles": ["gene", "category", "text", "group"]}],
      "options": [{"key": "scale_rows", "label": "Z-score rows", "type": "bool", "default": False},
-                 {"key": "palette", "label": "Palette", "type": "select", "choices": ["viridis", "magma", "inferno", "plasma", "cividis"], "default": "viridis"}]},
+                 {"key": "palette", "label": "Palette", "type": "select", "choices": ["blue_red", "viridis", "magma", "inferno", "plasma", "cividis"], "default": "blue_red"}]},
     {"type": "volcano", "label": "Volcano plot",
      "required": [{"key": "log2fc", "label": "log2 fold-change", "roles": ["log2fc", "numeric"]},
                   {"key": "pvalue", "label": "p-value / padj", "roles": ["pvalue", "numeric"]}],
@@ -812,7 +816,7 @@ def _enrichment_dot(m, o):
     size, color = m.get("size"), m.get("color")
     size_aes = f", size = {_data(size)}" if size else ""
     color_aes = f", colour = {_data(color)}" if color else ""
-    color_scale = '  scale_colour_gradient(low = "#E64B35", high = "#3C5488", name = "p.adjust") +\n' if color else ""
+    color_scale = '  scale_colour_gradient(low = "#B24745", high = "#4C6F91", name = "p.adjust") +\n' if color else ""
     return f"""
 df <- as.data.frame(df)
 .terms <- as.character({_col(term)})
@@ -834,7 +838,7 @@ df <- as.data.frame(df)
 df$.term <- factor(.terms, levels = .terms[order(.vals)])
 p <- ggplot(df, aes(x = {_data(value)}, y = .term, fill = {_data(value)})) +
   geom_col(alpha = 0.92, width = 0.7) +
-  scale_fill_gradient(low = "#4DBBD5", high = "#E64B35", guide = "none") +
+  scale_fill_gradient(low = "#6C9EB3", high = "#B24745", guide = "none") +
   {_labs(o, value, "")}
 """
 
@@ -857,9 +861,9 @@ df$.band <- factor(as.integer(df$.chr) %% 2)
 .centers <- tapply(df$.cum, df$.chr, function(x) (min(x) + max(x)) / 2)
 p <- ggplot(df, aes(x = .cum, y = -log10(.p), colour = .band)) +
   geom_point(size = 0.9, alpha = 0.8) +
-  scale_colour_manual(values = c("0" = "#3C5488", "1" = "#4DBBD5"), guide = "none") +
+  scale_colour_manual(values = c("0" = "#4C6F91", "1" = "#6C9EB3"), guide = "none") +
   scale_x_continuous(breaks = as.numeric(.centers), labels = names(.centers), expand = c(0.01, 0)) +
-  geom_hline(yintercept = -log10({thr}), linetype = "dashed", colour = "#E64B35", linewidth = 0.25) +
+  geom_hline(yintercept = -log10({thr}), linetype = "dashed", colour = "#B24745", linewidth = 0.25) +
   {_labs(o, "Chromosome", "-log10(p)")}
 """
 
@@ -898,7 +902,7 @@ suppressMessages({{library(igraph); library(ggraph); library(tidygraph)}})
 igraph::V(.g)$deg <- igraph::degree(.g)
 p <- ggraph(.g, layout = {rq(layout)}) +
   geom_edge_link({edge_w}alpha = 0.25, colour = "grey55") +
-{edge_width_scale}  geom_node_point(aes(size = deg), colour = "#E64B35", alpha = 0.9) +
+{edge_width_scale}  geom_node_point(aes(size = deg), colour = "#B24745", alpha = 0.9) +
 {label_block}  scale_size(range = c(2, 9), guide = "none") +
   labs(title = {rq(o.get('title')) if o.get('title') else 'NULL'}) +
   theme_void(base_size = 7) +
@@ -923,7 +927,7 @@ def _annotated_heatmap(m, o):
     if o.get("color_mode") == "grayscale":
         colmap = 'circlize::colorRamp2(c(-2, 0, 2), c("grey90", "grey55", "grey10"))'
     else:
-        colmap = 'circlize::colorRamp2(c(-2, 0, 2), c("#3C5488", "white", "#E64B35"))'
+        colmap = 'circlize::colorRamp2(c(-2, 0, 2), c("#4C6F91", "white", "#B24745"))'
     return f"""
 suppressMessages({{library(ComplexHeatmap); library(circlize)}})
 df <- as.data.frame(df)
@@ -1038,7 +1042,7 @@ if (nrow(.tab) == 0) stop("No non-empty intersections found")
 .segments <- .long %>% dplyr::filter(present) %>% dplyr::group_by(ix_f) %>%
   dplyr::summarise(ymin = min(as.numeric(set)), ymax = max(as.numeric(set)), .groups = "drop")
 .bar <- ggplot(.tab, aes(x = ix_f, y = count)) +
-  geom_col(fill = "#3C5488", width = 0.72) +
+  geom_col(fill = "#4C6F91", width = 0.72) +
   labs(x = NULL, y = "Intersection size") +
   theme_minimal(base_size = 7) +
   theme(axis.text.x = element_blank(), panel.grid.major.x = element_blank())
@@ -1046,7 +1050,7 @@ if (nrow(.tab) == 0) stop("No non-empty intersections found")
   geom_segment(data = .segments, aes(x = ix_f, xend = ix_f, y = ymin, yend = ymax),
                inherit.aes = FALSE, linewidth = 0.35, colour = "grey35") +
   geom_point(aes(fill = present), shape = 21, size = 2.6, colour = "grey35", stroke = 0.25) +
-  scale_fill_manual(values = c(`TRUE` = "#E64B35", `FALSE` = "white"), guide = "none") +
+  scale_fill_manual(values = c(`TRUE` = "#B24745", `FALSE` = "white"), guide = "none") +
   labs(x = "Intersection", y = NULL) +
   theme_minimal(base_size = 7) +
   theme(panel.grid = element_blank(), axis.text.x = element_blank(), axis.ticks.x = element_blank())
@@ -1069,7 +1073,7 @@ if (length(.xv) < 2 || length(.yv) < 2) stop("3D surface needs a grid with at le
 for (i in seq_len(nrow(.plot))) .zmat[as.character(.plot$.x[i]), as.character(.plot$.y[i])] <- .plot$.z[i]
 if (anyNA(.zmat)) stop("3D surface requires a complete x/y grid")
 draw_plot <- function() {{
-  .pal <- viridisLite::viridis(100)
+  .pal <- grDevices::colorRampPalette(c("#F7F8FA", "#B9C7D4", "#4C6F91"))(100)
   .zfacet <- (.zmat[-1, -1] + .zmat[-1, -ncol(.zmat)] + .zmat[-nrow(.zmat), -1] + .zmat[-nrow(.zmat), -ncol(.zmat)]) / 4
   .idx <- cut(.zfacet, breaks = 100, labels = FALSE, include.lowest = TRUE)
   graphics::persp(.xv, .yv, .zmat, theta = 38, phi = 28, expand = 0.62,
@@ -1111,7 +1115,7 @@ suppressMessages(library(lattice))
 .cloud <- lattice::cloud(.z ~ .x * .y, data = .plot, groups = .grp,
                          auto.key = list(columns = 2, cex = 1.0),
                          pch = 16, cex = 0.7, alpha = 0.75,
-                         col = rep(viridisLite::viridis(max(3, length(levels(.plot$.grp)))), length.out = length(levels(.plot$.grp))),
+                         col = rep(c("#4C6F91", "#B24745", "#6A8A6B", "#8E6C8A", "#B79A43", "#5D8D8A", "#8C7A6B", "#7A7A7A", "#A06B5F"), length.out = length(levels(.plot$.grp))),
                          screen = list(z = 40, x = -65),
                          xlab = {rq(o.get("x_label") or x)}, ylab = {rq(o.get("y_label") or y)}, zlab = {rq(z)},
                          scales = list(arrows = FALSE, cex = 1.0))
@@ -1132,7 +1136,7 @@ if (length(.xv) < 2 || length(.yv) < 2) stop("3D contour needs a complete x/y gr
 for (i in seq_len(nrow(.plot))) .zmat[as.character(.plot$.x[i]), as.character(.plot$.y[i])] <- .plot$.z[i]
 if (anyNA(.zmat)) stop("3D contour requires a complete x/y grid")
 draw_plot <- function() {{
-  .pal <- viridisLite::viridis(100)
+  .pal <- grDevices::colorRampPalette(c("#F7F8FA", "#B9C7D4", "#4C6F91"))(100)
   .zlim <- range(.zmat, finite = TRUE)
   .zfacet <- (.zmat[-1, -1] + .zmat[-1, -ncol(.zmat)] + .zmat[-nrow(.zmat), -1] + .zmat[-nrow(.zmat), -ncol(.zmat)]) / 4
   .idx <- cut(.zfacet, breaks = 100, labels = FALSE, include.lowest = TRUE)
@@ -1187,7 +1191,7 @@ draw_plot <- function() {{
   circlize::circos.clear()
   grid::grid.newpage()
   .nodes <- unique(c(.matdf$from, .matdf$to))
-  .cols <- setNames(rep(viridisLite::viridis(max(3, length(.nodes))), length.out = length(.nodes)), .nodes)
+  .cols <- setNames(rep(c("#4C6F91", "#B24745", "#6A8A6B", "#8E6C8A", "#B79A43", "#5D8D8A", "#8C7A6B", "#7A7A7A", "#A06B5F"), length.out = length(.nodes)), .nodes)
   circlize::chordDiagram(.matdf, directional = 1, direction.type = c("arrows", "diffHeight"),
                          grid.col = .cols, transparency = 0.35,
                          annotationTrack = c("grid"), preAllocateTracks = 1)
@@ -1245,7 +1249,7 @@ def _confusion_matrix(m, o):
 p <- ggplot(.tab, aes(x = Predicted, y = Actual, fill = Freq)) +
   geom_tile(colour = "white", linewidth = 0.35) +
   geom_text(aes(label = Freq), size = {_GEOM_TEXT_SIZE_7PT}, colour = "grey10") +
-  scale_fill_gradient(low = "grey95", high = "#3C5488", name = "Count") +
+  scale_fill_gradient(low = "grey95", high = "#4C6F91", name = "Count") +
   coord_equal() +
   {_labs(o, "Predicted", "Actual")} +
   theme(panel.grid = element_blank())
@@ -1274,7 +1278,7 @@ for (i in seq_len(length(.xv) - 1)) for (j in seq_len(length(.yv) - 1)) {{
                                                      z = c(.zmat[i, j], .zmat[i + 1, j + 1], .zmat[i, j + 1]))
 }}
 draw_plot <- function() {{
-  .pal <- viridisLite::viridis(100)
+  .pal <- grDevices::colorRampPalette(c("#F7F8FA", "#B9C7D4", "#4C6F91"))(100)
   .zlim <- range(.zmat, finite = TRUE)
   .pm <- graphics::persp(.xv, .yv, .zmat, theta = 38, phi = 28, expand = 0.62,
                          col = NA, border = NA,
@@ -1351,7 +1355,7 @@ p <- p + geom_text(data = .top, aes(label = {_data(gene)}), size = {_GEOM_TEXT_S
 p <- ggplot(.plot, aes(x = .mean, y = .lfc, colour = .sig)) +
   geom_point(alpha = 0.72, size = 1.45) +
   geom_hline(yintercept = c(-{fc_t}, {fc_t}), linetype = "dashed", linewidth = 0.25, colour = "grey45") +
-  scale_colour_manual(values = c(Down = "#4DBBD5", Stable = "grey70", Up = "#E64B35"), name = NULL) +
+  scale_colour_manual(values = c(Down = "#6C9EB3", Stable = "grey70", Up = "#B24745"), name = NULL) +
   {_labs(o, o.get("x_label") or "Mean expression", o.get("y_label") or "log2 fold change")}
 {label_block}"""
 

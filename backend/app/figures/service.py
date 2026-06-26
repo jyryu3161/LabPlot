@@ -42,7 +42,7 @@ _OPTION_CHOICES = {
     "size": {"single_column", "wide", "double_column", "square", "custom"},
     "color_mode": {"color", "grayscale"},
     "stat": {"mean", "sum", "count"},
-    "palette": {"viridis", "magma", "inferno", "plasma", "cividis"},
+    "palette": {"blue_red", "viridis", "magma", "inferno", "plasma", "cividis"},
     "corr_method": {"pearson", "spearman"},
     "layout": {"fr", "kk", "circle", "stress"},
     "legend_position": {"right", "bottom", "none"},

@@ -54,7 +54,7 @@ _OPTIONS_PATCH_SCHEMA = {
         "connect_points": {"type": "boolean"}, "show_contour_lines": {"type": "boolean"},
         "stat": {"type": "string", "enum": ["mean", "sum", "count"]},
         "corr_method": {"type": "string", "enum": ["pearson", "spearman"]},
-        "palette": {"type": "string", "enum": ["viridis", "magma", "inferno", "plasma", "cividis"]},
+        "palette": {"type": "string", "enum": ["blue_red", "viridis", "magma", "inferno", "plasma", "cividis"]},
         "line_type": {"type": "string", "enum": ["solid", "dashed", "dotted", "dotdash", "longdash"]},
         "point_shape": {"type": "string", "enum": ["circle", "square", "triangle", "diamond", "none"]},
         "line_color": {"type": "string"},

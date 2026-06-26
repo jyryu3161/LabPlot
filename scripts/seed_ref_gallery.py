@@ -49,7 +49,7 @@ class GallerySeed:
     transform: Callable[[pd.DataFrame], pd.DataFrame] | None = None
     column_roles: dict[str, str] | None = None
     style_preset: str = "nature"
-    lock_final_options: bool = False
+    lock_final_options: bool = True
 
 
 def _read_ref(rel_csv: str) -> pd.DataFrame:
@@ -947,7 +947,7 @@ def _pathologic_response_rate() -> pd.DataFrame:
 COMMON_OPTIONS = {
     "title": "",
     "size": "wide",
-    "palette_name": "okabe_ito",
+    "palette_name": "journal_muted",
     "font_scale": 1.0,
 }
 
@@ -1167,7 +1167,7 @@ SEEDS = [
         transform=_gene_heatmap,
         plot_type="heatmap",
         mapping={"columns": [f"Control_{i}" for i in range(1, 5)] + [f"Treated_{i}" for i in range(1, 5)], "row_label": "Gene"},
-        options={**COMMON_OPTIONS, "scale_rows": True, "palette": "viridis"},
+        options={**COMMON_OPTIONS, "scale_rows": True, "palette": "blue_red"},
     ),
     GallerySeed(
         key="volcano",
@@ -1766,7 +1766,7 @@ SEEDS = [
         dataframe_factory=_clinical_signature_heatmap,
         plot_type="heatmap",
         mapping={"columns": [f"Process_{idx:02d}" for idx in range(1, 13)], "row_label": "Signature"},
-        options={**COMMON_OPTIONS, "scale_rows": False, "palette": "viridis", "x_label": "", "y_label": ""},
+        options={**COMMON_OPTIONS, "scale_rows": False, "palette": "blue_red", "x_label": "", "y_label": ""},
     ),
     GallerySeed(
         key="genomic_score_density",
@@ -1865,7 +1865,7 @@ SEEDS = [
         dataframe_factory=_mutational_signature_prevalence,
         plot_type="heatmap",
         mapping={"columns": ["Subtype A", "Subtype B", "Subtype C", "Subtype D"], "row_label": "Signature"},
-        options={**COMMON_OPTIONS, "scale_rows": False, "palette": "viridis", "x_label": "Subtype", "y_label": "Signature"},
+        options={**COMMON_OPTIONS, "scale_rows": False, "palette": "blue_red", "x_label": "Subtype", "y_label": "Signature"},
     ),
     GallerySeed(
         key="genomic_instability_by_subtype",

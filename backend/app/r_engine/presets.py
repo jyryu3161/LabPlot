@@ -1,8 +1,8 @@
 """Publication style presets -> R theme + palette code (uses base ggplot2 only)."""
 from __future__ import annotations
 
-_JOURNAL_MUTED = ["#CC6677", "#332288", "#DDCC77", "#117733", "#88CCEE",
-                  "#882255", "#44AA99", "#999933", "#AA4499"]
+_JOURNAL_MUTED = ["#4C6F91", "#B24745", "#6A8A6B", "#8E6C8A", "#B79A43",
+                  "#5D8D8A", "#8C7A6B", "#7A7A7A", "#A06B5F"]
 
 PALETTES = {
     "nature": _JOURNAL_MUTED,

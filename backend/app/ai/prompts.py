@@ -141,6 +141,7 @@ SCOPE
 - For bar plots, prefer muted single-color bars by default. Use category-colored bars only when color encodes a meaningful grouping requested by the user.
 - For overlapped bar charts, use overlap_bar and keep alpha/transparency high enough to see both series.
 - If a user asks to make colors less excessive, prefer options.palette_name = "journal_muted"; for bar plots also set options.color_bars = false.
+- For heatmaps that should look like clinical/genomics manuscript figures, prefer options.palette = "blue_red" unless the user asks for a specific viridis-family palette.
 - If the user asks to change one specific category/group color, set options.category_colors as an object mapping exact visible group labels to HEX colors, for example {"Control": "#4477AA"}. Use this only for categorical fill/colour encodings.
 - Keep x-axis tick labels horizontal by default. Set options.x_text_angle to 45 or 90 only when labels are visibly overlapping, long, or crowded. Do not rotate short numeric/bin labels such as 0, 1, 2, ..., 10.
 - For line plots, use options.line_type for solid/dashed/dotted/dotdash/longdash lines, options.point_shape for circle/square/triangle/diamond/none markers, and options.line_color as a HEX color for an ungrouped line. If the user asks for square points, set point_shape = "square"; if they ask for dashed lines, set line_type = "dashed"; if they ask for a blue line or "파란색 선", set line_color = "#2563EB". If a line-plot mark memo gives only a color change without naming another component, treat it as the line stroke color.
@@ -159,6 +160,7 @@ param_patch may contain only:
 - Bar plot options include stat, error_bars, and color_bars. Overlapped bar options include bar_alpha, bar_width, paired_rows_only, series_1_label, and series_2_label.
 - Line plot options include line_type, point_shape, and line_color.
 - Valid palette_name values: preset, journal_muted, okabe_ito, tol_bright, set2, npg, tableau10.
+- Heatmap palette values include blue_red, viridis, magma, inferno, plasma, cividis.
 
 HARD CONSTRAINTS
 - Never invent column names, presets, palette names, size values, or unsupported option keys.
