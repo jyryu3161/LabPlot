@@ -129,7 +129,13 @@ export function FigureAnnotationOverlay({
   // Data placement is only sensible when a panel exists and neither axis is discrete
   // (linear data mapping). Otherwise we fall back to relative placement.
   const dataCapable = Boolean(layout) && !layout!.x_discrete && !layout!.y_discrete;
-  const [coordMode, setCoordMode] = useState<AnnotationCoord>(() => (dataCapable ? 'data' : 'relative'));
+  // Default follows dataCapable REACTIVELY (layout can arrive after mount, e.g.
+  // while the figure query resolves); a useState initializer would freeze the
+  // mode to whatever dataCapable was on first render. Only an explicit user
+  // toggle pins the mode.
+  const [userMode, setUserMode] = useState<AnnotationCoord | null>(null);
+  const coordMode: AnnotationCoord = userMode ?? (dataCapable ? 'data' : 'relative');
+  const setCoordMode = setUserMode;
 
   const { w, h } = dims;
 

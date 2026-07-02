@@ -1,6 +1,6 @@
 {
   "version": "2.0",
-  "lastUpdated": "2026-07-02T12:44:12.307Z",
+  "lastUpdated": "2026-07-02T13:08:23.094Z",
   "activeFeatures": [
     "labplot-ai",
     "backend",
@@ -146,7 +146,7 @@
       "documents": {},
       "timestamps": {
         "started": "2026-06-13T05:57:59.831Z",
-        "lastUpdated": "2026-07-02T12:44:07.895Z"
+        "lastUpdated": "2026-07-02T13:08:23.094Z"
       },
       "lastFile": "/home/ubuntu/web_projects/LabPlot/frontend/src/components/figures/FigureAnnotationOverlay.tsx"
     },
@@ -393,7 +393,7 @@
   "session": {
     "startedAt": "2026-06-13T05:06:05.497Z",
     "onboardingCompleted": true,
-    "lastActivity": "2026-07-02T12:44:12.307Z"
+    "lastActivity": "2026-07-02T13:08:23.094Z"
   },
   "history": [
     {
@@ -4421,6 +4421,12 @@
     {
       "timestamp": "2026-07-02T12:44:12.307Z",
       "feature": "[id]",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T13:08:23.094Z",
+      "feature": "figures",
       "phase": "do",
       "action": "updated"
     }
