@@ -19,13 +19,12 @@ import {
 import { ThemeToggle } from '@/components/theme/ThemeToggle';
 import { cn } from '@/lib/utils';
 import { acceptProjectInvitation, listProjectInvitations, rejectProjectInvitation } from '@/lib/api';
-import { BarChart3, Bell, Building2, Check, FolderKanban, Images, LayoutGrid, Menu, Shield, LogOut, GalleryHorizontalEnd, UserCircle, X } from 'lucide-react';
+import { BarChart3, Bell, Building2, Check, FolderKanban, Images, Menu, Shield, LogOut, GalleryHorizontalEnd, UserCircle, X } from 'lucide-react';
 
 const NAV = [
   { href: '/projects', label: 'Projects', icon: FolderKanban },
   { href: '/gallery', label: 'Gallery', icon: GalleryHorizontalEnd },
   { href: '/figures', label: 'Figures', icon: Images },
-  { href: '/canvases', label: 'Canvases', icon: LayoutGrid },
   { href: '/organizations', label: 'Organizations', icon: Building2 },
 ];
 

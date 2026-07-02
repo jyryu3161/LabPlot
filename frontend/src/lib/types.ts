@@ -384,50 +384,6 @@ export interface TransformPreview {
   total_rows: number;
 }
 
-export interface CanvasPanelItem {
-  figure_id: string;
-  version_id: string;
-  row: number;
-  col: number;
-  label?: string;
-}
-
-export interface CanvasState {
-  rows: number;
-  cols: number;
-  label_style?: 'lower' | 'upper' | 'none';
-  items: CanvasPanelItem[];
-  output?: { png_path?: string; pdf_path?: string };
-}
-
-export interface CanvasListItem {
-  id: string;
-  project_id?: string | null;
-  name: string;
-  preset: string;
-  width_px: number;
-  height_px: number;
-  panel_count: number;
-  png_url?: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface CanvasDetail {
-  id: string;
-  project_id?: string | null;
-  name: string;
-  description?: string | null;
-  preset: string;
-  width_px: number;
-  height_px: number;
-  state: CanvasState;
-  png_url?: string | null;
-  pdf_url?: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
 export interface Review {
   id: string;
   figure_version_id: string;

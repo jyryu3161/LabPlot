@@ -455,42 +455,6 @@ export async function applyImprovements(figureId: string, improvementIds: string
     body: JSON.stringify({ improvement_ids: improvementIds }),
   });
 }
-export async function listCanvases(projectId?: string): Promise<import('./types').CanvasListItem[]> {
-  return fetcher(`/api/canvases${projectId ? `?project_id=${projectId}` : ''}`);
-}
-export async function createCanvas(data: {
-  name: string; description?: string; project_id?: string; preset?: string;
-  width_px?: number; height_px?: number; state?: import('./types').CanvasState;
-}): Promise<import('./types').CanvasDetail> {
-  return fetcher('/api/canvases', { method: 'POST', body: JSON.stringify(data) });
-}
-export async function getCanvas(id: string): Promise<import('./types').CanvasDetail> {
-  return fetcher(`/api/canvases/${id}`);
-}
-export async function updateCanvas(id: string, data: {
-  name?: string; description?: string; preset?: string;
-  width_px?: number; height_px?: number; state?: import('./types').CanvasState;
-}): Promise<import('./types').CanvasDetail> {
-  return fetcher(`/api/canvases/${id}`, { method: 'PATCH', body: JSON.stringify(data) });
-}
-export async function deleteCanvas(id: string): Promise<void> {
-  return fetcher(`/api/canvases/${id}`, { method: 'DELETE' });
-}
-export async function renderCanvas(id: string): Promise<{ png_url: string; pdf_url: string }> {
-  return fetcher(`/api/canvases/${id}/render`, { method: 'POST' });
-}
-export async function downloadCanvasExport(id: string, fmt: 'png' | 'pdf', filename: string): Promise<void> {
-  const headers: Record<string, string> = {};
-  const token = getAccessToken();
-  if (token) headers['Authorization'] = `Bearer ${token}`;
-  const res = await fetch(`${BASE_URL}/api/canvases/${id}/export?format=${fmt}`, { headers });
-  if (!res.ok) throw new ApiError('Canvas export failed', res.status);
-  const blob = await res.blob();
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url; a.download = filename; document.body.appendChild(a); a.click();
-  a.remove(); URL.revokeObjectURL(url);
-}
 export function exportUrl(figureId: string, versionId: string, fmt: string): string {
   return `${BASE_URL}/api/figures/${figureId}/versions/${versionId}/export?format=${fmt}`;
 }
