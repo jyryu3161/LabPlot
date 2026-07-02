@@ -47,6 +47,8 @@ _UNIVERSAL_OPTION_KEYS = {
     # are simply ignored by templates that do not consume them.
     "fill_alpha", "point_alpha", "error_type", "color_midpoint", "level_order",
     "facet_by", "facet_scales", "hline_at", "vline_at", "font_family", "transparent_background",
+    # Gates the self-contained interactive plotly HTML export (bool).
+    "interactive_html",
     # Statistical-annotation / model-fit options (contract with the plot-types
     # agent in templates.py). Universal so they pass the allow-list for any plot
     # type that renders them; unused keys are ignored by templates that do not.
@@ -55,6 +57,17 @@ _UNIVERSAL_OPTION_KEYS = {
     # templates.py): y2_column must reference a real dataset column and
     # y2_label is a plain axis-label string.
     "y2_column", "y2_label",
+    # Data-label / axis-tick / legend-layout options (contract with the
+    # templates.py & presets.py agents). Universal so they pass the allow-list
+    # for any plot type; unused keys are ignored by templates that do not render
+    # them. Bool/number/choice shapes are enforced in _sanitize_option.
+    "show_data_labels", "data_label_format",
+    "reverse_x", "reverse_y", "x_breaks", "y_breaks",
+    "x_tick_format", "y_tick_format",
+    "legend_key_size", "legend_ncol",
+    # Structured overlays (custom-sanitized to shape-safe dicts/lists below):
+    # free-form annotations and per-series style overrides.
+    "annotations", "series_styles",
 }
 _OPTION_CHOICES = {
     "palette_name": {"preset", "journal_muted", "okabe_ito", "tol_bright", "set2", "npg", "tableau10"},
@@ -69,7 +82,13 @@ _OPTION_CHOICES = {
     "point_shape": {"circle", "square", "triangle", "diamond", "none"},
     "error_type": {"sd", "se", "ci95"},
     "facet_scales": {"fixed", "free", "free_x", "free_y"},
-    "font_family": {"sans", "serif", "mono"},
+    # Superset of the base families plus the extra families the presets agent
+    # adds; unknown values are dropped by the membership check.
+    "font_family": {"sans", "serif", "mono", "helvetica", "arial", "times", "noto_sans", "noto_serif"},
+    # Number formatting for on-plot data labels and axis ticks.
+    "data_label_format": {"number", "percent", "comma"},
+    "x_tick_format": {"number", "comma", "percent", "scientific"},
+    "y_tick_format": {"number", "comma", "percent", "scientific"},
     # Curve-fit model for regression/dose-response templates (default "linear"
     # applied by the template; invalid values are dropped so the render falls
     # back to that default).
@@ -85,6 +104,10 @@ _BOOL_OPTIONS = {
     "show_n", "show_significance", "show_fit_stats",
     # Per-type toggles for the new plot types (sina/qq/forest/dot_plot/lollipop/embedding).
     "show_violin", "show_line", "sort_by_estimate", "sort_desc", "show_cluster_labels",
+    # Data-label toggle and axis reversal.
+    "show_data_labels", "reverse_x", "reverse_y",
+    # Gates the self-contained interactive plotly HTML export.
+    "interactive_html",
 }
 _NUMBER_OPTIONS = {
     "fc_threshold", "p_threshold", "label_top", "font_scale", "dpi", "width_in", "height_in",
@@ -92,6 +115,8 @@ _NUMBER_OPTIONS = {
     "fill_alpha", "point_alpha", "color_midpoint", "hline_at", "vline_at",
     # Forest reference line + ridgeline overlap factor (new plot types).
     "ref_line", "overlap",
+    # Axis tick-count hints and legend layout sizing (clamped in _sanitize_option).
+    "x_breaks", "y_breaks", "legend_key_size", "legend_ncol",
 }
 _COLOR_WORDS = {
     "blue": "#2563EB",
@@ -110,6 +135,9 @@ _COLOR_WORDS = {
     "초록": "#16A34A",
     "초록색": "#16A34A",
 }
+# Shared 6-digit hex-color validator (matches the inline checks used for
+# category_colors / line_color / palettes). Colors are upper-cased before test.
+_HEX_COLOR_RE = re.compile(r"#[0-9A-F]{6}")
 _LINE_COMPONENT_RE = re.compile(r"(line|선|라인)")
 _NON_LINE_COLOR_TARGET_RE = re.compile(
     r"(axis|축|tick|눈금|label|라벨|legend|범례|text|텍스트|글씨|point|marker|점|마커|bar|막대|category|group|그룹)"
@@ -322,6 +350,7 @@ def version_response(v: FigureVersion) -> dict:
         "tiff_url": _url(v.tiff_path),
         "pdf_url": _url(v.pdf_path),
         "eps_url": _url(v.eps_path),
+        "html_url": _url(v.html_path),
         "r_url": _url(v.r_path),
     }
 
@@ -909,6 +938,7 @@ def _render_into_version(df, plot_type, mapping, options, preset, figure_id, ver
             "tiff": "image/tiff",
             "pdf": "application/pdf",
             "eps": "application/postscript",
+            "html": "text/html",
             "r": "text/plain",
         }
         for kind, path in (res.outputs or {}).items():
@@ -1038,6 +1068,7 @@ def create_figure(db: Session, owner_id: uuid.UUID, data) -> dict:
         png_path=res.outputs.get("png"), svg_path=res.outputs.get("svg"),
         tiff_path=res.outputs.get("tiff"), pdf_path=res.outputs.get("pdf"),
         eps_path=res.outputs.get("eps"),
+        html_path=res.outputs.get("html"),
         r_path=res.outputs.get("r"), render_log=res.log,
     )
     db.add(version)
@@ -1132,6 +1163,7 @@ def _auto_quality_correct_initial_figure(db: Session, owner_id: uuid.UUID, ds: D
             tiff_path=res.outputs.get("tiff"),
             pdf_path=res.outputs.get("pdf"),
             eps_path=res.outputs.get("eps"),
+            html_path=res.outputs.get("html"),
             r_path=res.outputs.get("r"),
             render_log=res.log,
         )
@@ -1544,6 +1576,7 @@ def rerender(db: Session, figure_id: uuid.UUID, owner_id: uuid.UUID, req) -> dic
         png_path=res.outputs.get("png"), svg_path=res.outputs.get("svg"),
         tiff_path=res.outputs.get("tiff"), pdf_path=res.outputs.get("pdf"),
         eps_path=res.outputs.get("eps"),
+        html_path=res.outputs.get("html"),
         r_path=res.outputs.get("r"), render_log=res.log,
     )
     db.add(version)
@@ -1555,6 +1588,153 @@ def rerender(db: Session, figure_id: uuid.UUID, owner_id: uuid.UUID, req) -> dic
     _archive_code_artifact(db, owner_id, ds, fig, version, res)
     db.commit()
     return version_response(version)
+
+
+# Style-only option keys copied by bulk_apply_style. Deliberately excludes data
+# mappings, axis ranges (x_min/x_max/...), annotations and per-series overrides —
+# only palette / typography / legend-layout / background styling travels.
+_BULK_STYLE_OPTION_KEYS = {
+    "palette_name", "custom_palette_values", "custom_palette_label",
+    "color_mode", "font_family", "font_scale",
+    "legend_position", "legend_key_size", "legend_ncol",
+    "transparent_background",
+}
+
+
+def duplicate_figure(db: Session, figure_id: uuid.UUID, owner_id: uuid.UUID) -> dict:
+    """Deep-copy a figure the user can access into a fresh, freshly-rendered copy.
+
+    The new figure is owned by ``owner_id`` and re-uses the source's current
+    version mapping/options/style_preset/plot_type; a real render produces the
+    new current version. Project write permission is enforced when the source
+    lives in a project (via get_figure(write=True)).
+    """
+    owner = db.query(User).filter(User.id == owner_id).first()
+    if owner:
+        enforce_render_quota(db, owner)
+    src = get_figure(db, figure_id, owner_id, write=True)
+    base = _current_or_latest_version(src)
+    if base is None:
+        raise BadRequestError("Figure has no version to duplicate", error_code="NO_VERSION")
+
+    plot_type = src.plot_type
+    preset = base.style_preset if base.style_preset in PRESETS else (
+        src.style_preset if src.style_preset in PRESETS else "nature"
+    )
+    ds = ds_service.get_dataset(db, src.dataset_id, owner_id)
+    mapping = dict(base.mapping or {})
+    options = sanitize_options(plot_type, base.options or {}, _dataset_column_names(ds))
+    options = _resolve_custom_palette_options(db, owner_id, options)
+    validate_mapping(plot_type, mapping)
+    df = ds_service.load_dataframe(ds)
+
+    new_figure_id = uuid.uuid4()
+    new_version_id = uuid.uuid4()
+    res, _ = _render_into_version(df, plot_type, mapping, options, preset, new_figure_id, new_version_id)
+    next_display_order = (
+        (db.query(func.max(Figure.display_order)).filter(Figure.project_id == src.project_id).scalar() or -1) + 1
+    )
+    copy_name = (src.name or "Figure")[: 255 - len(" (copy)")] + " (copy)"
+    fig = Figure(
+        id=new_figure_id, owner_id=owner_id, dataset_id=src.dataset_id, project_id=src.project_id,
+        name=copy_name, plot_type=plot_type, style_preset=preset, status="ready",
+        current_version_id=new_version_id, display_order=next_display_order,
+        description=src.description, legend=src.legend,
+    )
+    db.add(fig)
+    db.flush()
+    version = FigureVersion(
+        id=new_version_id, figure_id=new_figure_id, version_number=1,
+        mapping=mapping, options=options or {}, style_preset=preset,
+        r_code=res.r_code, change_note=f"Duplicated from '{src.name}'",
+        png_path=res.outputs.get("png"), svg_path=res.outputs.get("svg"),
+        tiff_path=res.outputs.get("tiff"), pdf_path=res.outputs.get("pdf"),
+        eps_path=res.outputs.get("eps"),
+        html_path=res.outputs.get("html"),
+        r_path=res.outputs.get("r"), render_log=res.log,
+    )
+    db.add(version)
+    db.flush()
+    _archive_code_artifact(db, owner_id, ds, fig, version, res)
+    db.commit()
+    return figure_detail(db, new_figure_id, owner_id)
+
+
+def bulk_apply_style(db: Session, source_figure_id: uuid.UUID,
+                     target_figure_ids: list[uuid.UUID], owner_id: uuid.UUID) -> dict:
+    """Copy STYLE-ONLY options + style_preset from a source figure to each target.
+
+    Each target is re-rendered into a new version. Targets not owned by the user
+    (or missing / unrenderable) are skipped. Capped at 20 targets by the schema.
+    Renders are committed per-target so one failure does not discard the rest.
+    """
+    src = get_figure(db, source_figure_id, owner_id)
+    src_base = _current_or_latest_version(src)
+    if src_base is None:
+        raise BadRequestError("Source figure has no version to copy style from", error_code="NO_VERSION")
+    src_options = src_base.options or {}
+    src_preset = src_base.style_preset if src_base.style_preset in PRESETS else (
+        src.style_preset if src.style_preset in PRESETS else "nature"
+    )
+    style_patch = {k: v for k, v in src_options.items() if k in _BULK_STYLE_OPTION_KEYS}
+
+    updated: list[uuid.UUID] = []
+    skipped: list[uuid.UUID] = []
+    seen: set[uuid.UUID] = set()
+    for target_id in target_figure_ids:
+        if target_id in seen:
+            continue
+        seen.add(target_id)
+        if target_id == source_figure_id:
+            skipped.append(target_id)
+            continue
+        try:
+            tgt = get_figure(db, target_id, owner_id)
+        except NotFoundError:
+            skipped.append(target_id)
+            continue
+        if tgt.owner_id != owner_id:
+            skipped.append(target_id)
+            continue
+        tgt_base = _current_or_latest_version(tgt)
+        if tgt_base is None:
+            skipped.append(target_id)
+            continue
+        try:
+            plot_type = tgt.plot_type
+            mapping = tgt_base.mapping or {}
+            validate_mapping(plot_type, mapping)
+            ds = ds_service.get_dataset(db, tgt.dataset_id, owner_id)
+            merged = {**(tgt_base.options or {}), **style_patch}
+            options = sanitize_options(plot_type, merged, _dataset_column_names(ds))
+            options = _resolve_custom_palette_options(db, owner_id, options)
+            df = ds_service.load_dataframe(ds)
+            next_num = (db.query(func.max(FigureVersion.version_number))
+                        .filter(FigureVersion.figure_id == target_id).scalar() or 0) + 1
+            new_version_id = uuid.uuid4()
+            res, _ = _render_into_version(df, plot_type, mapping, options, src_preset, target_id, new_version_id)
+            version = FigureVersion(
+                id=new_version_id, figure_id=target_id, version_number=next_num,
+                mapping=mapping, options=options or {}, style_preset=src_preset,
+                r_code=res.r_code, change_note="Bulk style applied",
+                png_path=res.outputs.get("png"), svg_path=res.outputs.get("svg"),
+                tiff_path=res.outputs.get("tiff"), pdf_path=res.outputs.get("pdf"),
+                eps_path=res.outputs.get("eps"),
+                html_path=res.outputs.get("html"),
+                r_path=res.outputs.get("r"), render_log=res.log,
+            )
+            db.add(version)
+            tgt.current_version_id = new_version_id
+            tgt.style_preset = src_preset
+            tgt.status = "ready"
+            db.flush()
+            _archive_code_artifact(db, owner_id, ds, tgt, version, res)
+            db.commit()
+            updated.append(target_id)
+        except Exception:
+            db.rollback()
+            skipped.append(target_id)
+    return {"updated": updated, "skipped": skipped}
 
 
 def save_svg_edit(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, owner_id: uuid.UUID,
@@ -1598,6 +1778,7 @@ def save_svg_edit(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, owne
         mapping=base.mapping or {}, options=options, style_preset=base.style_preset,
         r_code=r_code, change_note=(change_note or "Manual SVG edit"),
         png_path=None, svg_path=svg_path, tiff_path=None, pdf_path=None, eps_path=None,
+        html_path=None,
         r_path=r_path, render_log="Manual SVG edit saved from vector editor.",
     )
     db.add(version)
@@ -1649,7 +1830,7 @@ def delete_figure_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UU
     if not remaining:
         raise BadRequestError("A figure must keep at least one version", error_code="LAST_VERSION")
 
-    file_refs = [version.png_path, version.svg_path, version.tiff_path, version.pdf_path, version.eps_path, version.r_path]
+    file_refs = [version.png_path, version.svg_path, version.tiff_path, version.pdf_path, version.eps_path, version.html_path, version.r_path]
     version_dir = os.path.join(settings.figures_dir, str(figure_id), str(version_id))
 
     if fig.current_version_id == version_id:
@@ -1896,6 +2077,112 @@ def _known_mapping_values(mapping: dict[str, Any]) -> set[str]:
     return values
 
 
+_ANNOTATION_KINDS = {"text", "arrow", "rect", "bracket"}
+# Required coordinate fields per annotation kind (see contract in task/frontend).
+_ANNOTATION_REQUIRED_COORDS = {
+    "text": ("x", "y"),
+    "bracket": ("x", "y", "x2"),
+    "arrow": ("x", "y", "x2", "y2"),
+    "rect": ("x", "y", "x2", "y2"),
+}
+_SERIES_LINETYPES = {"solid", "dashed", "dotted", "dotdash", "longdash"}
+_SERIES_SHAPES = {"circle", "square", "triangle", "diamond"}
+
+
+def _clean_hex(value: Any) -> str | None:
+    """Return an upper-cased #RRGGBB hex color, or None if not a valid hex."""
+    if not isinstance(value, str):
+        return None
+    color = value.strip().upper()
+    return color if _HEX_COLOR_RE.fullmatch(color) else None
+
+
+def _sanitize_annotations(value: Any) -> list[dict[str, Any]] | None:
+    """Strictly sanitize the free-form ``annotations`` overlay list.
+
+    Anything not matching the known shape is dropped (never passed through).
+    Returns a cleaned list of dicts with only validated known fields, capped at
+    30 elements. Empty result -> None (drops the key).
+    """
+    if not isinstance(value, list):
+        return None
+    cleaned: list[dict[str, Any]] = []
+    for item in value:
+        if len(cleaned) >= 30:
+            break
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("kind")
+        if not isinstance(kind, str) or kind not in _ANNOTATION_KINDS:
+            continue
+        # Coerce coordinates via float(); drop non-finite / non-numeric.
+        coords: dict[str, float] = {}
+        for coord_key in ("x", "y", "x2", "y2"):
+            if coord_key not in item:
+                continue
+            try:
+                num = float(item[coord_key])
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(num):
+                coords[coord_key] = num
+        required = _ANNOTATION_REQUIRED_COORDS[kind]
+        if any(rk not in coords for rk in required):
+            continue
+        entry: dict[str, Any] = {"kind": kind, **coords}
+        for text_key in ("text", "label"):
+            raw_text = item.get(text_key)
+            if isinstance(raw_text, str):
+                stripped = raw_text.strip()
+                if stripped:
+                    entry[text_key] = stripped[:200]
+        if "size" in item:
+            try:
+                size_num = float(item["size"])
+            except (TypeError, ValueError):
+                size_num = None
+            if size_num is not None and math.isfinite(size_num):
+                entry["size"] = max(1.0, min(20.0, size_num))
+        color = _clean_hex(item.get("color"))
+        if color is not None:
+            entry["color"] = color
+        cleaned.append(entry)
+    return cleaned or None
+
+
+def _sanitize_series_styles(value: Any) -> dict[str, dict[str, Any]] | None:
+    """Strictly sanitize the ``series_styles`` mapping (series name -> style).
+
+    Keys are capped to 120 chars; each style keeps only a hex ``color``, a
+    known ``linetype`` and a known ``shape``. Entries that end up empty are
+    dropped, and the whole dict is capped at 30 entries. Empty -> None.
+    """
+    if not isinstance(value, dict):
+        return None
+    cleaned: dict[str, dict[str, Any]] = {}
+    for raw_name, raw_style in value.items():
+        if len(cleaned) >= 30:
+            break
+        if not isinstance(raw_style, dict):
+            continue
+        name = str(raw_name).strip()[:120]
+        if not name:
+            continue
+        inner: dict[str, Any] = {}
+        color = _clean_hex(raw_style.get("color"))
+        if color is not None:
+            inner["color"] = color
+        linetype = raw_style.get("linetype")
+        if isinstance(linetype, str) and linetype in _SERIES_LINETYPES:
+            inner["linetype"] = linetype
+        shape = raw_style.get("shape")
+        if isinstance(shape, str) and shape in _SERIES_SHAPES:
+            inner["shape"] = shape
+        if inner:
+            cleaned[name] = inner
+    return cleaned or None
+
+
 def _sanitize_option(key: str, value: Any, valid_columns: set[str] | None = None) -> Any:
     if key in {"x_label", "y_label"} and value == "":
         return ""
@@ -1935,9 +2222,13 @@ def _sanitize_option(key: str, value: Any, valid_columns: set[str] | None = None
         if not isinstance(value, str):
             return None
         color = value.strip().upper()
-        if re.fullmatch(r"#[0-9A-F]{6}", color):
+        if _HEX_COLOR_RE.fullmatch(color):
             return color
         return None
+    if key == "annotations":
+        return _sanitize_annotations(value)
+    if key == "series_styles":
+        return _sanitize_series_styles(value)
     if value in (None, ""):
         return None
     if key in {"facet_by", "y2_column"}:
@@ -1999,6 +2290,14 @@ def _sanitize_option(key: str, value: Any, valid_columns: set[str] | None = None
             return max(0, min(90, num))
         if key in {"width_in", "height_in"}:
             return max(1.0, min(20.0, num))
+        if key in {"x_breaks", "y_breaks"}:
+            # Desired number of axis ticks: small integer range.
+            return int(max(2, min(20, num)))
+        if key == "legend_ncol":
+            return int(max(1, min(8, num)))
+        if key == "legend_key_size":
+            # Legend key size in points.
+            return max(4.0, min(40.0, num))
         # color_midpoint, hline_at, vline_at and any other finite numbers.
         return num
     if isinstance(value, str):
@@ -2200,6 +2499,7 @@ _EXPORT = {
     "tiff": ("tiff_path", "image/tiff", "tiff"),
     "pdf": ("pdf_path", "application/pdf", "pdf"),
     "eps": ("eps_path", "application/postscript", "eps"),
+    "html": ("html_path", "text/html", "html"),
     "r": ("r_path", "text/plain", "R"),
 }
 

@@ -16,6 +16,8 @@ from app.figures.schemas import (
     ComplianceReport,
     EnhancePromptRequest,
     EnhancePromptResponse,
+    FigureBulkStyleRequest,
+    FigureBulkStyleResponse,
     FigureCodeResponse,
     FigureCommentCreate,
     FigureCommentItem,
@@ -133,6 +135,27 @@ def reorder_figures(data: FigureReorderRequest, db: Session = Depends(get_db), c
     return service.reorder_figures(db, current_user.id, data.figure_ids)
 
 
+@router.post("/bulk-style", response_model=FigureBulkStyleResponse,
+             dependencies=[Depends(rate_limit("figure_bulk_style", 30, 3600))])
+def bulk_style(data: FigureBulkStyleRequest, request: Request,
+               db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    result = service.bulk_apply_style(db, data.source_figure_id, data.target_figure_ids, current_user.id)
+    audit_service.log_event(
+        db,
+        actor_id=current_user.id,
+        action="figure.bulk_style",
+        target_type="figure",
+        target_id=data.source_figure_id,
+        metadata={
+            "updated": [str(x) for x in result["updated"]],
+            "skipped": [str(x) for x in result["skipped"]],
+        },
+        request=request,
+    )
+    db.commit()
+    return result
+
+
 @router.get("/gallery", response_model=list[GalleryFigureItem])
 def gallery(limit: int = 200, db: Session = Depends(get_db), _: User = Depends(get_current_user)):
     return service.list_gallery_figures(db, limit=limit)
@@ -159,6 +182,24 @@ def gallery_export(figure_id: uuid.UUID, version_id: uuid.UUID, format: str = "r
 @router.get("/{figure_id}", response_model=FigureDetail)
 def get_figure(figure_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     return service.figure_detail(db, figure_id, current_user.id)
+
+
+@router.post("/{figure_id}/duplicate", response_model=FigureDetail, status_code=201,
+             dependencies=[Depends(rate_limit("figure_duplicate", 60, 3600))])
+def duplicate_figure(figure_id: uuid.UUID, request: Request,
+                     db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    detail = service.duplicate_figure(db, figure_id, current_user.id)
+    audit_service.log_event(
+        db,
+        actor_id=current_user.id,
+        action="figure.duplicate",
+        target_type="figure",
+        target_id=detail["id"],
+        metadata={"source_figure_id": str(figure_id), "version_id": detail.get("current_version_id")},
+        request=request,
+    )
+    db.commit()
+    return detail
 
 
 @router.patch("/{figure_id}", response_model=FigureDetail)

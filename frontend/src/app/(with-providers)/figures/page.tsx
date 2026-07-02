@@ -4,16 +4,19 @@ import { useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { deleteFigureTemplateFavorite, listFigures, deleteFigure, saveFigureTemplateFavorite, updateFigure } from '@/lib/api';
+import { bulkStyleFigures, deleteFigureTemplateFavorite, duplicateFigure, listFigures, deleteFigure, saveFigureTemplateFavorite, updateFigure } from '@/lib/api';
 import { AppHeader } from '@/components/layout/AppHeader';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { AlertTriangle, Check, Images, Loader2, Pencil, RotateCcw, Search, SearchX, Star, Trash2, X } from 'lucide-react';
+import { AlertTriangle, Check, Copy, Images, ListChecks, Loader2, Palette, Pencil, RotateCcw, Search, SearchX, Star, Trash2, X } from 'lucide-react';
 import { formatStylePreset } from '@/lib/style-presets';
+
+const MAX_BULK_TARGETS = 20;
 
 type SortKey = 'saved' | 'name' | 'newest' | 'oldest';
 const SORT_LABELS: Record<SortKey, string> = {
@@ -29,6 +32,9 @@ export default function FiguresPage() {
   const [editingName, setEditingName] = useState('');
   const [search, setSearch] = useState('');
   const [sort, setSort] = useState<SortKey>('saved');
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [styleSourceId, setStyleSourceId] = useState('');
   const { data: figures, isLoading, isError, error, refetch } = useQuery({ queryKey: ['figures'], queryFn: () => listFigures() });
 
   const visibleFigures = useMemo(() => {
@@ -59,6 +65,22 @@ export default function FiguresPage() {
     },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Rename failed'),
   });
+  const duplicate = useMutation({
+    mutationFn: duplicateFigure,
+    onSuccess: () => { toast.success('Duplicated'); qc.invalidateQueries({ queryKey: ['figures'] }); },
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Duplicate failed'),
+  });
+  const bulkStyle = useMutation({
+    mutationFn: ({ sourceId, targetIds }: { sourceId: string; targetIds: string[] }) => bulkStyleFigures(sourceId, targetIds),
+    onSuccess: (res) => {
+      const parts = [`${res.updated.length} applied`];
+      if (res.skipped.length) parts.push(`${res.skipped.length} skipped`);
+      toast.success(`Style copied — ${parts.join(', ')}`);
+      qc.invalidateQueries({ queryKey: ['figures'] });
+      exitSelectMode();
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Copy style failed'),
+  });
   const favorite = useMutation({
     mutationFn: async ({ id, next }: { id: string; next: boolean }) => {
       if (next) {
@@ -80,6 +102,24 @@ export default function FiguresPage() {
     setEditingId(id);
     setEditingName(name);
   }
+
+  function exitSelectMode() {
+    setSelectMode(false);
+    setSelectedIds(new Set());
+    setStyleSourceId('');
+  }
+
+  function toggleSelected(id: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  const selectedCount = selectedIds.size;
+  const tooManyTargets = selectedCount > MAX_BULK_TARGETS;
 
   function submitRename(id: string, fallbackName: string) {
     const name = editingName.trim();
@@ -116,18 +156,63 @@ export default function FiguresPage() {
                 <Label htmlFor="figures-search" className="sr-only">Search figures</Label>
                 <Input id="figures-search" type="search" placeholder="Search figures…" className="pl-8" value={search} onChange={(e) => setSearch(e.target.value)} />
               </div>
-              <Select value={sort} onValueChange={(value) => setSort(value as SortKey)}>
-                <SelectTrigger id="figures-sort" size="sm" aria-label="Sort figures" className="w-[160px]">
-                  <SelectValue>{(value) => SORT_LABELS[value as SortKey] ?? SORT_LABELS.saved}</SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="saved">Saved order</SelectItem>
-                  <SelectItem value="name">Name A–Z</SelectItem>
-                  <SelectItem value="newest">Newest</SelectItem>
-                  <SelectItem value="oldest">Oldest</SelectItem>
-                </SelectContent>
-              </Select>
+              <div className="flex items-center gap-2">
+                <Select value={sort} onValueChange={(value) => setSort(value as SortKey)}>
+                  <SelectTrigger id="figures-sort" size="sm" aria-label="Sort figures" className="w-[160px]">
+                    <SelectValue>{(value) => SORT_LABELS[value as SortKey] ?? SORT_LABELS.saved}</SelectValue>
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="saved">Saved order</SelectItem>
+                    <SelectItem value="name">Name A–Z</SelectItem>
+                    <SelectItem value="newest">Newest</SelectItem>
+                    <SelectItem value="oldest">Oldest</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Button
+                  type="button"
+                  variant={selectMode ? 'secondary' : 'outline'}
+                  size="sm"
+                  aria-pressed={selectMode}
+                  onClick={() => (selectMode ? exitSelectMode() : setSelectMode(true))}
+                >
+                  <ListChecks className="mr-1 h-4 w-4" /> {selectMode ? 'Done' : 'Select'}
+                </Button>
+              </div>
             </div>
+            {selectMode && (
+              <div className="mb-6 flex flex-col gap-3 rounded-lg border bg-card p-3 sm:flex-row sm:items-center sm:justify-between">
+                <p className="text-sm font-medium">
+                  {selectedCount} selected
+                  {tooManyTargets && (
+                    <span className="ml-2 text-xs font-normal text-destructive">Select {MAX_BULK_TARGETS} or fewer to copy a style</span>
+                  )}
+                </p>
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                  <Select value={styleSourceId} onValueChange={(value) => setStyleSourceId(value ?? '')}>
+                    <SelectTrigger size="sm" aria-label="Copy style from figure" className="w-full sm:w-[200px]">
+                      <SelectValue placeholder="Copy style from…" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {figures.map((f) => (
+                        <SelectItem key={f.id} value={f.id}>{f.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={!styleSourceId || selectedCount === 0 || tooManyTargets || bulkStyle.isPending}
+                    onClick={() => bulkStyle.mutate({ sourceId: styleSourceId, targetIds: [...selectedIds] })}
+                  >
+                    {bulkStyle.isPending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Palette className="mr-1 h-4 w-4" />}
+                    Apply to {selectedCount} selected
+                  </Button>
+                  <Button type="button" variant="ghost" size="sm" disabled={selectedCount === 0} onClick={() => setSelectedIds(new Set())}>
+                    Clear
+                  </Button>
+                </div>
+              </div>
+            )}
             {visibleFigures.length === 0 ? (
               <div className="rounded-lg border border-dashed p-12 text-center text-muted-foreground">
                 <SearchX className="mx-auto mb-2 h-8 w-8" /> No figures match your search.
@@ -135,7 +220,16 @@ export default function FiguresPage() {
             ) : (
               <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
                 {visibleFigures.map((f) => (
-              <Card key={f.id} className="group overflow-hidden transition hover:shadow-md">
+              <Card key={f.id} className={`group relative overflow-hidden transition hover:shadow-md ${selectMode && selectedIds.has(f.id) ? 'ring-2 ring-primary' : ''}`}>
+                {selectMode && (
+                  <label className="absolute left-2 top-2 z-10 flex cursor-pointer items-center rounded-md bg-background/90 p-1.5 shadow-sm ring-1 ring-border">
+                    <Checkbox
+                      checked={selectedIds.has(f.id)}
+                      onCheckedChange={() => toggleSelected(f.id)}
+                      aria-label={`Select ${f.name}`}
+                    />
+                  </label>
+                )}
                 <Link href={`/figures/${f.id}`}>
                   {f.thumb_url
                     ? <img src={f.thumb_url} alt={f.name} loading="lazy" decoding="async" className="aspect-[4/3] w-full bg-white object-contain" />
@@ -195,6 +289,16 @@ export default function FiguresPage() {
                       disabled={favorite.isPending}
                     >
                       <Star className={`h-4 w-4 ${f.is_favorite ? 'fill-amber-400 text-amber-500' : 'text-muted-foreground'}`} />
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      aria-label={`Duplicate ${f.name}`}
+                      onClick={() => duplicate.mutate(f.id)}
+                      disabled={duplicate.isPending}
+                    >
+                      <Copy className="h-4 w-4 text-muted-foreground" />
                     </Button>
                     <Button type="button" variant="ghost" size="sm" aria-label={`Delete ${f.name}`} onClick={() => { if (confirm(`Delete ${f.name}?`)) del.mutate(f.id); }}>
                       <Trash2 className="h-4 w-4 text-muted-foreground" />

@@ -13,14 +13,14 @@ RUN pixi run python -m ensurepip --upgrade \
 # professional-domain R packages (annotated heatmaps, networks, enrichment, etc.)
 # NOTE: slow solve; the running image is also persisted via `docker commit`.
 RUN pixi project channel add bioconda \
- && pixi add --feature r-viz r-igraph r-ggraph r-tidygraph r-ggrepel r-ggforce r-circlize bioconductor-complexheatmap
+ && pixi add --feature r-viz r-igraph r-ggraph r-tidygraph r-ggrepel r-ggforce r-circlize bioconductor-complexheatmap r-plotly r-htmlwidgets r-ggpubr r-ggtext
 
 # CJK + broad-coverage fonts so R graphics devices can render non-ASCII
 # labels (e.g. Korean column names) instead of tofu boxes. fontconfig/cairo
 # substitute these automatically for glyphs missing from the default family.
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      fontconfig fonts-noto-cjk fonts-noto-core fonts-dejavu-core \
+      fontconfig fonts-noto-cjk fonts-noto-core fonts-dejavu-core pandoc \
  && fc-cache -f \
  && rm -rf /var/lib/apt/lists/*
 

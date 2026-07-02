@@ -268,6 +268,24 @@ if (isTRUE(capabilities("cairo"))) {{
             post += f'p <- p + geom_vline(xintercept = {vline:g}, linetype = "dashed", linewidth = 0.3, colour = "grey50")\n'
         post += _facet_r(opts)
 
+    # Opt-in interactive HTML (self-contained plotly). Best-effort: wrapped in
+    # tryCatch so a missing pandoc / non-convertible plot never fails the static
+    # render. Only attempted on the standard ggplot path (p is a ggplot here).
+    # Render to a scratch name first and only promote to figure.html once the
+    # self-contained write fully succeeds. saveWidget(selfcontained = TRUE) leaves
+    # a partial, non-self-contained stub (referencing an external libs dir we do
+    # not collect) on failure -- e.g. when pandoc is missing -- so promoting only
+    # on success keeps res.outputs["html"] a valid standalone file or nothing.
+    html_export = ""
+    if opts.get("interactive_html"):
+        html_export = """
+tryCatch({
+  .ply <- plotly::ggplotly(p)
+  htmlwidgets::saveWidget(.ply, "figure_interactive.html", selfcontained = TRUE)
+  file.rename("figure_interactive.html", "figure.html")
+}, error = function(e) message("Interactive HTML export skipped: ", conditionMessage(e)))
+"""
+
     export = f"""
 .pdf_device <- if (isTRUE(capabilities("cairo"))) grDevices::cairo_pdf else grDevices::pdf
 ggsave("figure.png",  p, width = {w}, height = {h}, dpi = {dpi}, bg = {bg_r}, limitsize = FALSE)
@@ -280,11 +298,12 @@ if (isTRUE(capabilities("cairo"))) {{
     error = function(e) message("EPS export skipped: ", conditionMessage(e))
   )
 }}
-"""
+{html_export}"""
     return (head
             + theme_r(preset, color_mode, font_scale, opts.get("palette_name"),
                       opts.get("custom_palette_values"), opts.get("font_family"),
-                      bool(opts.get("transparent_background")))
+                      bool(opts.get("transparent_background")),
+                      legend_key_size=opts.get("legend_key_size"))
             + plot_r
             + theme_append
             + post
@@ -328,7 +347,7 @@ def render(plot_type: str, mapping: dict, options: dict, preset: str,
             return RenderResult(False, r_code, {}, log.strip())
 
         outputs = {}
-        for ext in ("png", "svg", "tiff", "pdf", "eps"):
+        for ext in ("png", "svg", "tiff", "pdf", "eps", "html"):
             src = os.path.join(work, f"figure.{ext}")
             if os.path.exists(src):
                 dst = os.path.join(out_dir, f"figure.{ext}")

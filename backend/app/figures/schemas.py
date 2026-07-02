@@ -48,6 +48,16 @@ class FigureReorderRequest(BaseModel):
     figure_ids: list[uuid.UUID] = Field(..., min_length=1, max_length=200)
 
 
+class FigureBulkStyleRequest(BaseModel):
+    source_figure_id: uuid.UUID
+    target_figure_ids: list[uuid.UUID] = Field(..., min_length=1, max_length=20)
+
+
+class FigureBulkStyleResponse(BaseModel):
+    updated: list[uuid.UUID] = Field(default_factory=list)
+    skipped: list[uuid.UUID] = Field(default_factory=list)
+
+
 class TemplateFavoriteRequest(BaseModel):
     source_version_id: uuid.UUID | None = None
     name: str | None = Field(default=None, max_length=255)
@@ -133,6 +143,7 @@ class VersionResponse(BaseModel):
     tiff_url: str | None = None
     pdf_url: str | None = None
     eps_url: str | None = None
+    html_url: str | None = None
     r_url: str | None = None
     # Populated when a version is produced by applying AI suggestions; empty for
     # plain rerenders / manual edits. Lets the UI show "N of M changes applied".

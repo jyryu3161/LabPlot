@@ -1,22 +1,25 @@
 'use client';
 
-import { use, useEffect, useState } from 'react';
+import { use, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import {
   getFigure, getDataset, getPlotTypes, getStyles, getPalettes, rerenderFigure, reviewVersion,
   improveVersion, applyImprovement, applyImprovements, updateFigure, generateLegend, downloadExport, enhancePrompt,
   deleteFigureVersion, getProject, saveFigureTemplateFavorite, deleteFigureTemplateFavorite, setFigureShare,
-  createCustomPalette, updateCustomPalette, deleteCustomPalette,
+  createCustomPalette, updateCustomPalette, deleteCustomPalette, duplicateFigure,
   getColumnValues, getMethodsText, getAltText,
 } from '@/lib/api';
 import type { ImproveVersionRequest } from '@/lib/api';
-import type { FigureVersion, Review, Improvement, PlotTypeDef, ColumnProfile, PaletteDef } from '@/lib/types';
+import type { FigureVersion, Review, Improvement, PlotTypeDef, ColumnProfile, PaletteDef, FigureAnnotation, SeriesStyle } from '@/lib/types';
 import { formatStylePreset } from '@/lib/style-presets';
 import { AiFigureEditor } from '@/components/figures/AiFigureEditor';
 import { FigureCodeExport } from '@/components/figures/FigureCodeExport';
 import { FigureComments } from '@/components/figures/FigureComments';
+import { FigureAnnotationEditor } from '@/components/figures/FigureAnnotationEditor';
+import { FigureSeriesStyleEditor } from '@/components/figures/FigureSeriesStyleEditor';
 import { AppHeader } from '@/components/layout/AppHeader';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -26,12 +29,34 @@ import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Slider } from '@/components/ui/slider';
 import { Switch } from '@/components/ui/switch';
-import { Loader2, Star, Download, History, Pencil, FileText, Sparkles, Trash2, Copy, ArrowUp, ArrowDown, RefreshCw } from 'lucide-react';
+import { Loader2, Star, Download, History, Pencil, FileText, Sparkles, Trash2, Copy, ArrowUp, ArrowDown, RefreshCw, Undo2, Redo2, Zap, CopyPlus } from 'lucide-react';
 
 const SCORE_COLOR = (s: number) => (s >= 80 ? 'text-green-600' : s >= 60 ? 'text-amber-600' : 'text-red-600');
 const HEX_COLOR_RE = /^#[0-9A-Fa-f]{6}$/;
 const DEFAULT_CUSTOM_COLORS = ['#4477AA', '#EE6677', '#228833', '#CCBB44'];
 const AXIS_RANGE_OPTION_KEYS = new Set(['x_min', 'x_max', 'y_min', 'y_max']);
+// Keys the generic per-type option renderer must NOT show as raw controls:
+// axis ranges (handled by the Axis-scale block) plus structured/list options
+// (annotations, series_styles) and interactive_html, each with a dedicated UI.
+const GENERIC_OPTION_EXCLUDE = new Set([
+  ...AXIS_RANGE_OPTION_KEYS, 'annotations', 'series_styles', 'interactive_html',
+]);
+const LIVE_PREVIEW_STORAGE_KEY = 'labplot-live-preview';
+const HISTORY_CAP = 50;
+
+function annotationList(value: unknown): FigureAnnotation[] {
+  return Array.isArray(value) ? (value as FigureAnnotation[]) : [];
+}
+function seriesStyleMap(value: unknown): Record<string, SeriesStyle> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return value as Record<string, SeriesStyle>;
+}
+type EditState = {
+  plotType: string;
+  mapping: Record<string, unknown>;
+  options: Record<string, unknown>;
+  style: string;
+};
 const REPRESENTATIVE_COLORS = [
   '#4477AA', '#EE6677', '#228833', '#CCBB44', '#66CCEE', '#AA3377',
   '#332288', '#88CCEE', '#44AA99', '#117733', '#DDCC77', '#CC6677',
@@ -177,6 +202,7 @@ function distinctColumnLevels(values: string[] | undefined, profile: ColumnProfi
 export default function FigureDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const qc = useQueryClient();
+  const router = useRouter();
   const { data: fig, isLoading } = useQuery({ queryKey: ['figure', id], queryFn: () => getFigure(id) });
   const { data: stylesData } = useQuery({ queryKey: ['styles'], queryFn: getStyles });
   const { data: plotTypesData } = useQuery({ queryKey: ['plot-types'], queryFn: getPlotTypes });
@@ -205,6 +231,17 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
   const [methodsText, setMethodsText] = useState<string | null>(null);
   const [altText, setAltText] = useState<string | null>(null);
 
+  // Live preview (debounced auto-rerender) + client-side edit history (undo/redo).
+  const [livePreview, setLivePreview] = useState(false);
+  const [history, setHistory] = useState<{ stack: { sig: string; state: EditState }[]; index: number }>({ stack: [], index: -1 });
+  const liveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastRenderedSigRef = useRef<string | null>(null);
+  const renderStartSigRef = useRef<string | null>(null);
+  const editSignatureRef = useRef<string>('');
+  const isUndoRedoRef = useRef(false);
+  const historyRef = useRef(history);
+  historyRef.current = history;
+
   const plotTypes = plotTypesData?.plot_types ?? [];
   const styles = stylesData?.styles ?? [];
   const palettes = palettesData?.palettes ?? [];
@@ -221,7 +258,7 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
   const descriptionValue = description ?? fig?.description ?? '';
   const legendValue = legend ?? fig?.legend ?? '';
   const currentDef: PlotTypeDef | undefined = plotTypes.find((p) => p.type === effectivePlotType);
-  const editablePlotOptions = (currentDef?.options ?? []).filter((option) => !AXIS_RANGE_OPTION_KEYS.has(option.key));
+  const editablePlotOptions = (currentDef?.options ?? []).filter((option) => !GENERIC_OPTION_EXCLUDE.has(option.key));
   const continuousFill = isContinuousFill(effectivePlotType);
   const categoryColors = normalizedCategoryColors(effectiveOptions.category_colors);
   const categoryColorColumnName = categoryColorColumn(effectivePlotType, effectiveMapping, effectiveOptions);
@@ -249,6 +286,18 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
     || (description !== null && description !== (fig?.description ?? ''))
     || (legend !== null && legend !== (fig?.legend ?? '')),
   );
+  // Render-relevant edits only (excludes notes/legend which have their own save).
+  const hasRenderEdits = Boolean(
+    mapping !== null || options !== null
+    || (plotType !== null && plotType !== fig?.plot_type)
+    || (style !== null && style !== fig?.style_preset),
+  );
+  // Stable signature of the current editable render state; drives both the
+  // debounced live-preview trigger and the undo/redo history.
+  const editSignature = JSON.stringify({
+    plotType: effectivePlotType, mapping: effectiveMapping, options: effectiveOptions, style: effectiveStyle,
+  });
+  editSignatureRef.current = editSignature;
 
   function resetEditDrafts() {
     setPlotType(null); setMapping(null); setOptions(null); setStyle(null);
@@ -257,6 +306,28 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
     mutationFn: () => rerenderFigure(id, { plot_type: effectivePlotType, mapping: effectiveMapping, options: effectiveOptions, style_preset: effectiveStyle, change_note: 'Edited in figure editor' }),
     onSuccess: (v) => { toast.success(`Re-rendered (v${v.version_number})`); setSelectedVid(v.id); setReview(null); setImprovements(null); resetEditDrafts(); qc.invalidateQueries({ queryKey: ['figure', id] }); qc.invalidateQueries({ queryKey: ['figures'] }); },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Render failed'),
+  });
+  // Debounced live-preview render. Unlike `apply` it stays quiet (no toast) and
+  // only clears the drafts when no further edits arrived while it was in flight
+  // (so keystrokes made mid-render are not lost).
+  const livePreviewMut = useMutation({
+    mutationFn: () => rerenderFigure(id, { plot_type: effectivePlotType, mapping: effectiveMapping, options: effectiveOptions, style_preset: effectiveStyle, change_note: 'Live preview' }),
+    onSuccess: (v) => {
+      setSelectedVid(v.id); setReview(null); setImprovements(null);
+      qc.invalidateQueries({ queryKey: ['figure', id] });
+      qc.invalidateQueries({ queryKey: ['figures'] });
+      if (renderStartSigRef.current === editSignatureRef.current) resetEditDrafts();
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Live preview failed'),
+  });
+  const duplicateMut = useMutation({
+    mutationFn: () => duplicateFigure(id),
+    onSuccess: (newFig) => {
+      toast.success('Figure duplicated');
+      qc.invalidateQueries({ queryKey: ['figures'] });
+      router.push(`/figures/${newFig.id}`);
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Duplicate failed'),
   });
   const runReview = useMutation({
     mutationFn: () => reviewVersion(id, effectiveSelectedVid!),
@@ -449,6 +520,91 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
     return () => window.removeEventListener('beforeunload', handler);
   }, [hasUnsavedEdits]);
 
+  // Restore the persisted live-preview preference once on mount.
+  useEffect(() => {
+    try {
+      if (localStorage.getItem(LIVE_PREVIEW_STORAGE_KEY) === '1') setLivePreview(true);
+    } catch { /* localStorage unavailable */ }
+  }, []);
+  function toggleLivePreview(next: boolean) {
+    setLivePreview(next);
+    try { localStorage.setItem(LIVE_PREVIEW_STORAGE_KEY, next ? '1' : '0'); } catch { /* ignore */ }
+  }
+
+  // Client-side edit history: push a new entry whenever the editable render
+  // signature changes (unless the change came from an undo/redo). Capped at
+  // HISTORY_CAP; the redo tail is truncated when a fresh edit is committed.
+  useEffect(() => {
+    if (!fig) return;
+    if (isUndoRedoRef.current) { isUndoRedoRef.current = false; return; }
+    setHistory((h) => {
+      const cur = h.stack[h.index];
+      if (cur && cur.sig === editSignature) return h;
+      const state: EditState = { plotType: effectivePlotType, mapping: effectiveMapping, options: effectiveOptions, style: effectiveStyle };
+      const truncated = h.stack.slice(0, h.index + 1);
+      truncated.push({ sig: editSignature, state });
+      const capped = truncated.slice(-HISTORY_CAP);
+      return { stack: capped, index: capped.length - 1 };
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editSignature, Boolean(fig)]);
+
+  function applyEditState(s: EditState) {
+    isUndoRedoRef.current = true;
+    setPlotType(s.plotType);
+    setMapping(s.mapping);
+    setOptions(s.options);
+    setStyle(s.style);
+  }
+  const canUndo = history.index > 0;
+  const canRedo = history.index >= 0 && history.index < history.stack.length - 1;
+  function undo() {
+    const h = historyRef.current;
+    if (h.index <= 0) return;
+    applyEditState(h.stack[h.index - 1].state);
+    setHistory((cur) => ({ ...cur, index: Math.max(0, cur.index - 1) }));
+  }
+  function redo() {
+    const h = historyRef.current;
+    if (h.index >= h.stack.length - 1) return;
+    applyEditState(h.stack[h.index + 1].state);
+    setHistory((cur) => ({ ...cur, index: Math.min(cur.stack.length - 1, cur.index + 1) }));
+  }
+
+  // Ctrl/Cmd+Z / Ctrl/Cmd+Shift+Z — scoped so it never steals undo from an
+  // active text field (inputs, textareas, selects, contentEditable).
+  useEffect(() => {
+    if (!canEditFigure) return;
+    const handler = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'z') return;
+      const el = document.activeElement as HTMLElement | null;
+      const tag = el?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el?.isContentEditable) return;
+      e.preventDefault();
+      if (e.shiftKey) redo(); else undo();
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canEditFigure]);
+
+  // Debounced live-preview trigger. Fires 700ms after the last edit; while a
+  // render is in flight the effect re-runs on settle and reschedules if newer
+  // edits are pending, guaranteeing convergence to the latest edited state.
+  useEffect(() => {
+    if (!livePreview || !canEditFigure || !hasRenderEdits) return;
+    if (editSignature === lastRenderedSigRef.current) return;
+    if (livePreviewMut.isPending || apply.isPending) return; // will re-run when the flag flips
+    if (liveTimerRef.current) clearTimeout(liveTimerRef.current);
+    liveTimerRef.current = setTimeout(() => {
+      renderStartSigRef.current = editSignatureRef.current;
+      lastRenderedSigRef.current = editSignatureRef.current;
+      livePreviewMut.mutate();
+    }, 700);
+    return () => { if (liveTimerRef.current) clearTimeout(liveTimerRef.current); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editSignature, livePreview, canEditFigure, hasRenderEdits, livePreviewMut.isPending, apply.isPending]);
+
   function confirmLeave(event: React.MouseEvent) {
     if (hasUnsavedEdits && !window.confirm('You have unsaved figure edits. Leave this page and discard them?')) {
       event.preventDefault();
@@ -550,6 +706,27 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
     setNewCategoryColorLevel('');
   }
 
+  function setAnnotations(next: FigureAnnotation[]) {
+    const nextOptions = { ...effectiveOptions };
+    if (next.length) nextOptions.annotations = next;
+    else delete nextOptions.annotations;
+    setOptions(nextOptions);
+  }
+
+  function setSeriesStyles(next: Record<string, SeriesStyle>) {
+    const nextOptions = { ...effectiveOptions };
+    if (Object.keys(next).length) nextOptions.series_styles = next;
+    else delete nextOptions.series_styles;
+    setOptions(nextOptions);
+  }
+
+  function setInteractiveHtml(enabled: boolean) {
+    const nextOptions = { ...effectiveOptions };
+    if (enabled) nextOptions.interactive_html = true;
+    else delete nextOptions.interactive_html;
+    setOptions(nextOptions);
+  }
+
   if (isLoading || !fig) {
     return (<div className="min-h-screen bg-muted/20"><AppHeader /><div className="flex justify-center py-20"><Loader2 className="h-6 w-6 animate-spin" /></div></div>);
   }
@@ -580,6 +757,19 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
             <Star className={`h-4 w-4 ${fig.is_favorite ? 'fill-amber-400 text-amber-500' : 'text-muted-foreground'}`} />
             {fig.is_favorite ? 'Saved template' : 'Save as template'}
           </Button>
+          {canEditFigure && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => duplicateMut.mutate()}
+              disabled={duplicateMut.isPending}
+              aria-label="Duplicate this figure"
+            >
+              {duplicateMut.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <CopyPlus className="h-4 w-4" />}
+              Duplicate
+            </Button>
+          )}
           {canEditFigure && (
             <div className="ml-auto flex items-center gap-2 rounded-md border px-3 py-1.5">
               <Label htmlFor="publish-gallery" className="cursor-pointer text-sm text-muted-foreground">Publish to gallery</Label>
@@ -678,6 +868,29 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
                 )}
                 <FigureCodeExport figureId={id} versionId={effectiveSelectedVid} />
                 {exportFormats.length === 0 && <p className="text-sm text-muted-foreground">No export files available for this version.</p>}
+                {/* interactive HTML (plotly-style) — produced on the next re-render */}
+                <div className="w-full space-y-1.5 rounded-md border bg-muted/20 p-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Label htmlFor="interactive-html" className="cursor-pointer text-xs">Interactive HTML</Label>
+                    <Switch
+                      id="interactive-html"
+                      checked={Boolean(effectiveOptions.interactive_html)}
+                      onCheckedChange={setInteractiveHtml}
+                      disabled={!canEditFigure}
+                      aria-label="Generate an interactive HTML version on the next re-render"
+                    />
+                    {version?.html_url && (
+                      <Button variant="outline" size="sm" onClick={() => doExport('html')}>
+                        <Download className="mr-1 h-4 w-4" /> Download HTML
+                      </Button>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-muted-foreground">
+                    {version?.html_url
+                      ? 'An interactive HTML version is available for this figure.'
+                      : 'Enable and re-render to generate an interactive HTML version.'}
+                  </p>
+                </div>
               </CardContent>
             </Card>
 
@@ -783,6 +996,30 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
                   <p className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">Viewer access is read-only. You can download existing exports, but changing mappings, options, or versions requires editor access.</p>
                 ) : (
                   <>
+                    {/* live preview + undo/redo toolbar */}
+                    <div className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/20 px-2 py-1.5">
+                      <div className="flex items-center gap-1.5">
+                        <Zap className={`h-3.5 w-3.5 ${livePreview ? 'text-amber-500' : 'text-muted-foreground'}`} />
+                        <Label htmlFor="live-preview" className="cursor-pointer text-xs">Live preview</Label>
+                        <Switch
+                          id="live-preview"
+                          checked={livePreview}
+                          onCheckedChange={toggleLivePreview}
+                          aria-label="Auto re-render on every change"
+                        />
+                      </div>
+                      {livePreview && livePreviewMut.isPending && (
+                        <span className="flex items-center gap-1 text-[11px] text-muted-foreground"><Loader2 className="h-3 w-3 animate-spin" /> updating…</span>
+                      )}
+                      <div className="ml-auto flex items-center gap-1">
+                        <Button type="button" variant="ghost" size="icon-xs" aria-label="Undo (Ctrl+Z)" title="Undo (Ctrl+Z)" disabled={!canUndo} onClick={undo}>
+                          <Undo2 className="h-3.5 w-3.5" />
+                        </Button>
+                        <Button type="button" variant="ghost" size="icon-xs" aria-label="Redo (Ctrl+Shift+Z)" title="Redo (Ctrl+Shift+Z)" disabled={!canRedo} onClick={redo}>
+                          <Redo2 className="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                    </div>
                     <div className="space-y-1">
                       <Label>Chart type</Label>
                       <select className="w-full rounded-md border px-3 py-2 text-sm" value={effectivePlotType} onChange={(e) => selectPlotType(e.target.value)}>
@@ -1073,6 +1310,15 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
                         )}
                       </div>
                       )}
+                      {/* per-series styling (only when a group/color column is mapped) */}
+                      {categoryColorColumnName && (
+                        <FigureSeriesStyleEditor
+                          value={seriesStyleMap(effectiveOptions.series_styles)}
+                          onChange={setSeriesStyles}
+                          seriesNames={distinctLevels}
+                          columnName={categoryColorColumnName}
+                        />
+                      )}
                       {/* opacity (universal) */}
                       <div className="grid grid-cols-2 gap-3">
                         <div className="space-y-1">
@@ -1101,6 +1347,8 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
                           <Input id="vline-at" type="number" step="any" className="text-sm" value={numericOptionValue(effectiveOptions.vline_at)} onChange={(e) => setOptions(updateNumericOption(effectiveOptions, 'vline_at', e.target.value))} placeholder="none" />
                         </div>
                       </div>
+                      {/* annotations (universal) */}
+                      <FigureAnnotationEditor value={annotationList(effectiveOptions.annotations)} onChange={setAnnotations} />
                       {/* split into panels / faceting (universal) */}
                       <div className="space-y-2 rounded-md border bg-muted/20 p-2">
                         <Label htmlFor="facet-by" className="text-xs">Split into panels by…</Label>

@@ -142,9 +142,36 @@ def journal_spec(preset: str | None) -> dict:
 # Distinguishable greyscale ramp for print/monochrome figures
 _GREYS = ["#1a1a1a", "#666666", "#999999", "#cccccc", "#4d4d4d", "#808080", "#b3b3b3", "#000000"]
 
-# Allow-listed base font families -> R element_text(family = ...) value.
-# "sans" maps to "" (ggplot default) so default output is unchanged.
-_FONT_FAMILIES = {"sans": "", "serif": "serif", "mono": "mono"}
+# Allow-listed font families -> R element_text(family = ...) value.
+#
+# Keys are a stable allow-list; the value is the exact fontconfig family name
+# passed to R. Any user-supplied value not present here falls back to "" (the
+# ggplot/device default), so no untrusted string ever reaches R. Every non-empty
+# target below was verified to resolve to a REAL installed face (not a silent
+# default fallback) via `fc-match "<name>"` inside the backend container:
+#
+#   DejaVu Sans   -> DejaVuSans.ttf  "DejaVu Sans"   (metric-ish Helvetica/Arial)
+#   DejaVu Serif  -> DejaVuSerif.ttf "DejaVu Serif"  (Times substitute)
+#   Noto Sans     -> NotoSans-Regular.ttf  "Noto Sans"
+#   Noto Serif    -> NotoSerif-Regular.ttf "Noto Serif"
+#
+# NOTE: "Nimbus Sans"/"Nimbus Roman" are NOT installed in this image (fc-match
+# falls back to DejaVu), so Helvetica/Arial/Times are mapped to the DejaVu faces
+# that actually resolve. "sans" stays "" so default output is byte-for-byte
+# unchanged; "serif"/"mono" keep the R generic families for back-compat.
+_FONT_FAMILIES = {
+    "sans": "",                 # ggplot default sans (unchanged default output)
+    "serif": "serif",           # R generic serif (back-compat)
+    "mono": "mono",             # R generic mono (back-compat)
+    "helvetica": "DejaVu Sans",  # metric-compatible sans
+    "arial": "DejaVu Sans",      # metric-compatible sans
+    "times": "DejaVu Serif",     # Times substitute
+    "noto_sans": "Noto Sans",
+    "noto_serif": "Noto Serif",
+}
+
+# Allow-listed font family keys (for callers/sanitizers that need the choice set).
+FONT_FAMILIES = tuple(_FONT_FAMILIES.keys())
 
 # Named discrete palettes the user can pick by name (verified hex). Overrides the
 # preset palette when set. Curated for scientific figures; cb = colorblind-safe.
@@ -178,10 +205,20 @@ def list_palettes(custom_palettes: list[dict] | None = None) -> list[dict]:
 
 def theme_r(preset: str, color_mode: str = "color", font_scale: float = 1.0,
             palette_name: str | None = None, custom_palette_values: list[str] | None = None,
-            font_family: str | None = None, transparent_background: bool = False) -> str:
+            font_family: str | None = None, transparent_background: bool = False,
+            legend_key_size: float | None = None) -> str:
     cfg = _BASE.get(preset, _BASE["nature"])
     fam = _FONT_FAMILIES.get(font_family or "sans", "")
     family_arg = f', family = "{fam}"' if fam else ""
+    # Legend key size (theme-level). Numeric-coerced + clamped to a sane pt range
+    # so no untrusted value reaches R; None leaves the theme default untouched.
+    legend_key_line = ""
+    if legend_key_size is not None:
+        try:
+            lk = max(4.0, min(40.0, float(legend_key_size)))
+            legend_key_line = f'legend.key.size = grid::unit({lk:g}, "pt"),\n    '
+        except (TypeError, ValueError):
+            legend_key_line = ""
     if color_mode == "grayscale":
         pal = _GREYS
     elif palette_name and (palette_name == "custom" or palette_name.startswith("custom:")) and custom_palette_values:
@@ -231,7 +268,7 @@ labplot_theme <- function() {{
     axis.ticks = element_line(colour = "black", linewidth = 0.35),
     axis.ticks.length = grid::unit(2.2, "pt"),
     legend.position = "right",
-    legend.title = element_text(face = "bold", colour = "black", size = {size}),
+    {legend_key_line}legend.title = element_text(face = "bold", colour = "black", size = {size}),
     legend.text = element_text(colour = "black", size = {size}),
     legend.key = element_blank(),
     strip.text = element_text(face = "bold", colour = "black", size = {size}),

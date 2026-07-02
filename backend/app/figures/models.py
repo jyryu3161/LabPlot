@@ -55,6 +55,7 @@ class FigureVersion(Base):
     tiff_path = Column(String(512), nullable=True)
     pdf_path = Column(String(512), nullable=True)
     eps_path = Column(String(512), nullable=True)
+    html_path = Column(String(512), nullable=True)
     r_path = Column(String(512), nullable=True)
     render_log = Column(Text, nullable=True)
     change_note = Column(String(512), nullable=True)

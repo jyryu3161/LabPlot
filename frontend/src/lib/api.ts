@@ -383,6 +383,12 @@ export async function updateFigure(id: string, data: { name?: string; descriptio
 export async function getFigureCode(figureId: string, versionId: string, lang: 'python' | 'latex'): Promise<import('./types').FigureCodeResponse> {
   return fetcher(`/api/figures/${figureId}/versions/${versionId}/code?lang=${lang}`);
 }
+export async function duplicateFigure(figureId: string): Promise<FigureDetail> {
+  return fetcher(`/api/figures/${figureId}/duplicate`, { method: 'POST' });
+}
+export async function bulkStyleFigures(sourceFigureId: string, targetFigureIds: string[]): Promise<import('./types').BulkStyleResult> {
+  return fetcher('/api/figures/bulk-style', { method: 'POST', body: JSON.stringify({ source_figure_id: sourceFigureId, target_figure_ids: targetFigureIds }) });
+}
 export async function listFigureComments(figureId: string): Promise<import('./types').FigureComment[]> {
   return fetcher(`/api/figures/${figureId}/comments`);
 }

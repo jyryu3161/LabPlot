@@ -7,7 +7,10 @@ readr, scales, viridisLite (+ base stats/grDevices).
 """
 from __future__ import annotations
 
+import re
 from typing import Any
+
+_HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
 
 
 # ---------------------------------------------------------------- helpers
@@ -1077,11 +1080,307 @@ PLOT_TYPES = [
 PLOT_TYPE_KEYS = {p["type"] for p in PLOT_TYPES}
 
 
+# ================================================================
+# Universal capabilities (review-2026-07): annotations, data labels,
+# axis controls, per-series style overrides. Applied in the shared
+# post-processing path after `p` exists, before the theme is appended.
+# ================================================================
+
+# Common ggplot plot types that receive the universal layers. Device- and
+# no-theme types (network, 3D, ComplexHeatmap, ...) are intentionally excluded.
+_UNIVERSAL_TYPES = {
+    "scatter", "line", "bar", "grouped_bar", "error_bar",
+    "box", "violin", "histogram", "area", "lollipop", "dot_plot",
+}
+
+# Which axes are genuinely continuous per template (so scale_*_continuous is
+# safe). Axes that are discrete/categorical for a given type are omitted.
+_AXIS_CONT = {
+    "scatter": ("x", "y"),
+    "line": ("y",),          # x may be time/category -> skip to avoid breakage
+    "histogram": ("x", "y"),
+    "area": ("x", "y"),
+    "bar": ("y",),
+    "grouped_bar": ("y",),
+    "error_bar": ("y",),
+    "box": ("y",),
+    "violin": ("y",),
+    "lollipop": ("y",),
+    "dot_plot": ("x",),      # dot plot maps value -> x, category -> y
+}
+
+_ANNOTATION_TEXT_DEFAULT = "grey20"
+_ANNOTATION_MARK_DEFAULT = "#DC2626"
+
+
+def _hex_color_r(value, default: str) -> str:
+    """R-quoted colour: the user's #RRGGBB when valid, else ``default``."""
+    if isinstance(value, str) and _HEX_COLOR_RE.fullmatch(value.strip()):
+        return rq(value.strip().upper())
+    return rq(default)
+
+
+def _annotations_layer(o) -> str:
+    """`+ annotate(...)` layers for ``options['annotations']`` (data coords).
+
+    Each item is a sanitized dict; unknown/invalid items are skipped. Numbers
+    go through ``_finite_num``, text through ``rq()``, colours through the hex
+    validator. Returns "" when there are no valid annotations.
+    """
+    anns = o.get("annotations")
+    if not isinstance(anns, list) or not anns:
+        return ""
+    layers: list[str] = []
+    for a in anns:
+        if not isinstance(a, dict):
+            continue
+        kind = a.get("kind")
+        if kind == "text":
+            x = _finite_num(a.get("x"))
+            y = _finite_num(a.get("y"))
+            text = a.get("text")
+            if x is None or y is None or not isinstance(text, str) or text == "":
+                continue
+            size = _finite_num(a.get("size"))
+            size_r = f"{max(1.0, min(20.0, size)):g}" if size is not None else f"{_GEOM_TEXT_SIZE_7PT}"
+            colour = _hex_color_r(a.get("color"), _ANNOTATION_TEXT_DEFAULT)
+            layers.append(
+                f'annotate("text", x = {x:g}, y = {y:g}, label = {rq(text)}, '
+                f'size = {size_r}, colour = {colour})'
+            )
+        elif kind == "arrow":
+            x = _finite_num(a.get("x"))
+            y = _finite_num(a.get("y"))
+            x2 = _finite_num(a.get("x2"))
+            y2 = _finite_num(a.get("y2"))
+            if None in (x, y, x2, y2):
+                continue
+            colour = _hex_color_r(a.get("color"), _ANNOTATION_MARK_DEFAULT)
+            layers.append(
+                f'annotate("segment", x = {x:g}, y = {y:g}, xend = {x2:g}, yend = {y2:g}, '
+                f'arrow = grid::arrow(length = grid::unit(0.02, "npc")), '
+                f'colour = {colour}, linewidth = 0.4)'
+            )
+        elif kind == "rect":
+            x = _finite_num(a.get("x"))
+            y = _finite_num(a.get("y"))
+            x2 = _finite_num(a.get("x2"))
+            y2 = _finite_num(a.get("y2"))
+            if None in (x, y, x2, y2):
+                continue
+            colour = _hex_color_r(a.get("color"), _ANNOTATION_MARK_DEFAULT)
+            layers.append(
+                f'annotate("rect", xmin = {min(x, x2):g}, xmax = {max(x, x2):g}, '
+                f'ymin = {min(y, y2):g}, ymax = {max(y, y2):g}, alpha = 0.12, fill = {colour})'
+            )
+        elif kind == "bracket":
+            x = _finite_num(a.get("x"))
+            x2 = _finite_num(a.get("x2"))
+            y = _finite_num(a.get("y"))
+            if None in (x, x2, y):
+                continue
+            colour = _hex_color_r(a.get("color"), _ANNOTATION_TEXT_DEFAULT)
+            tick = abs(y) * 0.03  # small downward ticks, scaled to the height
+            y_tick = y - tick
+            layers.append(
+                f'annotate("segment", x = {x:g}, xend = {x2:g}, y = {y:g}, yend = {y:g}, '
+                f'colour = {colour}, linewidth = 0.3)'
+            )
+            layers.append(
+                f'annotate("segment", x = {x:g}, xend = {x:g}, y = {y:g}, yend = {y_tick:g}, '
+                f'colour = {colour}, linewidth = 0.3)'
+            )
+            layers.append(
+                f'annotate("segment", x = {x2:g}, xend = {x2:g}, y = {y:g}, yend = {y_tick:g}, '
+                f'colour = {colour}, linewidth = 0.3)'
+            )
+            label = a.get("label")
+            if isinstance(label, str) and label != "":
+                layers.append(
+                    f'annotate("text", x = {(x + x2) / 2:g}, y = {y:g}, label = {rq(label)}, '
+                    f'vjust = -0.3, size = {_GEOM_TEXT_SIZE_7PT}, colour = {colour})'
+                )
+    if not layers:
+        return ""
+    return "\np <- p +\n  " + " +\n  ".join(layers) + "\n"
+
+
+def _data_label_fmt_expr(o, val_expr: str) -> str:
+    fmt = _choice(o.get("data_label_format"), ("number", "percent", "comma"), "number")
+    if fmt == "percent":
+        return f'sprintf("%.1f%%", ({val_expr}) * 100)'
+    if fmt == "comma":
+        return f'format(round({val_expr}), big.mark = ",", trim = TRUE, scientific = FALSE)'
+    return f'sprintf("%.2f", {val_expr})'
+
+
+def _data_labels_layer(plot_type: str, m, o) -> str:
+    """geom_text value labels for ``show_data_labels`` (opt-in, default off).
+
+    Applied on plots with a y aesthetic; skipped when it would collide with the
+    existing n= / value layers (``show_n`` / ``show_values``).
+    """
+    if not o.get("show_data_labels"):
+        return ""
+    if o.get("show_n") or o.get("show_values"):
+        return ""
+    if plot_type == "bar":
+        stat = o.get("stat", m.get("stat", "mean"))
+        if stat == "count" or not m.get("y"):
+            return ""  # count bars have no scalar value column to label
+        val, kind = ".val", "col"
+    elif plot_type == "grouped_bar":
+        val, kind = ".value", "dodge"
+    elif plot_type == "error_bar":
+        val, kind = ".y", "point"
+    elif plot_type == "lollipop":
+        val, kind = ".val", "col"
+    elif plot_type in ("scatter", "line"):
+        y = m.get("y")
+        if not y:
+            return ""
+        val, kind = _data(y), "point"
+    else:
+        return ""
+    label_expr = _data_label_fmt_expr(o, val)
+    if kind == "dodge":
+        return (f'\np <- p + geom_text(aes(label = {label_expr}), '
+                f'position = position_dodge(width = 0.76), vjust = -0.4, '
+                f'size = {_GEOM_TEXT_SIZE_7PT}, colour = "grey25")\n')
+    if kind == "col":
+        return (f'\np <- p + geom_text(aes(label = {label_expr}), '
+                f'vjust = -0.5, size = {_GEOM_TEXT_SIZE_7PT}, colour = "grey25")\n')
+    return (f'\np <- p + geom_text(aes(label = {label_expr}), '
+            f'vjust = -0.6, size = {_GEOM_TEXT_SIZE_7PT}, colour = "grey30", check_overlap = TRUE)\n')
+
+
+def _axis_scale_layer(o, axis: str) -> str:
+    """scale_{axis}_continuous for tick count / label format / reverse.
+
+    Returns "" when no axis option is set for ``axis`` (byte-identical output).
+    Only call for axes known to be continuous in the current template.
+    """
+    breaks = o.get(f"{axis}_breaks")
+    n_breaks = None
+    if breaks is not None and str(breaks) != "":
+        try:
+            n = int(float(breaks))
+            if 2 <= n <= 30:
+                n_breaks = n
+        except (TypeError, ValueError):
+            n_breaks = None
+    fmt = o.get(f"{axis}_tick_format")
+    if fmt not in ("number", "comma", "percent", "scientific"):
+        fmt = None
+    reverse = bool(o.get(f"reverse_{axis}"))
+    if n_breaks is None and fmt in (None, "number") and not reverse:
+        return ""
+    args: list[str] = []
+    if n_breaks is not None:
+        args.append(f"n.breaks = {n_breaks}")
+    if fmt == "comma":
+        args.append("labels = scales::label_comma()")
+    elif fmt == "percent":
+        args.append("labels = scales::label_percent()")
+    elif fmt == "scientific":
+        args.append("labels = scales::label_scientific()")
+    if reverse:
+        args.append('trans = "reverse"')
+    if not args:
+        return ""
+    return f'\np <- p + scale_{axis}_continuous({", ".join(args)})\n'
+
+
+def _series_styles_layer(plot_type: str, m, o) -> str:
+    """Per-series overrides for ``options['series_styles']``.
+
+    Colours merge into the palette-derived manual scale (via ggplot_build, so
+    partial overrides keep palette colours for the rest); linetype / shape emit
+    manual scales that apply when those aesthetics are mapped. Series names not
+    present in the data are ignored by ggplot at build time.
+    """
+    ss = o.get("series_styles")
+    if not isinstance(ss, dict) or not ss:
+        return ""
+    colors: dict[str, str] = {}
+    linetypes: dict[str, str] = {}
+    shapes: dict[str, int] = {}
+    for name, style in ss.items():
+        if not isinstance(name, str) or not isinstance(style, dict):
+            continue
+        c = style.get("color")
+        if isinstance(c, str) and _HEX_COLOR_RE.fullmatch(c.strip()):
+            colors[name] = c.strip().upper()
+        lt = style.get("linetype")
+        if lt in _LINE_TYPES:
+            linetypes[name] = lt
+        sh = style.get("shape")
+        if sh in _POINT_SHAPES and _POINT_SHAPES[sh] is not None:
+            shapes[name] = _POINT_SHAPES[sh]
+    parts: list[str] = []
+    if colors:
+        vec = ", ".join(f"{rq(k)} = {rq(v)}" for k, v in list(colors.items())[:80])
+        parts.append(f"""
+labplot_apply_series_styles <- function(plot) {{
+  .override <- c({vec})
+  .apply <- function(current_plot, aesthetic, scale_fun) {{
+    built <- tryCatch(ggplot2::ggplot_build(current_plot), error = function(e) NULL)
+    if (is.null(built)) return(current_plot)
+    sc <- built$plot$scales$get_scales(aesthetic)
+    if (is.null(sc)) return(current_plot)
+    is_discrete <- tryCatch(isTRUE(sc$is_discrete()), error = function(e) FALSE)
+    if (!is_discrete) return(current_plot)
+    limits <- tryCatch(sc$get_limits(), error = function(e) character())
+    limits <- as.character(limits[!is.na(limits)])
+    if (!length(limits)) return(current_plot)
+    hits <- intersect(names(.override), limits)
+    if (!length(hits)) return(current_plot)
+    values <- labplot_palette(length(limits))
+    names(values) <- limits
+    values[hits] <- .override[hits]
+    suppressMessages(current_plot + scale_fun(values = values))
+  }}
+  plot <- .apply(plot, "fill", ggplot2::scale_fill_manual)
+  plot <- .apply(plot, "colour", ggplot2::scale_colour_manual)
+  plot
+}}
+p <- labplot_apply_series_styles(p)
+""")
+    if linetypes:
+        vec = ", ".join(f"{rq(k)} = {rq(v)}" for k, v in list(linetypes.items())[:80])
+        parts.append(f'p <- p + scale_linetype_manual(values = c({vec}), na.value = "solid")\n')
+    if shapes:
+        vec = ", ".join(f"{rq(k)} = {v}" for k, v in list(shapes.items())[:80])
+        parts.append(f'p <- p + scale_shape_manual(values = c({vec}), na.value = 16)\n')
+    return "".join(parts)
+
+
+def _post_layers(plot_type: str, m, o) -> str:
+    """Shared post-build layers appended after `p` exists, before the theme."""
+    if plot_type not in _UNIVERSAL_TYPES:
+        return ""
+    has_y2 = isinstance(o.get("y2_column"), str) and bool(o.get("y2_column").strip())
+    out = ""
+    out += _data_labels_layer(plot_type, m, o)
+    out += _annotations_layer(o)
+    for axis in _AXIS_CONT.get(plot_type, ()):
+        if axis == "x" and o.get("log_x"):
+            continue
+        if axis == "y" and o.get("log_y"):
+            continue
+        if axis == "y" and plot_type in ("scatter", "line") and has_y2:
+            continue
+        out += _axis_scale_layer(o, axis)
+    out += _series_styles_layer(plot_type, m, o)
+    return out
+
+
 def build_plot_r(plot_type: str, mapping: dict, options: dict) -> str:
     builder = _BUILDERS.get(plot_type)
     if builder is None:
         raise ValueError(f"Unknown plot type: {plot_type}")
-    return builder(mapping, options or {})
+    o = options or {}
+    return builder(mapping, o) + _post_layers(plot_type, mapping, o)
 
 
 # ================================================================
@@ -2195,6 +2494,59 @@ DOMAIN_LABELS = {
     "engineering": "Engineering / physical science",
     "advanced": "Advanced & specialized",
 }
+# ---- universal-capability option metadata (frontend enumeration) ----
+_DATA_LABEL_OPTS = [
+    {"key": "show_data_labels", "label": "Show data labels", "type": "bool", "default": False},
+    {"key": "data_label_format", "label": "Data label format", "type": "select",
+     "choices": ["number", "percent", "comma"], "default": "number"},
+]
+_X_AXIS_OPTS = [
+    {"key": "x_breaks", "label": "X tick count", "type": "number", "default": None},
+    {"key": "x_tick_format", "label": "X tick format", "type": "select",
+     "choices": ["number", "comma", "percent", "scientific"], "default": "number"},
+    {"key": "reverse_x", "label": "Reverse X axis", "type": "bool", "default": False},
+]
+_Y_AXIS_OPTS = [
+    {"key": "y_breaks", "label": "Y tick count", "type": "number", "default": None},
+    {"key": "y_tick_format", "label": "Y tick format", "type": "select",
+     "choices": ["number", "comma", "percent", "scientific"], "default": "number"},
+    {"key": "reverse_y", "label": "Reverse Y axis", "type": "bool", "default": False},
+]
+_ANNOTATION_OPT = {"key": "annotations", "label": "Annotations", "type": "annotations", "default": []}
+_SERIES_STYLE_OPT = {"key": "series_styles", "label": "Per-series style", "type": "series_styles", "default": {}}
+
+_DATA_LABEL_TARGETS = {"bar", "grouped_bar", "error_bar", "lollipop", "scatter", "line"}
+_X_AXIS_TARGETS = {"scatter", "line", "histogram", "area", "dot_plot"}
+_Y_AXIS_TARGETS = {"scatter", "line", "histogram", "area", "bar", "grouped_bar",
+                   "error_bar", "box", "violin", "lollipop"}
+# annotations + series_styles are universal keys; advertise them on the common
+# ggplot types so the frontend can surface them.
+_ANNOTATION_TARGETS = set(_UNIVERSAL_TYPES)
+_SERIES_STYLE_TARGETS = set(_UNIVERSAL_TYPES)
+
+
+def _extend_options(opts, existing, new_opts):
+    for op in new_opts:
+        if op["key"] not in existing:
+            opts.append(dict(op))
+            existing.add(op["key"])
+
+
+for _p in PLOT_TYPES:
+    _t = _p["type"]
+    _opts = _p.setdefault("options", [])
+    _existing = {op.get("key") for op in _opts}
+    if _t in _DATA_LABEL_TARGETS:
+        _extend_options(_opts, _existing, _DATA_LABEL_OPTS)
+    if _t in _X_AXIS_TARGETS:
+        _extend_options(_opts, _existing, _X_AXIS_OPTS)
+    if _t in _Y_AXIS_TARGETS:
+        _extend_options(_opts, _existing, _Y_AXIS_OPTS)
+    if _t in _ANNOTATION_TARGETS:
+        _extend_options(_opts, _existing, [_ANNOTATION_OPT])
+    if _t in _SERIES_STYLE_TARGETS:
+        _extend_options(_opts, _existing, [_SERIES_STYLE_OPT])
+
 for _p in PLOT_TYPES:
     _p["domain"] = PLOT_DOMAINS.get(_p["type"], "basic")
 

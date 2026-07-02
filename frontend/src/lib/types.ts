@@ -275,6 +275,7 @@ export interface FigureVersion {
   tiff_url?: string;
   pdf_url?: string;
   eps_url?: string;
+  html_url?: string;
   r_url?: string;
   // Populated when a version is produced by applying AI suggestions: dotted
   // paths that were applied vs. dropped as unsupported. Empty for plain edits.
@@ -421,6 +422,23 @@ export interface FigureCodeResponse {
   language: 'python' | 'latex';
   filename: string;
   code: string;
+}
+
+export type FigureAnnotation =
+  | { kind: 'text'; x: number; y: number; text: string; size?: number; color?: string }
+  | { kind: 'arrow'; x: number; y: number; x2: number; y2: number; color?: string }
+  | { kind: 'rect'; x: number; y: number; x2: number; y2: number; color?: string }
+  | { kind: 'bracket'; x: number; x2: number; y: number; label?: string; color?: string };
+
+export interface SeriesStyle {
+  color?: string;
+  linetype?: 'solid' | 'dashed' | 'dotted' | 'dotdash' | 'longdash';
+  shape?: 'circle' | 'square' | 'triangle' | 'diamond';
+}
+
+export interface BulkStyleResult {
+  updated: string[];
+  skipped: string[];
 }
 
 export interface FigureComment {
