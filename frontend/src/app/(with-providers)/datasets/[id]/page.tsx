@@ -8,20 +8,22 @@ import { toast } from 'sonner';
 import {
   getDataset, getSavedChartRecommendations, recommendCharts, getPlotTypes, getStyles, getPalettes,
   createFigure, getFigure, getProject, listFigures, updateDataset, recommendChartsFromImage,
-  listFigureTemplateFavorites, reorderFigures,
+  listFigureTemplateFavorites, reorderFigures, getColumnValues,
 } from '@/lib/api';
 import { Textarea } from '@/components/ui/textarea';
 import type { ChartSuggestion, FigureDetail, FigureListItem, FigureTemplateFavoriteItem, PlotTypeDef } from '@/lib/types';
 import { formatStylePreset } from '@/lib/style-presets';
 import { AppHeader } from '@/components/layout/AppHeader';
+import { TransformDialog } from '@/components/datasets/TransformDialog';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Slider } from '@/components/ui/slider';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { CheckCircle2, Clipboard, Columns3, GripVertical, ImageIcon, Loader2, Sparkles, Star, Wand2, ArrowRight, X } from 'lucide-react';
+import { CheckCircle2, Clipboard, Columns3, GripVertical, ImageIcon, Loader2, Sparkles, Star, Wand2, ArrowRight, ArrowUp, ArrowDown, X } from 'lucide-react';
 
 const ROLE_COLORS: Record<string, string> = {
   numeric: 'bg-blue-100 text-blue-700', group: 'bg-green-100 text-green-700',
@@ -89,6 +91,84 @@ const COLUMN_ROLE_OPTIONS = [
   { value: 'pvalue', label: 'p-value' },
   { value: 'text', label: 'Text' },
 ];
+
+// Plot types driven by a continuous fill scale, where the discrete `palette_name`
+// selector is a no-op (they expose their own `palette`/color option instead).
+const CONTINUOUS_FILL_KEYS = new Set([
+  'heatmap', 'annotated_heatmap', 'correlation_heatmap', 'confusion_matrix',
+  'volcano', 'contour', 'manhattan',
+]);
+function isContinuousFill(plotType: string): boolean {
+  return CONTINUOUS_FILL_KEYS.has(plotType) || plotType.includes('enrichment') || plotType.includes('heatmap');
+}
+const FONT_FAMILY_OPTIONS = [
+  { value: '', label: 'Default (sans)' },
+  { value: 'sans', label: 'Sans-serif' },
+  { value: 'serif', label: 'Serif' },
+  { value: 'mono', label: 'Monospace' },
+];
+const DPI_OPTIONS = ['150', '300', '600', '1200'];
+const FACET_SCALE_OPTIONS = [
+  { value: 'fixed', label: 'Fixed (shared)' },
+  { value: 'free', label: 'Free (both)' },
+  { value: 'free_x', label: 'Free X' },
+  { value: 'free_y', label: 'Free Y' },
+];
+const ERROR_TYPE_OPTIONS = [
+  { value: 'sd', label: 'Std. deviation (SD)' },
+  { value: 'se', label: 'Std. error (SE)' },
+  { value: 'ci95', label: '95% CI' },
+];
+function sliderNumber(value: number | readonly number[]): number {
+  return Array.isArray(value) ? Number(value[0]) : Number(value);
+}
+function alphaSliderValue(value: unknown, fallback: number): number {
+  const num = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(num) ? Math.min(1, Math.max(0.05, num)) : fallback;
+}
+function setStringOption(options: Record<string, unknown>, key: string, value: string): Record<string, unknown> {
+  const next = { ...options };
+  if (value) next[key] = value;
+  else delete next[key];
+  return next;
+}
+function deleteOption(options: Record<string, unknown>, key: string): Record<string, unknown> {
+  const next = { ...options };
+  delete next[key];
+  return next;
+}
+function numberOption(options: Record<string, unknown>, key: string, raw: string): Record<string, unknown> {
+  const next = { ...options };
+  const value = raw.trim();
+  if (!value) { delete next[key]; return next; }
+  const parsed = Number(value);
+  if (Number.isFinite(parsed)) next[key] = parsed;
+  return next;
+}
+function stringListOption(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+}
+function mergeLevelOrder(order: string[], levels: string[]): string[] {
+  const known = new Set(levels);
+  const seen = new Set<string>();
+  const merged: string[] = [];
+  for (const level of order) if (known.has(level) && !seen.has(level)) { merged.push(level); seen.add(level); }
+  for (const level of levels) if (!seen.has(level)) { merged.push(level); seen.add(level); }
+  return merged;
+}
+function swapItems<T>(items: T[], index: number, direction: -1 | 1): T[] {
+  const target = index + direction;
+  if (target < 0 || target >= items.length) return items;
+  const next = [...items];
+  [next[index], next[target]] = [next[target], next[index]];
+  return next;
+}
+// Grouping/category column that drives level ordering in the builder.
+function orderingColumn(plotType: string, mapping: Record<string, unknown>): string | null {
+  const val = (k: string) => (typeof mapping[k] === 'string' && (mapping[k] as string).trim() ? (mapping[k] as string) : null);
+  return val('group') || val('color')
+    || (['box', 'violin', 'bar', 'grouped_bar', 'overlap_bar'].includes(plotType) ? val('x') : null);
+}
 
 const OBJECTIVE_STOP_WORDS = new Set([
   'a', 'an', 'and', 'are', 'as', 'at', 'be', 'by', 'can', 'for', 'from', 'how', 'i', 'in', 'into',
@@ -456,6 +536,24 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
   const [showFormatTemplatePicker, setShowFormatTemplatePicker] = useState(false);
   const buildPaletteKey = String(options.palette_name ?? 'journal_muted');
   const selectedBuildPalette = paletteOptions.find((palette) => palette.key === buildPaletteKey);
+  const continuousFill = isContinuousFill(plotType);
+  const orderingColumnName = orderingColumn(plotType, mapping);
+  const { data: builderColumnValues } = useQuery({
+    queryKey: ['column-values', id, orderingColumnName],
+    queryFn: () => getColumnValues(id, orderingColumnName!),
+    enabled: !!orderingColumnName,
+  });
+  const builderLevels = useMemo(() => {
+    const values = builderColumnValues?.values ?? [];
+    const seen = new Set<string>();
+    const levels: string[] = [];
+    values.forEach((raw) => { const label = String(raw ?? '').trim(); if (label && !seen.has(label)) { seen.add(label); levels.push(label); } });
+    return levels;
+  }, [builderColumnValues?.values]);
+  const orderedBuilderLevels = useMemo(
+    () => mergeLevelOrder(stringListOption(options.level_order), builderLevels),
+    [options.level_order, builderLevels],
+  );
 
   const currentDef: PlotTypeDef | undefined = useMemo(
     () => plotTypes.find((p) => p.type === plotType), [plotTypes, plotType]);
@@ -651,6 +749,27 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Reorder failed'),
   });
 
+  // Warn before losing an in-progress figure or unsaved column/description drafts.
+  const hasUnsavedEdits = Boolean(plotType)
+    || focusChanged || columnRolesChanged
+    || (dsDesc !== null && dsDescValue !== (ds?.description ?? ''));
+  useEffect(() => {
+    if (!hasUnsavedEdits) return;
+    const handler = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ''; };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [hasUnsavedEdits]);
+  function confirmLeave(event: React.MouseEvent) {
+    if (hasUnsavedEdits && !window.confirm('You have unsaved changes in the visualize workflow. Leave this page and discard them?')) {
+      event.preventDefault();
+    }
+  }
+  function moveBuilderLevel(index: number, direction: -1 | 1) {
+    const next = swapItems(orderedBuilderLevels, index, direction);
+    if (next === orderedBuilderLevels) return;
+    setOptions({ ...options, level_order: next });
+  }
+
   if (isLoading || !ds) {
     return (<div className="min-h-screen bg-muted/20"><AppHeader /><div className="flex justify-center py-20"><Loader2 className="h-6 w-6 animate-spin" /></div></div>);
   }
@@ -686,9 +805,12 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
       <AppHeader />
       <main className="mx-auto max-w-7xl px-4 py-8">
         <div className="mb-2 flex items-center gap-2 text-sm text-muted-foreground">
-          <Link href="/datasets" className="hover:underline">Datasets</Link> / {ds.name}
+          <Link href="/datasets" className="hover:underline" onClick={confirmLeave}>Datasets</Link> / {ds.name}
         </div>
-        <h1 className="mb-6 text-2xl font-bold">{ds.name} <span className="text-base font-normal text-muted-foreground">({ds.n_rows}×{ds.n_cols})</span></h1>
+        <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
+          <h1 className="text-2xl font-bold">{ds.name} <span className="text-base font-normal text-muted-foreground">({ds.n_rows}×{ds.n_cols})</span></h1>
+          <TransformDialog datasetId={id} datasetName={ds.name} columns={columns.map((c) => c.name)} disabled={!canEditDataset} />
+        </div>
 
         <Tabs defaultValue="visualize">
           <TabsList>
@@ -1257,24 +1379,118 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                       </div>
                       <div className="space-y-1">
                         <Label>Color palette</Label>
-                        <select
-                          className="w-full rounded-md border px-3 py-2 text-sm"
-                          value={buildPaletteKey}
-                          onChange={(e) => setOptions({ ...options, palette_name: e.target.value })}
-                        >
-                          {paletteOptions.map((palette) => (
-                            <option key={palette.key} value={palette.key}>{palette.label}</option>
-                          ))}
-                        </select>
-                        {selectedBuildPalette?.hex?.length ? (
-                          <div className="flex gap-0.5 pt-1">
-                            {selectedBuildPalette.hex.map((hex) => (
-                              <span key={hex} className="h-3 w-4 rounded-sm border" style={{ backgroundColor: hex }} />
+                        {continuousFill ? (
+                          <p className="rounded-md border bg-muted/20 px-2 py-1.5 text-xs text-muted-foreground">This chart uses a continuous color scale — set it with the chart-specific color options above. The discrete palette does not apply.</p>
+                        ) : (<>
+                          <select
+                            className="w-full rounded-md border px-3 py-2 text-sm"
+                            value={buildPaletteKey}
+                            onChange={(e) => setOptions({ ...options, palette_name: e.target.value })}
+                          >
+                            {paletteOptions.map((palette) => (
+                              <option key={palette.key} value={palette.key}>{palette.label}{palette.colorblind_safe ? ' · colorblind-safe' : ''}</option>
                             ))}
+                          </select>
+                          <div className="flex items-center gap-2 pt-1">
+                            {selectedBuildPalette?.hex?.length ? (
+                              <div className="flex gap-0.5">
+                                {selectedBuildPalette.hex.map((hex) => (
+                                  <span key={hex} className="h-3 w-4 rounded-sm border" style={{ backgroundColor: hex }} />
+                                ))}
+                              </div>
+                            ) : null}
+                            {selectedBuildPalette?.colorblind_safe && <Badge variant="outline" className="text-[10px]">Colorblind-safe</Badge>}
                           </div>
-                        ) : null}
+                        </>)}
                       </div>
                     </div>
+
+                    {/* universal options: opacity, error bars, reference lines, panels, DPI, typography */}
+                    <div className="grid gap-4 md:grid-cols-3">
+                      <div className="space-y-1">
+                        <div className="flex items-center justify-between">
+                          <Label>Fill opacity</Label>
+                          <span className="text-xs text-muted-foreground">{options.fill_alpha !== undefined ? Number(options.fill_alpha).toFixed(2) : 'default'}</span>
+                        </div>
+                        <Slider min={0.05} max={1} step={0.05} value={[alphaSliderValue(options.fill_alpha, 1)]} onValueChange={(v) => setOptions({ ...options, fill_alpha: sliderNumber(v) })} aria-label="Fill opacity" />
+                      </div>
+                      <div className="space-y-1">
+                        <div className="flex items-center justify-between">
+                          <Label>Point opacity</Label>
+                          <span className="text-xs text-muted-foreground">{options.point_alpha !== undefined ? Number(options.point_alpha).toFixed(2) : 'default'}</span>
+                        </div>
+                        <Slider min={0.05} max={1} step={0.05} value={[alphaSliderValue(options.point_alpha, 1)]} onValueChange={(v) => setOptions({ ...options, point_alpha: sliderNumber(v) })} aria-label="Point opacity" />
+                      </div>
+                      {plotType === 'bar' && !currentDef.options.some((o) => o.key === 'error_type') && (
+                        <div className="space-y-1">
+                          <Label htmlFor="build-error-type">Error bars</Label>
+                          <select id="build-error-type" className="w-full rounded-md border px-3 py-2 text-sm" value={String(options.error_type ?? 'sd')} onChange={(e) => setOptions({ ...options, error_type: e.target.value })}>
+                            {ERROR_TYPE_OPTIONS.map((opt) => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
+                          </select>
+                        </div>
+                      )}
+                      <div className="space-y-1">
+                        <Label htmlFor="build-hline">Horizontal ref. line (y)</Label>
+                        <Input id="build-hline" type="number" step="any" value={String(options.hline_at ?? '')} onChange={(e) => setOptions(numberOption(options, 'hline_at', e.target.value))} placeholder="none" />
+                      </div>
+                      <div className="space-y-1">
+                        <Label htmlFor="build-vline">Vertical ref. line (x)</Label>
+                        <Input id="build-vline" type="number" step="any" value={String(options.vline_at ?? '')} onChange={(e) => setOptions(numberOption(options, 'vline_at', e.target.value))} placeholder="none" />
+                      </div>
+                      <div className="space-y-1">
+                        <Label htmlFor="build-facet">Split into panels by…</Label>
+                        <select id="build-facet" className="w-full rounded-md border px-3 py-2 text-sm" value={String(options.facet_by ?? '')} onChange={(e) => setOptions(setStringOption(options, 'facet_by', e.target.value))}>
+                          <option value="">No panels</option>
+                          {columns.map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}
+                        </select>
+                      </div>
+                      <div className="space-y-1">
+                        <Label htmlFor="build-facet-scales">Panel axis scales</Label>
+                        <select id="build-facet-scales" className="w-full rounded-md border px-3 py-2 text-sm disabled:opacity-60" disabled={!options.facet_by} value={String(options.facet_scales ?? 'fixed')} onChange={(e) => setOptions({ ...options, facet_scales: e.target.value })}>
+                          {FACET_SCALE_OPTIONS.map((opt) => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
+                        </select>
+                      </div>
+                      <div className="space-y-1">
+                        <Label htmlFor="build-dpi">Export DPI</Label>
+                        <select id="build-dpi" className="w-full rounded-md border px-3 py-2 text-sm" value={String(options.dpi ?? '')} onChange={(e) => setOptions(e.target.value ? { ...options, dpi: Number(e.target.value) } : deleteOption(options, 'dpi'))}>
+                          <option value="">Default (300)</option>
+                          {DPI_OPTIONS.map((d) => <option key={d} value={d}>{d} dpi</option>)}
+                        </select>
+                      </div>
+                      <div className="space-y-1">
+                        <Label htmlFor="build-font">Font family</Label>
+                        <select id="build-font" className="w-full rounded-md border px-3 py-2 text-sm" value={String(options.font_family ?? '')} onChange={(e) => setOptions(setStringOption(options, 'font_family', e.target.value))}>
+                          {FONT_FAMILY_OPTIONS.map((opt) => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
+                        </select>
+                      </div>
+                      <label className="flex items-center gap-2 self-end text-sm">
+                        <input type="checkbox" checked={Boolean(options.transparent_background)} onChange={(e) => setOptions({ ...options, transparent_background: e.target.checked })} /> Transparent background
+                      </label>
+                    </div>
+
+                    {orderingColumnName && orderedBuilderLevels.length > 1 && (
+                      <div className="space-y-2 rounded-lg border bg-muted/20 p-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <div>
+                            <Label className="text-sm">Category &amp; legend order</Label>
+                            <p className="text-xs text-muted-foreground">Order of <span className="font-medium">{orderingColumnName}</span> levels in the legend and axis.</p>
+                          </div>
+                          {Array.isArray(options.level_order) && (
+                            <Button type="button" variant="ghost" size="sm" onClick={() => setOptions(deleteOption(options, 'level_order'))}>Reset</Button>
+                          )}
+                        </div>
+                        <div className="grid gap-1 sm:grid-cols-2">
+                          {orderedBuilderLevels.map((level, index) => (
+                            <div key={level} className="flex items-center gap-1 rounded border bg-background px-2 py-1">
+                              <span className="w-5 shrink-0 text-center text-xs text-muted-foreground">{index + 1}</span>
+                              <span className="min-w-0 flex-1 truncate text-sm" title={level}>{level}</span>
+                              <Button type="button" variant="ghost" size="icon-xs" aria-label={`Move ${level} up`} disabled={index === 0} onClick={() => moveBuilderLevel(index, -1)}><ArrowUp className="h-3.5 w-3.5" /></Button>
+                              <Button type="button" variant="ghost" size="icon-xs" aria-label={`Move ${level} down`} disabled={index === orderedBuilderLevels.length - 1} onClick={() => moveBuilderLevel(index, 1)}><ArrowDown className="h-3.5 w-3.5" /></Button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
 
                     {missingRequiredFields.length > 0 && (
                       <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">

@@ -27,6 +27,8 @@ class Figure(Base):
     description = Column(Text, nullable=True)   # user-written interpretation
     legend = Column(Text, nullable=True)        # figure legend (AI or user)
     is_favorite = Column(Boolean, nullable=False, default=False)
+    is_public = Column(Boolean, nullable=False, default=False, index=True)
+    share_token = Column(String(64), nullable=True, unique=True, index=True)
     display_order = Column(Integer, nullable=True, index=True)
     created_at = Column(DateTime(timezone=True), default=_now)
     updated_at = Column(DateTime(timezone=True), default=_now, onupdate=_now)
@@ -52,6 +54,7 @@ class FigureVersion(Base):
     svg_path = Column(String(512), nullable=True)
     tiff_path = Column(String(512), nullable=True)
     pdf_path = Column(String(512), nullable=True)
+    eps_path = Column(String(512), nullable=True)
     r_path = Column(String(512), nullable=True)
     render_log = Column(Text, nullable=True)
     change_note = Column(String(512), nullable=True)
@@ -84,6 +87,16 @@ class FigureTemplateFavorite(Base):
     user = relationship("User", back_populates="figure_template_favorites")
     figure = relationship("Figure", back_populates="template_favorites")
     source_version = relationship("FigureVersion")
+
+
+class FigureComment(Base):
+    __tablename__ = "figure_comments"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    figure_id = Column(UUID(as_uuid=True), ForeignKey("figures.id", ondelete="CASCADE"), nullable=False, index=True)
+    author_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    body = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_now)
 
 
 class FigureCodeArtifact(Base):

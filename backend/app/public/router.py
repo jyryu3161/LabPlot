@@ -17,6 +17,7 @@ from app.config import settings
 from app.datasets import service as dataset_service
 from app.figures.models import Figure, FigureVersion
 from app.figures.service import _url
+from app.r_engine import renderer
 from app.r_engine.presets import PRESETS, list_palettes
 from app.r_engine.templates import PLOT_TYPES
 
@@ -263,6 +264,46 @@ def public_gallery_example_data(figure_id: uuid.UUID, db: Session = Depends(get_
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+@router.get("/figures/shared/{token}")
+def public_shared_figure(token: str, db: Session = Depends(get_db)):
+    """Minimal, no-auth view of a figure via its share token.
+
+    Deliberately excludes owner identity, dataset content, and figure options;
+    only the rendered image plus basic display metadata is exposed.
+    """
+    if not token or len(token) > 64:
+        raise NotFoundError("Shared figure", "token")
+    fig = (
+        db.query(Figure)
+        .filter(Figure.share_token == token, Figure.status == "ready")
+        .first()
+    )
+    if not fig:
+        raise NotFoundError("Shared figure", "token")
+    version = None
+    if fig.current_version_id:
+        version = (
+            db.query(FigureVersion)
+            .filter(FigureVersion.id == fig.current_version_id, FigureVersion.figure_id == fig.id)
+            .first()
+        )
+    width_in = height_in = dpi = None
+    png_url = None
+    if version:
+        width_in, height_in, dpi = renderer._dimensions(version.options or {})
+        png_url = _url(version.png_path)
+    return {
+        "id": fig.id,
+        "name": fig.name,
+        "plot_type": fig.plot_type,
+        "created_at": fig.created_at,
+        "png_url": png_url,
+        "width_in": width_in,
+        "height_in": height_in,
+        "dpi": dpi,
+    }
 
 
 @router.get("/stats")

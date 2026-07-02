@@ -67,16 +67,39 @@ def register_user(
     display_name: str,
     organization_id: uuid.UUID | None = None,
     organization_name: str | None = None,
-) -> User:
+) -> tuple[User, bool]:
+    """Register a user.
+
+    Returns ``(user, created)``. ``created`` is ``False`` when the email is
+    already registered: to avoid account enumeration we do NOT reveal that the
+    address is taken. Instead we return a synthetic, non-persisted user that is
+    indistinguishable from a fresh registration (same response shape/status and
+    the same field values a brand-new pending account would have) without
+    leaking the existing account's real attributes.
+    """
     email = _normalize_email(email)
     _validate_password(password)
+    # Always hash so response timing does not depend on whether the email
+    # exists (mirrors the dummy-hash pattern in authenticate_user).
+    hashed_password = _hash_password(password)
     existing = db.query(User).filter(User.email == email).first()
     if existing:
-        raise BadRequestError("Email already registered", error_code="EMAIL_ALREADY_EXISTS")
+        masked = User(
+            id=uuid.uuid4(),
+            email=email,
+            display_name=display_name,
+            is_active=True,
+            is_approved=False,
+            is_admin=False,
+            token_version=0,
+            active_organization_id=None,
+            created_at=datetime.now(timezone.utc),
+        )
+        return masked, False
 
     user = User(
         email=email,
-        hashed_password=_hash_password(password),
+        hashed_password=hashed_password,
         display_name=display_name,
         is_approved=False,
     )
@@ -93,7 +116,7 @@ def register_user(
         request_join(db, organization_id, user)
     db.commit()
     db.refresh(user)
-    return user
+    return user, True
 
 
 def authenticate_user(db: Session, email: str, password: str) -> User:
@@ -133,7 +156,25 @@ def refresh_tokens(db: Session, refresh_token: str) -> dict:
     if int(payload.get("tv", 0)) != int(user.token_version or 0):
         raise BadRequestError("Invalid refresh token", error_code="INVALID_TOKEN")
 
+    # Idempotent refresh: re-issue an access+refresh pair carrying the current
+    # token_version. We deliberately do NOT bump token_version here: it is a
+    # single global per-user counter, so rotating it on every refresh would
+    # invalidate the user's other devices/tabs (which each refresh hourly) and
+    # cause spurious logouts. Global revocation is available via logout_user()
+    # and password reset. (A per-token refresh-family store would be needed for
+    # true refresh-token rotation without breaking multi-device sessions.)
     return _issue_tokens(user)
+
+
+def logout_user(db: Session, user: User) -> None:
+    """Revoke all outstanding tokens for the user by bumping token_version.
+
+    Every access/refresh token carries the tv it was minted with; the tv check
+    in common/deps.py and refresh_tokens rejects anything below the current
+    value, so incrementing here invalidates all currently-issued tokens.
+    """
+    user.token_version = int(user.token_version or 0) + 1
+    db.commit()
 
 
 def smtp_status() -> dict:

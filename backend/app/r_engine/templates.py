@@ -29,6 +29,48 @@ def _num(v, default):
         return float(default)
 
 
+def _finite_num(v):
+    """Return a finite float for v, or None when v is missing / not finite."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    if f != f or f in (float("inf"), float("-inf")):
+        return None
+    return f
+
+
+def _alpha_r(o, key, default_literal):
+    """R alpha literal for option ``key``.
+
+    Returns the user's value clamped to [0.05, 1.0] when set, otherwise the
+    unchanged ``default_literal`` string -- guaranteeing byte-identical output
+    when the option is absent.
+    """
+    v = o.get(key)
+    if v is None or (isinstance(v, str) and not v.strip()):
+        return default_literal
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return default_literal
+    if f != f:  # NaN
+        return default_literal
+    f = max(0.05, min(1.0, f))
+    return f"{f:g}"
+
+
+def _level_order_vec(o):
+    """R character vector for an explicit ``level_order``, or None when unset."""
+    lv = o.get("level_order")
+    if not isinstance(lv, list) or not lv:
+        return None
+    items = [rq(str(s)) for s in lv if s is not None and str(s) != ""]
+    if not items:
+        return None
+    return "c(" + ", ".join(items) + ")"
+
+
 _VIRIDIS_OPTIONS = ("viridis", "magma", "inferno", "plasma", "cividis")
 _HEATMAP_OPTIONS = _VIRIDIS_OPTIONS + ("blue_red",)
 _GRAPH_LAYOUTS = ("fr", "kk", "circle", "stress")
@@ -74,34 +116,209 @@ _ORDERED_FACTOR_R = """
 """
 
 
+# Explicit level ordering: user-given levels present in the data come first (in
+# the given order), remaining levels follow in the numeric-aware auto order.
+_LEVEL_ORDER_R = """
+.labplot_ordered_levels <- function(x, explicit) {
+  x_chr <- as.character(x)
+  base <- unique(x_chr[!is.na(x_chr)])
+  base_num <- suppressWarnings(as.numeric(base))
+  if (length(base) > 0 && all(!is.na(base_num))) {
+    base <- base[order(base_num)]
+  }
+  explicit <- as.character(explicit)
+  present <- explicit[explicit %in% base]
+  rest <- base[!(base %in% explicit)]
+  factor(x_chr, levels = c(present, rest))
+}
+"""
+
+
+# ------------------------------------------------ on-figure stat annotations
+def _group_n_layer(x_fac_expr, y_col, at="top"):
+    """geom_text 'n=' per x-group appended to `p` (opt-in, default off).
+
+    ``y_col=None`` -> count bars: label sits at the bar top (the count itself).
+    ``at='top'`` -> above each group's data max; ``at='base'`` -> at the axis.
+    """
+    if y_col is None:
+        return f"""
+.n_lab <- df %>% dplyr::transmute(.gx = {x_fac_expr}) %>%
+  dplyr::filter(!is.na(.gx)) %>% dplyr::count(.gx, name = ".n")
+p <- p + geom_text(data = .n_lab, aes(x = .gx, y = .n, label = paste0("n=", .n)),
+                   inherit.aes = FALSE, vjust = -0.4, size = {_GEOM_TEXT_SIZE_7PT}, colour = "grey30")
+"""
+    ypos, vjust = ("0", "1.3") if at == "base" else ("max(.yy, na.rm = TRUE)", "-0.9")
+    return f"""
+.n_lab <- df %>% dplyr::transmute(.gx = {x_fac_expr}, .yy = suppressWarnings(as.numeric({_data(y_col)}))) %>%
+  dplyr::filter(!is.na(.gx), !is.na(.yy)) %>%
+  dplyr::group_by(.gx) %>%
+  dplyr::summarise(.ypos = {ypos}, .n = dplyr::n(), .groups = "drop")
+p <- p + geom_text(data = .n_lab, aes(x = .gx, y = .ypos, label = paste0("n=", .n)),
+                   inherit.aes = FALSE, vjust = {vjust}, size = {_GEOM_TEXT_SIZE_7PT}, colour = "grey30")
+"""
+
+
+def _sig_layer(x_fac_expr, y_col):
+    """Pairwise significance brackets (2-4 groups) appended to `p`.
+
+    Per-pair Welch t-tests; stars *** / ** / * / ns drawn on stacked segments.
+    Fully wrapped in tryCatch so a degenerate group set silently draws nothing.
+    """
+    return f"""
+invisible(tryCatch({{
+  .sd <- df %>% dplyr::transmute(.gx = {x_fac_expr}, .yy = suppressWarnings(as.numeric({_data(y_col)}))) %>%
+    dplyr::filter(!is.na(.gx), !is.na(.yy))
+  .gx_f <- factor(.sd$.gx)
+  .levs <- levels(.gx_f); .levs <- .levs[.levs %in% as.character(.sd$.gx)]
+  if (length(.levs) >= 2 && length(.levs) <= 4) {{
+    .ymax <- max(.sd$.yy, na.rm = TRUE); .ymin <- min(.sd$.yy, na.rm = TRUE)
+    .rng <- .ymax - .ymin; if (!is.finite(.rng) || .rng <= 0) .rng <- abs(.ymax) + 1
+    .step <- .rng * 0.12; .k <- 0
+    .seg <- data.frame(x = numeric(0), xend = numeric(0), y = numeric(0), yend = numeric(0))
+    .txt <- data.frame(x = numeric(0), y = numeric(0), label = character(0))
+    for (.pr in utils::combn(.levs, 2, simplify = FALSE)) {{
+      .a <- .sd$.yy[as.character(.sd$.gx) == .pr[1]]
+      .b <- .sd$.yy[as.character(.sd$.gx) == .pr[2]]
+      if (length(.a) < 2 || length(.b) < 2) next
+      .pv <- tryCatch(stats::t.test(.a, .b)$p.value, error = function(e) NA_real_)
+      if (!is.finite(.pv)) next
+      .k <- .k + 1
+      .yb <- .ymax + .step * .k
+      .xa <- match(.pr[1], .levs); .xb <- match(.pr[2], .levs)
+      .star <- if (.pv < 0.001) "***" else if (.pv < 0.01) "**" else if (.pv < 0.05) "*" else "ns"
+      .seg <- rbind(.seg, data.frame(x = .xa, xend = .xb, y = .yb, yend = .yb))
+      .txt <- rbind(.txt, data.frame(x = (.xa + .xb) / 2, y = .yb, label = .star, stringsAsFactors = FALSE))
+    }}
+    if (nrow(.seg) > 0) {{
+      p <<- p + geom_segment(data = .seg, aes(x = x, xend = xend, y = y, yend = yend),
+                             inherit.aes = FALSE, linewidth = 0.3, colour = "grey25") +
+                geom_text(data = .txt, aes(x = x, y = y, label = label),
+                          inherit.aes = FALSE, vjust = -0.2, size = {_GEOM_TEXT_SIZE_7PT}, colour = "grey15")
+    }}
+  }}
+}}, error = function(e) NULL))
+"""
+
+
+def _fit_stats_layer(x_col, y_col):
+    """Annotate lm R-squared and slope/intercept for a scatter (opt-in, off)."""
+    return f"""
+invisible(tryCatch({{
+  .fx <- suppressWarnings(as.numeric({_col(x_col)})); .fy <- suppressWarnings(as.numeric({_col(y_col)}))
+  .ok <- is.finite(.fx) & is.finite(.fy)
+  if (sum(.ok) >= 3 && stats::sd(.fx[.ok]) > 0) {{
+    .fit <- stats::lm(.fy[.ok] ~ .fx[.ok])
+    .co <- stats::coef(.fit)
+    .lab <- sprintf("y = %.3g x + %.3g\\nR\\u00b2 = %.3f", .co[[2]], .co[[1]], summary(.fit)$r.squared)
+    p <<- p + annotate("text", x = min(.fx[.ok]), y = max(.fy[.ok]),
+                       label = .lab, hjust = 0, vjust = 1, size = {_GEOM_TEXT_SIZE_7PT}, colour = "grey20")
+  }}
+}}, error = function(e) NULL))
+"""
+
+
+# ------------------------------------------------ secondary Y axis (line/scatter)
+def _y2_axis(o, x, y, geom: str, grouped: bool) -> tuple[str, str]:
+    """Secondary-Y-axis snippets for ``options["y2_column"]`` (line/scatter).
+
+    Returns ``(pre_r, post_r)``: ``pre_r`` rescales the y2 series onto the
+    primary y range *before* ``p <- ggplot(df, ...)`` captures df; ``post_r``
+    appends a fixed-colour layer plus a ``sec_axis`` back-transform. Both are
+    empty strings when ``y2_column`` is unset. Column/label go through rq().
+    """
+    y2 = o.get("y2_column")
+    if not isinstance(y2, str) or not y2.strip():
+        return "", ""
+    label = o.get("y2_label")
+    if not isinstance(label, str) or not label.strip():
+        label = y2
+    # Second palette colour normally; when a group/colour column already maps
+    # series to the palette, fall back to the fixed auxiliary blue used for
+    # smooth lines so the y2 layer cannot collide with a series colour.
+    colour_r = 'labplot_palette(2)[[2]]' if not grouped else '"#4C6F91"'
+    pre = f"""
+.y1r <- range(suppressWarnings(as.numeric(df[[{rq(y)}]])), na.rm = TRUE)
+.y2r <- range(suppressWarnings(as.numeric(df[[{rq(y2)}]])), na.rm = TRUE)
+.y2span <- diff(.y2r); if (!is.finite(.y2span) || .y2span == 0) .y2span <- 1
+.y2_scale <- diff(.y1r) / .y2span; if (!is.finite(.y2_scale) || .y2_scale == 0) .y2_scale <- 1
+.y2_shift <- .y1r[[1]] - .y2r[[1]] * .y2_scale
+df$.y2_scaled <- suppressWarnings(as.numeric(df[[{rq(y2)}]])) * .y2_scale + .y2_shift
+.y2_colour <- {colour_r}
+"""
+    if geom == "line":
+        layer = (f'geom_line(aes(x = {_data(x)}, y = .data[[".y2_scaled"]], group = 1), '
+                 'colour = .y2_colour, linewidth = 0.35, linetype = "dashed", alpha = 0.9, '
+                 'na.rm = TRUE, inherit.aes = FALSE)')
+    else:
+        layer = (f'geom_point(aes(x = {_data(x)}, y = .data[[".y2_scaled"]]), '
+                 'colour = .y2_colour, size = 2.0, alpha = 0.7, '
+                 'na.rm = TRUE, inherit.aes = FALSE)')
+    post = (f"p <- p + {layer} +\n"
+            f"  scale_y_continuous(sec.axis = sec_axis(~ (. - .y2_shift) / .y2_scale, name = {rq(label)}))\n")
+    return pre, post
+
+
 # ---------------------------------------------------------------- builders
 def _box(m, o):
     x, y = m["x"], m["y"]
     color = m.get("color") or x
-    points = "  geom_jitter(width = 0.15, size = 1.1, alpha = 0.45) +\n" if o.get("show_points", True) else ""
-    return f"""
-p <- ggplot(df, aes(x = factor({_data(x)}), y = {_data(y)}, fill = factor({_data(color)}))) +
-  geom_boxplot(outlier.size = 0.8, alpha = 0.9, width = 0.65,
+    fill_a = _alpha_r(o, "fill_alpha", "0.9")
+    pt_a = _alpha_r(o, "point_alpha", "0.45")
+    order_vec = _level_order_vec(o)
+    if order_vec:
+        helper = _LEVEL_ORDER_R
+        x_fac = f".labplot_ordered_levels({_data(x)}, {order_vec})"
+        fill_fac = f".labplot_ordered_levels({_data(color)}, {order_vec})"
+    else:
+        helper = ""
+        x_fac = f"factor({_data(x)})"
+        fill_fac = f"factor({_data(color)})"
+    points = f"  geom_jitter(width = 0.15, size = 1.1, alpha = {pt_a}) +\n" if o.get("show_points", True) else ""
+    extra = ""
+    if o.get("show_n"):
+        extra += _group_n_layer(x_fac, y, at="top")
+    if o.get("show_significance"):
+        extra += _sig_layer(x_fac, y)
+    return f"""{helper}
+p <- ggplot(df, aes(x = {x_fac}, y = {_data(y)}, fill = {fill_fac})) +
+  geom_boxplot(outlier.size = 0.8, alpha = {fill_a}, width = 0.65,
                box.linewidth = 0.35, whisker.linewidth = 0.35, median.linewidth = 0.35) +
 {points}  scale_fill_manual(values = labplot_palette()) +
   {_labs(o, x, y)} + guides(fill = guide_legend(title = {rq(color)}))
-"""
+{extra}"""
 
 
 def _violin(m, o):
     x, y = m["x"], m["y"]
     color = m.get("color") or x
+    fill_a = _alpha_r(o, "fill_alpha", "0.85")
+    pt_a = _alpha_r(o, "point_alpha", "0.4")
+    order_vec = _level_order_vec(o)
+    if order_vec:
+        helper = _LEVEL_ORDER_R
+        x_fac = f".labplot_ordered_levels({_data(x)}, {order_vec})"
+        fill_fac = f".labplot_ordered_levels({_data(color)}, {order_vec})"
+    else:
+        helper = ""
+        x_fac = f"factor({_data(x)})"
+        fill_fac = f"factor({_data(color)})"
     inner = (
         "  geom_boxplot(width = 0.12, fill = \"white\", alpha = 0.7, outlier.shape = NA, "
         "box.linewidth = 0.3, whisker.linewidth = 0.3, median.linewidth = 0.3) +\n"
     ) if o.get("show_box", True) else ""
-    points = "  geom_jitter(width = 0.12, size = 1.0, alpha = 0.4) +\n" if o.get("show_points", False) else ""
-    return f"""
-p <- ggplot(df, aes(x = factor({_data(x)}), y = {_data(y)}, fill = factor({_data(color)}))) +
-  geom_violin(trim = FALSE, alpha = 0.85, scale = "width", linewidth = 0.35) +
+    points = f"  geom_jitter(width = 0.12, size = 1.0, alpha = {pt_a}) +\n" if o.get("show_points", False) else ""
+    extra = ""
+    if o.get("show_n"):
+        extra += _group_n_layer(x_fac, y, at="top")
+    if o.get("show_significance"):
+        extra += _sig_layer(x_fac, y)
+    return f"""{helper}
+p <- ggplot(df, aes(x = {x_fac}, y = {_data(y)}, fill = {fill_fac})) +
+  geom_violin(trim = FALSE, alpha = {fill_a}, scale = "width", linewidth = 0.35) +
 {inner}{points}  scale_fill_manual(values = labplot_palette()) +
   {_labs(o, x, y)} + guides(fill = guide_legend(title = {rq(color)}))
-"""
+{extra}"""
 
 
 def _scatter(m, o):
@@ -116,55 +333,88 @@ def _scatter(m, o):
         aes = f"aes(x = {_data(x)}, y = {_data(y)})"
         scale = ""
         guide = ""
+    pt_a = _alpha_r(o, "point_alpha", "0.8")
+    fit_extra = _fit_stats_layer(x, y) if o.get("show_fit_stats") else ""
+    y2_pre, y2_post = _y2_axis(o, x, y, "point", grouped=bool(color))
     return f"""
-p <- ggplot(df, {aes}) +
-{smooth}  geom_point(size = 2.0, alpha = 0.8) +
+{y2_pre}p <- ggplot(df, {aes}) +
+{smooth}  geom_point(size = 2.0, alpha = {pt_a}) +
 {scale}  {_labs(o, x, y)}{guide}
-"""
+{y2_post}{fit_extra}"""
 
 
 def _bar(m, o):
     x = m["x"]
     stat = o.get("stat", m.get("stat", "mean"))
     color_bars = bool(o.get("color_bars", False))
+    fill_a = _alpha_r(o, "fill_alpha", "0.9")
+    order_vec = _level_order_vec(o)
+    order_helper = _LEVEL_ORDER_R if order_vec else ""
+
+    def _fac(expr):
+        return f".labplot_ordered_levels({expr}, {order_vec})" if order_vec else f".labplot_ordered_factor({expr})"
+
+    count_extra = _group_n_layer(_fac(_data(x)), None) if o.get("show_n") else ""
     if stat == "count" or not m.get("y"):
         if color_bars:
             return f"""
-{_ORDERED_FACTOR_R}
-p <- ggplot(df, aes(x = .labplot_ordered_factor({_data(x)}), fill = .labplot_ordered_factor({_data(x)}))) +
-  geom_bar(alpha = 0.9, colour = "grey25", linewidth = 0.25) +
+{_ORDERED_FACTOR_R}{order_helper}
+p <- ggplot(df, aes(x = {_fac(_data(x))}, fill = {_fac(_data(x))})) +
+  geom_bar(alpha = {fill_a}, colour = "grey25", linewidth = 0.25) +
   scale_fill_manual(values = labplot_palette()) +
   {_labs(o, x, "count")} + guides(fill = "none")
-"""
+{count_extra}"""
         return f"""
-{_ORDERED_FACTOR_R}
-p <- ggplot(df, aes(x = .labplot_ordered_factor({_data(x)}))) +
-  geom_bar(fill = labplot_accent(), alpha = 0.9, colour = "grey25", linewidth = 0.25) +
+{_ORDERED_FACTOR_R}{order_helper}
+p <- ggplot(df, aes(x = {_fac(_data(x))})) +
+  geom_bar(fill = labplot_accent(), alpha = {fill_a}, colour = "grey25", linewidth = 0.25) +
   {_labs(o, x, "count")} + guides(fill = "none")
-"""
+{count_extra}"""
     y = m["y"]
     fun = "mean" if stat == "mean" else "sum"
+    error_type = _choice(o.get("error_type"), ("sd", "se", "ci95"), "sd")
     err = ""
+    n_line = ""
     if stat == "mean" and o.get("error_bars", True):
-        err = """  geom_errorbar(aes(ymin = .val - .sd, ymax = .val + .sd), width = 0.2, linewidth = 0.25) +
+        if error_type == "se":
+            n_line = "\n                   .n = dplyr::n(),"
+            err_expr = ".sd / sqrt(.n)"
+        elif error_type == "ci95":
+            n_line = "\n                   .n = dplyr::n(),"
+            err_expr = "1.96 * .sd / sqrt(.n)"
+        else:
+            err_expr = ".sd"
+        err = f"""  geom_errorbar(aes(ymin = .val - {err_expr}, ymax = .val + {err_expr}), width = 0.2, linewidth = 0.25) +
 """
     fill_aes = ", fill = .grp" if color_bars else ""
     fill_layer = (
-        "  geom_col(width = 0.7, alpha = 0.9, colour = \"grey25\", linewidth = 0.25) +\n"
+        f"  geom_col(width = 0.7, alpha = {fill_a}, colour = \"grey25\", linewidth = 0.25) +\n"
         "  scale_fill_manual(values = labplot_palette()) +\n"
         if color_bars else
-        "  geom_col(width = 0.7, alpha = 0.9, fill = labplot_accent(), colour = \"grey25\", linewidth = 0.25) +\n"
+        f"  geom_col(width = 0.7, alpha = {fill_a}, fill = labplot_accent(), colour = \"grey25\", linewidth = 0.25) +\n"
     )
+    mean_extra = ""
+    if o.get("show_n"):
+        mean_extra += f"""
+.n_bar <- df %>% dplyr::mutate(.grp = {_fac(_data(x))}) %>%
+  dplyr::group_by(.grp) %>% dplyr::summarise(.n = dplyr::n(), .groups = "drop")
+.lab_df <- dplyr::left_join(.summ, .n_bar, by = ".grp")
+.lab_df$.ypos <- .lab_df$.val + ifelse(is.na(.lab_df$.sd), 0, abs(.lab_df$.sd))
+p <- p + geom_text(data = .lab_df, aes(x = .grp, y = .ypos, label = paste0("n=", .n)),
+                   inherit.aes = FALSE, vjust = -0.6, size = {_GEOM_TEXT_SIZE_7PT}, colour = "grey30")
+"""
+    if o.get("show_significance"):
+        mean_extra += _sig_layer(_fac(_data(x)), y)
     return f"""
-{_ORDERED_FACTOR_R}
-.summ <- df %>% dplyr::mutate(.grp = .labplot_ordered_factor({_data(x)})) %>%
+{_ORDERED_FACTOR_R}{order_helper}
+.summ <- df %>% dplyr::mutate(.grp = {_fac(_data(x))}) %>%
   dplyr::group_by(.grp) %>%
   dplyr::summarise(.val = {fun}({_data(y)}, na.rm = TRUE),
-                   .sd = stats::sd({_data(y)}, na.rm = TRUE), .groups = "drop")
+                   .sd = stats::sd({_data(y)}, na.rm = TRUE),{n_line} .groups = "drop")
 .summ$.sd[is.na(.summ$.sd)] <- 0
 p <- ggplot(.summ, aes(x = .grp, y = .val{fill_aes})) +
 {fill_layer}{err}  {_labs(o, x, f"{fun}({y})")} + guides(fill = "none")
-"""
+{mean_extra}"""
 
 
 def _grouped_bar(m, o):
@@ -173,8 +423,11 @@ def _grouped_bar(m, o):
     fun = "sum" if stat == "sum" else "mean"
     width = max(0.2, min(1.0, _num(o.get("bar_width"), 0.68)))
     legend = o.get("legend_title") or group
+    order_vec = _level_order_vec(o)
+    order_helper = _LEVEL_ORDER_R if order_vec else ""
+    x_fac = f".labplot_ordered_levels(.x_raw, {order_vec})" if order_vec else ".labplot_ordered_factor(.x_raw)"
     return f"""
-{_ORDERED_FACTOR_R}
+{_ORDERED_FACTOR_R}{order_helper}
 .plot <- df %>%
   dplyr::transmute(.x_raw = {_data(x)},
                    .value_raw = suppressWarnings(as.numeric({_data(y)})),
@@ -182,7 +435,7 @@ def _grouped_bar(m, o):
   dplyr::filter(!is.na(.x_raw), !is.na(.value_raw), !is.na(.series)) %>%
   dplyr::group_by(.x_raw, .series) %>%
   dplyr::summarise(.value = {fun}(.value_raw, na.rm = TRUE), .groups = "drop") %>%
-  dplyr::mutate(.x = .labplot_ordered_factor(.x_raw))
+  dplyr::mutate(.x = {x_fac})
 p <- ggplot(.plot, aes(x = .x, y = .value, fill = .series)) +
   geom_col(position = position_dodge(width = 0.76), width = {width}, alpha = 0.9,
            colour = "grey25", linewidth = 0.25) +
@@ -270,11 +523,12 @@ def _line(m, o):
         line_color_arg = f", colour = {rq(line_color)}" if line_color else ""
         point_color_arg = f", colour = {rq(line_color)}" if line_color else ""
     point_layer = "" if point_r_shape is None else f"  geom_point(size = 1.8, shape = {point_r_shape}{point_color_arg}) +\n"
+    y2_pre, y2_post = _y2_axis(o, x, y, "line", grouped=bool(group))
     return f"""
-p <- ggplot(df, {aes}) +
+{y2_pre}p <- ggplot(df, {aes}) +
   geom_line(linewidth = 0.35, linetype = {rq(line_type)}{line_color_arg}) +
 {point_layer}{scale}  {_labs(o, x, y)}{guide}
-"""
+{y2_post}"""
 
 
 def _histogram(m, o):
@@ -297,9 +551,10 @@ def _histogram(m, o):
         f"  geom_density(aes(y = after_stat(count)), linewidth = 0.35, colour = \"grey20\", fill = NA) +\n"
         if density and not group else ""
     )
+    fill_a = _alpha_r(o, "fill_alpha", "0.85")
     return f"""
 p <- ggplot(df, {aes}) +
-  geom_histogram(bins = {bins}, colour = "white", linewidth = 0.15, alpha = 0.85{position}) +
+  geom_histogram(bins = {bins}, colour = "white", linewidth = 0.15, alpha = {fill_a}{position}) +
 {density_layer}{scale}  {_labs(o, value, "count")}{guide}
 """
 
@@ -317,9 +572,10 @@ def _density(m, o):
         scale = ""
         guide = ""
     rug_layer = "  geom_rug(alpha = 0.25, linewidth = 0.15) +\n" if rug else ""
+    fill_a = _alpha_r(o, "fill_alpha", "0.28")
     return f"""
 p <- ggplot(df, {aes}) +
-  geom_density(alpha = 0.28, linewidth = 0.35) +
+  geom_density(alpha = {fill_a}, linewidth = 0.35) +
 {rug_layer}{scale}  {_labs(o, value, "density")}{guide}
 """
 
@@ -366,14 +622,25 @@ def _heatmap(m, o):
         rowid = f'as.character(df[[{rq(row_label)}]])'
     else:
         rowid = "as.character(seq_len(nrow(df)))"
+    scale_rows_on = bool(o.get("scale_rows", False))
     scale_rows = ""
-    if o.get("scale_rows", False):
+    if scale_rows_on:
         scale_rows = ".mat <- t(scale(t(.mat)));\n"
     palette = _choice(o.get("palette"), _HEATMAP_OPTIONS, "blue_red")
     if o.get("color_mode") == "grayscale":
         fill_scale = 'scale_fill_gradient(low = "grey92", high = "grey15", na.value = "grey85")'
     elif palette == "blue_red":
-        fill_scale = 'scale_fill_gradient2(low = "#4C6F91", mid = "white", high = "#B24745", midpoint = 0, na.value = "grey90")'
+        mp = _finite_num(o.get("color_midpoint"))
+        if mp is not None:
+            midpoint_r = f"{mp:g}"
+        elif scale_rows_on:
+            # z-scored data is already centred at 0
+            midpoint_r = "0"
+        else:
+            # centre the diverging ramp on the data so all-positive matrices
+            # are not squashed into a single hue
+            midpoint_r = "stats::median(.long$value, na.rm = TRUE)"
+        fill_scale = f'scale_fill_gradient2(low = "#4C6F91", mid = "white", high = "#B24745", midpoint = {midpoint_r}, na.value = "grey90")'
     else:
         fill_scale = f"scale_fill_viridis_c(option = {rq(palette)}, na.value = \"grey85\")"
     return f"""
@@ -676,18 +943,25 @@ PLOT_TYPES = [
      "required": [{"key": "x", "label": "Group (X)", "roles": ["group", "category", "status"]},
                   {"key": "y", "label": "Value (Y)", "roles": ["numeric", "log2fc", "pvalue"]}],
      "optional": [{"key": "color", "label": "Color by", "roles": ["group", "category", "status"]}],
-     "options": [{"key": "show_points", "label": "Show points", "type": "bool", "default": True}]},
+     "options": [{"key": "show_points", "label": "Show points", "type": "bool", "default": True},
+                 {"key": "show_n", "label": "Show sample size (n)", "type": "bool", "default": False},
+                 {"key": "show_significance", "label": "Significance brackets", "type": "bool", "default": False}]},
     {"type": "violin", "label": "Violin plot",
      "required": [{"key": "x", "label": "Group (X)", "roles": ["group", "category", "status"]},
                   {"key": "y", "label": "Value (Y)", "roles": ["numeric", "log2fc", "pvalue"]}],
      "optional": [{"key": "color", "label": "Color by", "roles": ["group", "category", "status"]}],
      "options": [{"key": "show_box", "label": "Inner boxplot", "type": "bool", "default": True},
-                 {"key": "show_points", "label": "Show points", "type": "bool", "default": False}]},
+                 {"key": "show_points", "label": "Show points", "type": "bool", "default": False},
+                 {"key": "show_n", "label": "Show sample size (n)", "type": "bool", "default": False},
+                 {"key": "show_significance", "label": "Significance brackets", "type": "bool", "default": False}]},
     {"type": "scatter", "label": "Scatter plot",
      "required": [{"key": "x", "label": "X (numeric)", "roles": ["numeric", "log2fc", "pvalue", "time"]},
                   {"key": "y", "label": "Y (numeric)", "roles": ["numeric", "log2fc", "pvalue"]}],
      "optional": [{"key": "color", "label": "Color by", "roles": ["group", "category", "status"]}],
      "options": [{"key": "add_smooth", "label": "Regression line", "type": "bool", "default": False},
+                 {"key": "show_fit_stats", "label": "Show fit stats (R², slope)", "type": "bool", "default": False},
+                 {"key": "y2_column", "label": "Secondary Y column", "type": "text", "default": ""},
+                 {"key": "y2_label", "label": "Secondary Y-axis label", "type": "text", "default": ""},
                  {"key": "x_min", "label": "X-axis minimum", "type": "number", "default": None},
                  {"key": "x_max", "label": "X-axis maximum", "type": "number", "default": None},
                  {"key": "y_min", "label": "Y-axis minimum", "type": "number", "default": None},
@@ -696,8 +970,11 @@ PLOT_TYPES = [
      "required": [{"key": "x", "label": "Category / bin (X)", "roles": ["group", "category", "status", "numeric", "time"]}],
      "optional": [{"key": "y", "label": "Value (Y)", "roles": ["numeric", "log2fc"]}],
      "options": [{"key": "stat", "label": "Statistic", "type": "select", "choices": ["mean", "sum", "count"], "default": "mean"},
-                 {"key": "error_bars", "label": "Error bars (SD)", "type": "bool", "default": True},
-                 {"key": "color_bars", "label": "Color bars by category", "type": "bool", "default": False}]},
+                 {"key": "error_bars", "label": "Error bars", "type": "bool", "default": True},
+                 {"key": "error_type", "label": "Error bar type", "type": "select", "choices": ["sd", "se", "ci95"], "default": "sd"},
+                 {"key": "color_bars", "label": "Color bars by category", "type": "bool", "default": False},
+                 {"key": "show_n", "label": "Show sample size (n)", "type": "bool", "default": False},
+                 {"key": "show_significance", "label": "Significance brackets", "type": "bool", "default": False}]},
     {"type": "grouped_bar", "label": "Grouped bar chart",
      "required": [{"key": "x", "label": "Category / benchmark (X)", "roles": ["group", "category", "status", "time", "numeric"]},
                   {"key": "y", "label": "Value / score (Y)", "roles": ["numeric", "log2fc"]},
@@ -725,6 +1002,8 @@ PLOT_TYPES = [
                  {"key": "point_shape", "label": "Point shape", "type": "select",
                   "choices": list(_POINT_SHAPES.keys()), "default": "circle"},
                  {"key": "line_color", "label": "Line color", "type": "text", "default": ""},
+                 {"key": "y2_column", "label": "Secondary Y column", "type": "text", "default": ""},
+                 {"key": "y2_label", "label": "Secondary Y-axis label", "type": "text", "default": ""},
                  {"key": "x_min", "label": "X-axis minimum", "type": "number", "default": None},
                  {"key": "x_max", "label": "X-axis maximum", "type": "number", "default": None},
                  {"key": "y_min", "label": "Y-axis minimum", "type": "number", "default": None},
@@ -775,7 +1054,8 @@ PLOT_TYPES = [
      "required": [{"key": "columns", "label": "Value columns (matrix)", "roles": ["numeric", "log2fc", "pvalue"], "multi": True}],
      "optional": [{"key": "row_label", "label": "Row label", "roles": ["gene", "category", "text", "group"]}],
      "options": [{"key": "scale_rows", "label": "Z-score rows", "type": "bool", "default": False},
-                 {"key": "palette", "label": "Palette", "type": "select", "choices": ["blue_red", "viridis", "magma", "inferno", "plasma", "cividis"], "default": "blue_red"}]},
+                 {"key": "palette", "label": "Palette", "type": "select", "choices": ["blue_red", "viridis", "magma", "inferno", "plasma", "cividis"], "default": "blue_red"},
+                 {"key": "color_midpoint", "label": "Diverging midpoint (blue-red)", "type": "number", "default": None}]},
     {"type": "volcano", "label": "Volcano plot",
      "required": [{"key": "log2fc", "label": "log2 fold-change", "roles": ["log2fc", "numeric"]},
                   {"key": "pvalue", "label": "p-value / padj", "roles": ["pvalue", "numeric"]}],
@@ -1485,6 +1765,410 @@ PLOT_TYPES += [
                  {"key": "label_top", "label": "Label top N", "type": "number", "default": 0}]},
 ]
 
+
+# ================================================================
+# Additional scientific plot types (review-2026-07)
+# ================================================================
+def _sina(m, o):
+    x, y = m["x"], m["y"]
+    color = m.get("color") or x
+    pt_a = _alpha_r(o, "point_alpha", "0.75")
+    violin = (
+        '  geom_violin(fill = "grey92", colour = "grey75", linewidth = 0.3, '
+        'alpha = 0.6, scale = "width", trim = FALSE) +\n'
+    ) if o.get("show_violin", False) else ""
+    return f"""
+suppressMessages(library(ggforce))
+p <- ggplot(df, aes(x = factor({_data(x)}), y = {_data(y)})) +
+{violin}  ggforce::geom_sina(aes(colour = factor({_data(color)})), size = 1.4, alpha = {pt_a}, maxwidth = 0.8) +
+  scale_colour_manual(values = labplot_palette()) +
+  {_labs(o, x, y)} + guides(colour = guide_legend(title = {rq(color)}))
+"""
+
+
+def _qq(m, o):
+    value = m["value"]
+    group = m.get("group")
+    show_line = o.get("show_line", True)
+    if group:
+        aes = f"aes(sample = {_data(value)}, colour = factor({_data(group)}))"
+        line = '  stat_qq_line(linewidth = 0.4, linetype = "dashed") +\n' if show_line else ""
+        pts = "  stat_qq(size = 1.6, alpha = 0.8) +\n"
+        scale = "  scale_colour_manual(values = labplot_palette()) +\n"
+        guide = f" + guides(colour = guide_legend(title = {rq(group)}))"
+    else:
+        aes = f"aes(sample = {_data(value)})"
+        line = '  stat_qq_line(linewidth = 0.4, linetype = "dashed", colour = "grey45") +\n' if show_line else ""
+        pts = "  stat_qq(size = 1.6, alpha = 0.8, colour = labplot_accent()) +\n"
+        scale = ""
+        guide = ""
+    return f"""
+p <- ggplot(df, {aes}) +
+{line}{pts}{scale}  {_labs(o, "Theoretical quantiles", "Sample quantiles")}{guide}
+"""
+
+
+def _ecdf(m, o):
+    value = m["value"]
+    group = m.get("group")
+    if group:
+        aes = f"aes(x = {_data(value)}, colour = factor({_data(group)}))"
+        scale = "  scale_colour_manual(values = labplot_palette()) +\n"
+        guide = f" + guides(colour = guide_legend(title = {rq(group)}))"
+        col_arg = ""
+    else:
+        aes = f"aes(x = {_data(value)})"
+        scale = ""
+        guide = ""
+        col_arg = ", colour = labplot_accent()"
+    return f"""
+p <- ggplot(df, {aes}) +
+  stat_ecdf(geom = "step", linewidth = 0.5, pad = TRUE{col_arg}) +
+{scale}  {_labs(o, value, "Cumulative probability")}{guide}
+"""
+
+
+def _forest(m, o):
+    label, est = m["label"], m["estimate"]
+    lo, hi = m["ci_low"], m["ci_high"]
+    color = m.get("color")
+    ref = _num(o.get("ref_line"), 1.0)
+    if o.get("sort_by_estimate", False):
+        order_expr = ".plot$.label <- factor(.plot$.label, levels = unique(.plot$.label[order(.plot$.est)]))"
+    else:
+        order_expr = ".plot$.label <- factor(.plot$.label, levels = rev(unique(as.character(.plot$.label))))"
+    if color:
+        col_line = f"\n.plot$.col <- factor({_col(color)})[.keep]"
+        ebar = "  geom_errorbarh(aes(xmin = .lo, xmax = .hi, colour = .col), height = 0.18, linewidth = 0.4) +\n"
+        point = "  geom_point(aes(colour = .col), size = 2.4) +\n"
+        scale = "  scale_colour_manual(values = labplot_palette()) +\n"
+        guide = f" + guides(colour = guide_legend(title = {rq(color)}))"
+    else:
+        col_line = ""
+        ebar = '  geom_errorbarh(aes(xmin = .lo, xmax = .hi), height = 0.18, linewidth = 0.4, colour = "#4C6F91") +\n'
+        point = '  geom_point(size = 2.4, colour = "#B24745") +\n'
+        scale = ""
+        guide = ""
+    return f"""
+.plot <- data.frame(
+  .label = as.character({_col(label)}),
+  .est = suppressWarnings(as.numeric({_col(est)})),
+  .lo = suppressWarnings(as.numeric({_col(lo)})),
+  .hi = suppressWarnings(as.numeric({_col(hi)})),
+  stringsAsFactors = FALSE
+)
+.keep <- stats::complete.cases(.plot[, c(".est", ".lo", ".hi")]) & !is.na(.plot$.label)
+.plot <- .plot[.keep, , drop = FALSE]{col_line}
+if (nrow(.plot) < 1) stop("forest plot needs at least one complete row")
+{order_expr}
+p <- ggplot(.plot, aes(x = .est, y = .label)) +
+  geom_vline(xintercept = {ref:g}, linetype = "dashed", colour = "grey50", linewidth = 0.3) +
+{ebar}{point}{scale}  {_labs(o, "Estimate (95% CI)", "")}{guide}
+"""
+
+
+def _dot_plot(m, o):
+    cat, val = m["category"], m["value"]
+    lvl = ".plot$.cat[order(.plot$.val)]" if o.get("sort_desc", True) else "rev(unique(as.character(.plot$.cat)))"
+    return f"""
+.plot <- df %>%
+  dplyr::transmute(.cat = as.character({_data(cat)}), .val = suppressWarnings(as.numeric({_data(val)}))) %>%
+  dplyr::filter(!is.na(.cat), !is.na(.val)) %>%
+  dplyr::group_by(.cat) %>%
+  dplyr::summarise(.val = mean(.val, na.rm = TRUE), .groups = "drop")
+if (nrow(.plot) < 1) stop("dot plot needs at least one category")
+.plot$.cat <- factor(.plot$.cat, levels = {lvl})
+p <- ggplot(.plot, aes(x = .val, y = .cat)) +
+  geom_segment(aes(x = 0, xend = .val, yend = .cat), colour = "grey75", linewidth = 0.4) +
+  geom_point(size = 2.8, colour = labplot_accent()) +
+  {_labs(o, val, "")}
+"""
+
+
+def _lollipop(m, o):
+    cat, val = m["category"], m["value"]
+    lvl = ".plot$.cat[order(.plot$.val, decreasing = TRUE)]" if o.get("sort_desc", True) else "unique(as.character(.plot$.cat))"
+    return f"""
+.plot <- df %>%
+  dplyr::transmute(.cat = as.character({_data(cat)}), .val = suppressWarnings(as.numeric({_data(val)}))) %>%
+  dplyr::filter(!is.na(.cat), !is.na(.val)) %>%
+  dplyr::group_by(.cat) %>%
+  dplyr::summarise(.val = mean(.val, na.rm = TRUE), .groups = "drop")
+if (nrow(.plot) < 1) stop("lollipop needs at least one category")
+.plot$.cat <- factor(.plot$.cat, levels = {lvl})
+p <- ggplot(.plot, aes(x = .cat, y = .val)) +
+  geom_segment(aes(xend = .cat, y = 0, yend = .val), colour = "grey75", linewidth = 0.4) +
+  geom_point(size = 2.8, colour = labplot_accent()) +
+  {_labs(o, cat, val)}
+"""
+
+
+def _area(m, o):
+    x, y, group = m["x"], m["y"], m["group"]
+    stack_mode = _choice(o.get("stack_mode"), ("stack", "fill"), "stack")
+    fill_a = _alpha_r(o, "fill_alpha", "0.85")
+    ydefault = "Proportion" if stack_mode == "fill" else y
+    return f"""
+.plot <- df %>%
+  dplyr::transmute(.x = suppressWarnings(as.numeric({_data(x)})),
+                   .y = suppressWarnings(as.numeric({_data(y)})),
+                   .grp = factor({_data(group)})) %>%
+  dplyr::filter(is.finite(.x), is.finite(.y), !is.na(.grp)) %>%
+  dplyr::group_by(.x, .grp) %>%
+  dplyr::summarise(.y = sum(.y, na.rm = TRUE), .groups = "drop") %>%
+  dplyr::arrange(.x)
+if (nrow(.plot) < 1) stop("area chart needs numeric x/y and a group")
+p <- ggplot(.plot, aes(x = .x, y = .y, fill = .grp)) +
+  geom_area(position = "{stack_mode}", alpha = {fill_a}, colour = "white", linewidth = 0.15) +
+  scale_fill_manual(values = labplot_palette()) +
+  {_labs(o, x, ydefault)} + guides(fill = guide_legend(title = {rq(group)}))
+"""
+
+
+def _ridge(m, o):
+    value, group = m["value"], m["group"]
+    overlap = max(0.4, min(4.0, _num(o.get("overlap"), 1.4)))
+    fill_a = _alpha_r(o, "fill_alpha", "0.85")
+    return f"""
+.d <- df %>%
+  dplyr::transmute(.val = suppressWarnings(as.numeric({_data(value)})), .grp = as.character({_data(group)})) %>%
+  dplyr::filter(is.finite(.val), !is.na(.grp))
+if (nrow(.d) < 2) stop("ridge plot needs numeric values")
+.levels <- sort(unique(.d$.grp))
+.rng <- range(.d$.val, finite = TRUE)
+.dens <- do.call(rbind, lapply(seq_along(.levels), function(.i) {{
+  v <- .d$.val[.d$.grp == .levels[.i]]
+  if (length(v) < 2 || !is.finite(stats::sd(v)) || stats::sd(v) == 0) return(NULL)
+  de <- stats::density(v, n = 256, from = .rng[1], to = .rng[2])
+  data.frame(.gi = .i, x = de$x, y = de$y)
+}}))
+if (is.null(.dens) || nrow(.dens) == 0) stop("ridge plot needs >= 2 values per group")
+.scale <- {overlap:g} / max(.dens$y, na.rm = TRUE)
+.dens$ymin <- .dens$.gi
+.dens$ymax <- .dens$.gi + .dens$y * .scale
+.dens$.grp <- factor(.levels[.dens$.gi], levels = rev(.levels))
+p <- ggplot(.dens, aes(x = x, group = .grp, fill = .grp)) +
+  geom_ribbon(aes(ymin = ymin, ymax = ymax), colour = "grey30", linewidth = 0.2, alpha = {fill_a}) +
+  scale_fill_manual(values = labplot_palette()) +
+  scale_y_continuous(breaks = seq_along(.levels), labels = .levels) +
+  {_labs(o, value, group)} + guides(fill = "none")
+"""
+
+
+def _embedding(m, o):
+    x, y = m["x"], m["y"]
+    color = m.get("color")
+    pt_a = _alpha_r(o, "point_alpha", "0.8")
+    if color:
+        aes = f"aes(x = {_data(x)}, y = {_data(y)}, colour = factor({_data(color)}))"
+        scale = "  scale_colour_manual(values = labplot_palette()) +\n"
+        guide = f" + guides(colour = guide_legend(title = {rq(color)}))"
+    else:
+        aes = f"aes(x = {_data(x)}, y = {_data(y)})"
+        scale = ""
+        guide = ""
+    label_block = ""
+    if color and o.get("show_cluster_labels", False):
+        label_block = f"""
+.cent <- df %>%
+  dplyr::transmute(.cx = suppressWarnings(as.numeric({_data(x)})),
+                   .cy = suppressWarnings(as.numeric({_data(y)})),
+                   .g = factor({_data(color)})) %>%
+  dplyr::filter(is.finite(.cx), is.finite(.cy), !is.na(.g)) %>%
+  dplyr::group_by(.g) %>%
+  dplyr::summarise(.mx = stats::median(.cx), .my = stats::median(.cy), .groups = "drop")
+p <- p + geom_text(data = .cent, aes(x = .mx, y = .my, label = .g),
+                   inherit.aes = FALSE, size = {_GEOM_TEXT_SIZE_7PT}, fontface = "bold", colour = "grey15")
+"""
+    return f"""
+p <- ggplot(df, {aes}) +
+  geom_point(size = 1.8, alpha = {pt_a}) +
+{scale}  coord_equal() +
+  {_labs(o, x, y)}{guide}
+{label_block}"""
+
+
+def _curve_fit(m, o):
+    x, y = m["x"], m["y"]
+    group = m.get("group")
+    model = _choice(o.get("fit_model"), ("linear", "4pl", "mm", "exponential", "logistic"), "linear")
+    show_points = o.get("show_points", True)
+    fit_fun = f"""
+.fit_one <- function(d) {{
+  d <- d[stats::complete.cases(d), , drop = FALSE]
+  d <- d[order(d$.x), , drop = FALSE]
+  if (nrow(d) < 3 || length(unique(d$.x)) < 2) return(list(pred = NULL, lab = ""))
+  gx <- seq(min(d$.x), max(d$.x), length.out = 200)
+  .model <- {rq(model)}
+  .ss_tot <- sum((d$.y - mean(d$.y))^2)
+  .r2 <- function(fitted) if (!is.finite(.ss_tot) || .ss_tot <= 0) NA_real_ else 1 - sum((d$.y - fitted)^2) / .ss_tot
+  if (.model == "linear") {{
+    fit <- stats::lm(.y ~ .x, data = d)
+    gy <- stats::predict(fit, newdata = data.frame(.x = gx))
+    co <- stats::coef(fit)
+    lab <- sprintf("y = %.3g x + %.3g\\nR\\u00b2 = %.3f", co[[2]], co[[1]], summary(fit)$r.squared)
+    return(list(pred = data.frame(.x = gx, .y = as.numeric(gy)), lab = lab))
+  }}
+  fit <- tryCatch({{
+    if (.model == "mm") {{
+      stats::nls(.y ~ Vmax * .x / (Km + .x), data = d,
+                 start = list(Vmax = max(d$.y, na.rm = TRUE), Km = stats::median(d$.x, na.rm = TRUE)),
+                 control = stats::nls.control(warnOnly = TRUE, maxiter = 200))
+    }} else if (.model == "exponential") {{
+      .a0 <- d$.y[which.min(d$.x)]; if (!is.finite(.a0) || .a0 == 0) .a0 <- 1
+      stats::nls(.y ~ a * exp(b * .x), data = d, start = list(a = .a0, b = 0.01),
+                 control = stats::nls.control(warnOnly = TRUE, maxiter = 200))
+    }} else if (.model == "logistic") {{
+      stats::nls(.y ~ L / (1 + exp(-k * (.x - x0))), data = d,
+                 start = list(L = max(d$.y, na.rm = TRUE), k = 1, x0 = stats::median(d$.x, na.rm = TRUE)),
+                 control = stats::nls.control(warnOnly = TRUE, maxiter = 200))
+    }} else if (.model == "4pl") {{
+      stats::nls(.y ~ D + (A - D) / (1 + (.x / C)^B), data = d,
+                 start = list(A = min(d$.y, na.rm = TRUE), B = 1,
+                              C = stats::median(d$.x, na.rm = TRUE), D = max(d$.y, na.rm = TRUE)),
+                 control = stats::nls.control(warnOnly = TRUE, maxiter = 200))
+    }} else NULL
+  }}, error = function(e) NULL)
+  gy <- if (!is.null(fit)) tryCatch(stats::predict(fit, newdata = data.frame(.x = gx)), error = function(e) NULL) else NULL
+  if (is.null(gy) || any(!is.finite(gy))) {{
+    fit2 <- stats::lm(.y ~ .x, data = d)
+    gy <- stats::predict(fit2, newdata = data.frame(.x = gx))
+    co <- stats::coef(fit2)
+    lab <- sprintf("linear fit (fallback)\\ny = %.3g x + %.3g\\nR\\u00b2 = %.3f", co[[2]], co[[1]], summary(fit2)$r.squared)
+    return(list(pred = data.frame(.x = gx, .y = as.numeric(gy)), lab = lab))
+  }}
+  cf <- stats::coef(fit); r2v <- .r2(stats::predict(fit))
+  lab <- if (.model == "mm") sprintf("Vmax = %.3g\\nKm = %.3g\\nR\\u00b2 = %.3f", cf[["Vmax"]], cf[["Km"]], r2v)
+    else if (.model == "exponential") sprintf("y = %.3g e^(%.3g x)\\nR\\u00b2 = %.3f", cf[["a"]], cf[["b"]], r2v)
+    else if (.model == "logistic") sprintf("L = %.3g, k = %.3g\\nx0 = %.3g\\nR\\u00b2 = %.3f", cf[["L"]], cf[["k"]], cf[["x0"]], r2v)
+    else sprintf("EC50/IC50 = %.3g\\nHill = %.3g\\nR\\u00b2 = %.3f", cf[["C"]], cf[["B"]], r2v)
+  list(pred = data.frame(.x = gx, .y = as.numeric(gy)), lab = lab)
+}}
+"""
+    if group:
+        base = f"""
+.dat <- df %>%
+  dplyr::transmute(.x = suppressWarnings(as.numeric({_data(x)})),
+                   .y = suppressWarnings(as.numeric({_data(y)})),
+                   .grp = factor({_data(group)})) %>%
+  dplyr::filter(is.finite(.x), is.finite(.y), !is.na(.grp))
+"""
+        pts = "  geom_point(aes(colour = .grp), size = 1.9, alpha = 0.8) +\n" if show_points else ""
+        curve = "  geom_line(data = .curve, aes(x = .x, y = .y, colour = .grp), linewidth = 0.5) +\n"
+        scale = "  scale_colour_manual(values = labplot_palette()) +\n"
+        guide = f" + guides(colour = guide_legend(title = {rq(group)}))"
+        fit_loop = """
+.groups <- unique(as.character(.dat$.grp))
+.curve <- do.call(rbind, lapply(.groups, function(.g) {
+  d <- .dat[as.character(.dat$.grp) == .g, c(".x", ".y"), drop = FALSE]
+  r <- .fit_one(d)
+  if (is.null(r$pred)) return(NULL)
+  cc <- r$pred; cc$.grp <- .g; cc
+}))
+if (is.null(.curve) || nrow(.curve) == 0) stop("curve fit produced no fitted values")
+.curve$.grp <- factor(.curve$.grp, levels = levels(.dat$.grp))
+"""
+        annotate = ""
+    else:
+        base = f"""
+.dat <- df %>%
+  dplyr::transmute(.x = suppressWarnings(as.numeric({_data(x)})),
+                   .y = suppressWarnings(as.numeric({_data(y)}))) %>%
+  dplyr::filter(is.finite(.x), is.finite(.y))
+"""
+        pts = '  geom_point(size = 1.9, alpha = 0.8, colour = "#4C6F91") +\n' if show_points else ""
+        curve = '  geom_line(data = .curve, aes(x = .x, y = .y), linewidth = 0.5, colour = "#B24745") +\n'
+        scale = ""
+        guide = ""
+        fit_loop = """
+.res <- .fit_one(.dat[, c(".x", ".y"), drop = FALSE])
+.curve <- .res$pred
+if (is.null(.curve) || nrow(.curve) == 0) stop("curve fit produced no fitted values")
+"""
+        annotate = f"""
+if (nzchar(.res$lab)) {{
+  p <- p + annotate("text", x = min(.dat$.x, na.rm = TRUE), y = max(.dat$.y, na.rm = TRUE),
+                    label = .res$lab, hjust = 0, vjust = 1, size = {_GEOM_TEXT_SIZE_7PT}, colour = "grey20")
+}}
+"""
+    return f"""{base}
+if (nrow(.dat) < 3) stop("curve fit needs at least 3 finite points")
+{fit_fun}{fit_loop}
+p <- ggplot(.dat, aes(x = .x, y = .y)) +
+{pts}{curve}{scale}  {_labs(o, x, y)}{guide}
+{annotate}"""
+
+
+_BUILDERS.update({
+    "sina": _sina,
+    "qq": _qq,
+    "ecdf": _ecdf,
+    "forest": _forest,
+    "dot_plot": _dot_plot,
+    "lollipop": _lollipop,
+    "area": _area,
+    "ridge": _ridge,
+    "embedding": _embedding,
+    "curve_fit": _curve_fit,
+})
+
+PLOT_TYPES += [
+    {"type": "sina", "label": "Sina / beeswarm plot",
+     "required": [{"key": "x", "label": "Group (X)", "roles": ["group", "category", "status"]},
+                  {"key": "y", "label": "Value (Y)", "roles": ["numeric", "log2fc", "pvalue"]}],
+     "optional": [{"key": "color", "label": "Color by", "roles": ["group", "category", "status"]}],
+     "options": [{"key": "show_violin", "label": "Violin outline", "type": "bool", "default": False}]},
+    {"type": "qq", "label": "Q-Q (normal) plot",
+     "required": [{"key": "value", "label": "Value (numeric)", "roles": ["numeric", "log2fc", "pvalue"]}],
+     "optional": [{"key": "group", "label": "Color by", "roles": ["group", "category", "status"]}],
+     "options": [{"key": "show_line", "label": "Reference line", "type": "bool", "default": True}]},
+    {"type": "ecdf", "label": "Empirical CDF (ECDF)",
+     "required": [{"key": "value", "label": "Value (numeric)", "roles": ["numeric", "log2fc", "pvalue"]}],
+     "optional": [{"key": "group", "label": "Color by", "roles": ["group", "category", "status"]}],
+     "options": []},
+    {"type": "forest", "label": "Forest plot",
+     "required": [{"key": "label", "label": "Study / variable", "roles": ["text", "category", "group", "gene"]},
+                  {"key": "estimate", "label": "Estimate (OR/HR/effect)", "roles": ["numeric", "log2fc"]},
+                  {"key": "ci_low", "label": "CI lower", "roles": ["numeric"]},
+                  {"key": "ci_high", "label": "CI upper", "roles": ["numeric"]}],
+     "optional": [{"key": "color", "label": "Color by", "roles": ["group", "category", "status"]}],
+     "options": [{"key": "ref_line", "label": "Reference line (x)", "type": "number", "default": 1.0},
+                 {"key": "sort_by_estimate", "label": "Sort by estimate", "type": "bool", "default": False}]},
+    {"type": "dot_plot", "label": "Cleveland dot plot",
+     "required": [{"key": "category", "label": "Category", "roles": ["group", "category", "status", "text", "gene"]},
+                  {"key": "value", "label": "Value", "roles": ["numeric", "log2fc"]}],
+     "optional": [],
+     "options": [{"key": "sort_desc", "label": "Sort by value", "type": "bool", "default": True}]},
+    {"type": "lollipop", "label": "Lollipop chart",
+     "required": [{"key": "category", "label": "Category", "roles": ["group", "category", "status", "text", "gene"]},
+                  {"key": "value", "label": "Value", "roles": ["numeric", "log2fc"]}],
+     "optional": [],
+     "options": [{"key": "sort_desc", "label": "Sort by value", "type": "bool", "default": True}]},
+    {"type": "area", "label": "Stacked area chart",
+     "required": [{"key": "x", "label": "X (time/order)", "roles": ["time", "numeric"]},
+                  {"key": "y", "label": "Value (Y)", "roles": ["numeric"]},
+                  {"key": "group", "label": "Series / group", "roles": ["group", "category", "status"]}],
+     "optional": [],
+     "options": [{"key": "stack_mode", "label": "Stacking", "type": "select", "choices": ["stack", "fill"], "default": "stack"}]},
+    {"type": "ridge", "label": "Ridgeline / joyplot",
+     "required": [{"key": "value", "label": "Value (numeric)", "roles": ["numeric", "log2fc", "pvalue"]},
+                  {"key": "group", "label": "Group (rows)", "roles": ["group", "category", "status"]}],
+     "optional": [],
+     "options": [{"key": "overlap", "label": "Ridge overlap", "type": "number", "default": 1.4}]},
+    {"type": "embedding", "label": "Embedding (UMAP / t-SNE)",
+     "required": [{"key": "x", "label": "Dim 1 (X)", "roles": ["numeric"]},
+                  {"key": "y", "label": "Dim 2 (Y)", "roles": ["numeric"]}],
+     "optional": [{"key": "color", "label": "Color by cluster/label", "roles": ["group", "category", "status"]}],
+     "options": [{"key": "show_cluster_labels", "label": "Label clusters", "type": "bool", "default": False}]},
+    {"type": "curve_fit", "label": "Curve fit / dose-response",
+     "required": [{"key": "x", "label": "X (dose/conc)", "roles": ["numeric", "time"]},
+                  {"key": "y", "label": "Y (response)", "roles": ["numeric"]}],
+     "optional": [{"key": "group", "label": "Series / group", "roles": ["group", "category", "status"]}],
+     "options": [{"key": "fit_model", "label": "Fit model", "type": "select",
+                  "choices": ["linear", "4pl", "mm", "exponential", "logistic"], "default": "linear"},
+                 {"key": "show_points", "label": "Show data points", "type": "bool", "default": True}]},
+]
+
 PLOT_DOMAINS = {
     "box": "basic", "violin": "basic", "scatter": "basic", "bar": "basic", "grouped_bar": "basic", "overlap_bar": "basic", "line": "basic",
     "histogram": "basic", "density": "basic", "correlation_heatmap": "basic", "heatmap": "basic",
@@ -1500,6 +2184,9 @@ PLOT_DOMAINS = {
     "chord_diagram": "advanced", "parallel_coordinates": "advanced",
     "confusion_matrix": "advanced", "tri_surface": "advanced", "wireframe_3d": "advanced",
     "roc_pr_curve": "advanced", "ma_plot": "advanced",
+    "sina": "basic", "qq": "basic", "ecdf": "basic", "dot_plot": "basic",
+    "lollipop": "basic", "area": "basic", "ridge": "basic",
+    "forest": "clinical", "embedding": "omics", "curve_fit": "engineering",
 }
 DOMAIN_LABELS = {
     "basic": "Basic statistics", "omics": "Omics", "clinical": "Clinical / cohort",

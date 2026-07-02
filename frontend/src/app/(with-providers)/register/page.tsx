@@ -115,7 +115,7 @@ export default function RegisterPage() {
               </div>
               {orgMode === 'join' && (
                 <div className="space-y-2">
-                  <Input value={orgQuery} onChange={(e) => setOrgQuery(e.target.value)} placeholder="Search institution or lab" />
+                  <Input value={orgQuery} onChange={(e) => setOrgQuery(e.target.value)} placeholder="Search institution or lab" aria-label="Search organizations" />
                   <div className="max-h-32 space-y-1 overflow-auto">
                     {orgResults.map((org) => (
                       <button key={org.id} type="button" onClick={() => setSelectedOrg(org)}
@@ -129,7 +129,7 @@ export default function RegisterPage() {
                 </div>
               )}
               {orgMode === 'create' && (
-                <Input value={newOrgName} onChange={(e) => setNewOrgName(e.target.value)} placeholder="Organization or lab name" />
+                <Input value={newOrgName} onChange={(e) => setNewOrgName(e.target.value)} placeholder="Organization or lab name" aria-label="New organization name" />
               )}
               {orgMode === 'none' && <p className="text-xs text-muted-foreground">You can request to join or create an organization later.</p>}
             </div>

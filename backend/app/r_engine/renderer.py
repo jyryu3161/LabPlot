@@ -37,6 +37,57 @@ def _rscript_bin() -> str:
     return found or settings.RSCRIPT_PATH
 
 
+def _scrubbed_env(work: str) -> dict[str, str]:
+    """Build a minimal environment for the R subprocess.
+
+    The child must NOT inherit application secrets (JWT_SECRET,
+    DATA_ENCRYPTION_KEY, DATABASE_URL, API keys, SMTP_PASSWORD, S3 credentials,
+    ...). Only PATH plus a handful of R/locale variables are forwarded; HOME and
+    TMPDIR are pinned to the disposable work directory.
+    """
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+        "HOME": work,
+        "TMPDIR": work,
+    }
+    for name in ("R_HOME", "R_LIBS", "R_LIBS_USER", "R_LIBS_SITE", "LANG", "LC_ALL"):
+        value = os.environ.get(name)
+        if value:
+            env[name] = value
+    return env
+
+
+def _resource_limit_preexec():
+    """Return a preexec_fn capping the R subprocess, or None when unsupported
+    (e.g. Windows, or if the POSIX ``resource`` module is unavailable)."""
+    try:
+        import resource
+    except Exception:
+        return None
+
+    cpu_seconds = int(settings.RENDER_TIMEOUT_SEC) + 10
+    limits = (
+        ("RLIMIT_AS", 2 * 1024 * 1024 * 1024),   # 2 GB address space
+        ("RLIMIT_CPU", cpu_seconds),             # CPU seconds (timeout + buffer)
+        ("RLIMIT_FSIZE", 200 * 1024 * 1024),     # 200 MB max output file size
+    )
+
+    def _apply() -> None:
+        for name, limit in limits:
+            res_id = getattr(resource, name, None)
+            if res_id is None:
+                continue
+            try:
+                _soft, hard = resource.getrlimit(res_id)
+                if hard != resource.RLIM_INFINITY:
+                    limit = min(limit, hard)
+                resource.setrlimit(res_id, (limit, limit))
+            except (ValueError, OSError):
+                continue
+
+    return _apply
+
+
 def _dimensions(options: dict) -> tuple[float, float, int]:
     size = options.get("size", "wide")
     if size == "custom":
@@ -54,6 +105,20 @@ def _finite_float_option(options: dict, key: str) -> float | None:
     except (TypeError, ValueError):
         return None
     return value if math.isfinite(value) else None
+
+
+_FACET_SCALES = ("fixed", "free", "free_x", "free_y")
+
+
+def _facet_r(options: dict) -> str:
+    """facet_wrap snippet for `facet_by`, or "" when unset. Column via rq()."""
+    col = options.get("facet_by")
+    if not isinstance(col, str) or not col.strip():
+        return ""
+    scales = options.get("facet_scales")
+    if scales not in _FACET_SCALES:
+        scales = "fixed"
+    return f'p <- p + facet_wrap(vars(.data[[{rq(col)}]]), scales = "{scales}")\n'
 
 
 def _category_color_override_r(options: dict) -> str:
@@ -106,11 +171,18 @@ def build_script(plot_type: str, mapping: dict, options: dict, preset: str,
         preset = "nature"
     opts = options or {}
     color_mode = opts.get("color_mode", "color")
+    # Sanitize before interpolating into the R comment so a stray newline/quote
+    # cannot break out of the comment line. theme_r() only compares this value
+    # (never interpolates it into R), so the raw value stays safe for palette logic.
+    safe_color_mode = color_mode if color_mode in ("color", "grayscale") else "color"
     font_scale = opts.get("font_scale", 1.0)
     plot_r = build_plot_r(plot_type, mapping, opts)
     w, h, dpi = _dimensions(opts)
+    # svglite/ggsave require bg as a string, so use "transparent" (not NA) for
+    # an alpha=0 background that every device (png/svg/tiff/cairo_pdf) accepts.
+    bg_r = '"transparent"' if opts.get("transparent_background") else '"white"'
     head = ("# LabPlot AI - reproducible figure script\n"
-            f"# plot type: {plot_type} | style: {preset} | color: {color_mode}\n"
+            f"# plot type: {plot_type} | style: {preset} | color: {safe_color_mode}\n"
             "# generated with LabPlot academic figure rules: 7 pt text, restrained palettes, white background, no gridlines\n"
             + _HEADER
             + f'\ndf <- readr::read_csv("{data_filename}", show_col_types = FALSE)\n'
@@ -119,10 +191,17 @@ def build_script(plot_type: str, mapping: dict, options: dict, preset: str,
     # ---- device-rendered plots (ComplexHeatmap etc.): template defines draw_plot() ----
     if plot_type in DEVICE_TYPES:
         export = f"""
-png("figure.png", width = {w} * {dpi}, height = {h} * {dpi}, res = {dpi}, pointsize = 7, bg = "white"); draw_plot(); invisible(dev.off())
-svglite::svglite("figure.svg", width = {w}, height = {h}, pointsize = 7, bg = "white"); draw_plot(); invisible(dev.off())
-tiff("figure.tiff", width = {w} * {dpi}, height = {h} * {dpi}, res = {dpi}, pointsize = 7, compression = "lzw", bg = "white"); draw_plot(); invisible(dev.off())
-pdf("figure.pdf", width = {w}, height = {h}, pointsize = 7); draw_plot(); invisible(dev.off())
+.pdf_device <- if (isTRUE(capabilities("cairo"))) grDevices::cairo_pdf else grDevices::pdf
+png("figure.png", width = {w} * {dpi}, height = {h} * {dpi}, res = {dpi}, pointsize = 7, bg = {bg_r}); draw_plot(); invisible(dev.off())
+svglite::svglite("figure.svg", width = {w}, height = {h}, pointsize = 7, bg = {bg_r}); draw_plot(); invisible(dev.off())
+tiff("figure.tiff", width = {w} * {dpi}, height = {h} * {dpi}, res = {dpi}, pointsize = 7, compression = "lzw", bg = {bg_r}); draw_plot(); invisible(dev.off())
+.pdf_device("figure.pdf", width = {w}, height = {h}, pointsize = 7, bg = {bg_r}); draw_plot(); invisible(dev.off())
+if (isTRUE(capabilities("cairo"))) {{
+  tryCatch({{
+    grDevices::cairo_ps("figure.eps", width = {w}, height = {h}, pointsize = 7, bg = {bg_r}, fallback_resolution = 600)
+    draw_plot(); invisible(dev.off())
+  }}, error = function(e) message("EPS export skipped: ", conditionMessage(e)))
+}}
 """
         return head + plot_r + export
 
@@ -173,15 +252,31 @@ pdf("figure.pdf", width = {w}, height = {h}, pointsize = 7); draw_plot(); invisi
             post += f"p <- p + {coord_fn}({', '.join(coord_args)})\n"
         elif opts.get("flip_coords"):
             post += "p <- p + coord_flip()\n"
+        hline = _finite_float_option(opts, "hline_at")
+        if hline is not None:
+            post += f'p <- p + geom_hline(yintercept = {hline:g}, linetype = "dashed", linewidth = 0.3, colour = "grey50")\n'
+        vline = _finite_float_option(opts, "vline_at")
+        if vline is not None:
+            post += f'p <- p + geom_vline(xintercept = {vline:g}, linetype = "dashed", linewidth = 0.3, colour = "grey50")\n'
+        post += _facet_r(opts)
 
     export = f"""
-ggsave("figure.png",  p, width = {w}, height = {h}, dpi = {dpi}, bg = "white", limitsize = FALSE)
-ggsave("figure.svg",  p, width = {w}, height = {h}, bg = "white", limitsize = FALSE)
-ggsave("figure.tiff", p, width = {w}, height = {h}, dpi = {dpi}, bg = "white", compression = "lzw", limitsize = FALSE)
-ggsave("figure.pdf",  p, width = {w}, height = {h}, bg = "white", limitsize = FALSE)
+.pdf_device <- if (isTRUE(capabilities("cairo"))) grDevices::cairo_pdf else grDevices::pdf
+ggsave("figure.png",  p, width = {w}, height = {h}, dpi = {dpi}, bg = {bg_r}, limitsize = FALSE)
+ggsave("figure.svg",  p, width = {w}, height = {h}, bg = {bg_r}, limitsize = FALSE)
+ggsave("figure.tiff", p, width = {w}, height = {h}, dpi = {dpi}, bg = {bg_r}, compression = "lzw", limitsize = FALSE)
+ggsave("figure.pdf",  p, width = {w}, height = {h}, bg = {bg_r}, device = .pdf_device, limitsize = FALSE)
+if (isTRUE(capabilities("cairo"))) {{
+  tryCatch(
+    ggsave("figure.eps", p, width = {w}, height = {h}, bg = {bg_r}, device = grDevices::cairo_ps, fallback_resolution = 600, limitsize = FALSE),
+    error = function(e) message("EPS export skipped: ", conditionMessage(e))
+  )
+}}
 """
     return (head
-            + theme_r(preset, color_mode, font_scale, opts.get("palette_name"), opts.get("custom_palette_values"))
+            + theme_r(preset, color_mode, font_scale, opts.get("palette_name"),
+                      opts.get("custom_palette_values"), opts.get("font_family"),
+                      bool(opts.get("transparent_background")))
             + plot_r
             + theme_append
             + post
@@ -212,6 +307,8 @@ def render(plot_type: str, mapping: dict, options: dict, preset: str,
                 capture_output=True,
                 text=True,
                 timeout=settings.RENDER_TIMEOUT_SEC,
+                env=_scrubbed_env(work),
+                preexec_fn=_resource_limit_preexec(),
             )
         except subprocess.TimeoutExpired:
             return RenderResult(False, r_code, {}, "Rendering timed out")
@@ -223,7 +320,7 @@ def render(plot_type: str, mapping: dict, options: dict, preset: str,
             return RenderResult(False, r_code, {}, log.strip())
 
         outputs = {}
-        for ext in ("png", "svg", "tiff", "pdf"):
+        for ext in ("png", "svg", "tiff", "pdf", "eps"):
             src = os.path.join(work, f"figure.{ext}")
             if os.path.exists(src):
                 dst = os.path.join(out_dir, f"figure.{ext}")

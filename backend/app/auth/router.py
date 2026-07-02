@@ -23,7 +23,7 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 @router.post("/register", response_model=UserResponse, status_code=201,
              dependencies=[Depends(rate_limit("auth_register", 10, 3600))])
 def register(data: UserRegister, request: Request, db: Session = Depends(get_db)):
-    user = service.register_user(
+    user, created = service.register_user(
         db,
         data.email,
         data.password,
@@ -31,8 +31,12 @@ def register(data: UserRegister, request: Request, db: Session = Depends(get_db)
         organization_id=data.organization_id,
         organization_name=data.organization_name,
     )
-    audit_service.log_event(db, actor_id=user.id, action="auth.register", target_type="user", target_id=user.id, metadata={"email": user.email}, request=request)
-    db.commit()
+    # Only audit real registrations. When `created` is False the email already
+    # exists and `user` is a synthetic response returned to avoid enumeration;
+    # nothing was persisted, so there is nothing (and no real actor) to log.
+    if created:
+        audit_service.log_event(db, actor_id=user.id, action="auth.register", target_type="user", target_id=user.id, metadata={"email": user.email}, request=request)
+        db.commit()
     return user
 
 
@@ -68,6 +72,14 @@ def reset_password(data: PasswordResetConfirm, request: Request, db: Session = D
     audit_service.log_event(db, actor_id=None, action="auth.password_reset.complete", target_type="user", metadata={}, request=request)
     db.commit()
     return out
+
+
+@router.post("/logout", response_model=MessageResponse)
+def logout(request: Request, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    service.logout_user(db, current_user)
+    audit_service.log_event(db, actor_id=current_user.id, action="auth.logout", target_type="user", target_id=current_user.id, metadata={}, request=request)
+    db.commit()
+    return MessageResponse(message="Signed out")
 
 
 @router.get("/me", response_model=UserResponse)

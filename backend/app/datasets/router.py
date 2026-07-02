@@ -13,7 +13,15 @@ from app.common.quotas import enforce_storage_quota
 from app.common.security import rate_limit
 from app.config import settings
 from app.datasets import service
-from app.datasets.schemas import DatasetListItem, DatasetPreviewResponse, DatasetReorderRequest, DatasetResponse, DatasetUpdate
+from app.datasets.schemas import (
+    DatasetListItem,
+    DatasetPreviewResponse,
+    DatasetReorderRequest,
+    DatasetResponse,
+    DatasetTransformPreviewResponse,
+    DatasetTransformRequest,
+    DatasetUpdate,
+)
 from app.projects import service as project_service
 from app.recommend import rules
 
@@ -171,7 +179,59 @@ def delete_dataset(dataset_id: uuid.UUID, request: Request, db: Session = Depend
     db.commit()
 
 
+@router.post("/{dataset_id}/transform", response_model=DatasetResponse, status_code=201)
+def transform_dataset(
+    dataset_id: uuid.UUID,
+    data: DatasetTransformRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    _: None = Depends(rate_limit("dataset_transform", 30, 3600)),
+):
+    operations = [op.model_dump(exclude_none=True) for op in data.operations]
+    source, content = service.build_transformed_csv(db, dataset_id, current_user.id, operations)
+    project_id = source.project_id
+    if project_id is None:
+        project_id = project_service.ensure_default_project(db, current_user.id).id
+    else:
+        project_service.require_project_write(db, project_id, current_user.id)
+    enforce_storage_quota(db, current_user, len(content))
+    name = (data.name or "").strip() or f"{source.name} (transformed)"
+    ds = service.create_dataset(db, current_user.id, "transformed.csv", content,
+                                name=name, project_id=project_id,
+                                description=f"Transformed from '{source.name}'")
+    audit_service.log_event(
+        db,
+        actor_id=current_user.id,
+        action="dataset.transform",
+        target_type="dataset",
+        target_id=ds.id,
+        metadata={"source_dataset_id": str(source.id), "operations": len(operations), "bytes": len(content)},
+        request=request,
+    )
+    db.commit()
+    return ds
+
+
+@router.post("/{dataset_id}/transform/preview", response_model=DatasetTransformPreviewResponse)
+def transform_dataset_preview(
+    dataset_id: uuid.UUID,
+    data: DatasetTransformRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    _: None = Depends(rate_limit("dataset_transform_preview", 120, 3600)),
+):
+    operations = [op.model_dump(exclude_none=True) for op in data.operations]
+    return service.transform_preview(db, dataset_id, current_user.id, operations)
+
+
 @router.get("/{dataset_id}/chart-suggestions")
 def chart_suggestions(dataset_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     ds = service.get_dataset(db, dataset_id, current_user.id)
     return {"suggestions": rules.suggest_charts(service.focused_column_profile(ds))}
+
+
+@router.get("/{dataset_id}/columns/{column}/values")
+def column_values(dataset_id: uuid.UUID, column: str, limit: int = 200,
+                  db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    return service.column_values(db, dataset_id, current_user.id, column, limit=limit)

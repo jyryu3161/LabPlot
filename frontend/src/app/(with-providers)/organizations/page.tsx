@@ -1,9 +1,9 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { Building2, KeyRound, Loader2, Search, Users } from 'lucide-react';
+import { Building2, Copy, KeyRound, Loader2, Search, Users } from 'lucide-react';
 import { AppHeader } from '@/components/layout/AppHeader';
 import { useAuthContext } from '@/components/auth/AuthProvider';
 import { Badge } from '@/components/ui/badge';
@@ -43,6 +43,8 @@ export default function OrganizationsPage() {
   const [geminiKey, setGeminiKey] = useState('');
   const [memberEmail, setMemberEmail] = useState('');
   const [memberRole, setMemberRole] = useState<'admin' | 'member'>('member');
+  const [memberSearchOpen, setMemberSearchOpen] = useState(false);
+  const memberSearchRef = useRef<HTMLDivElement>(null);
 
   const { data: myOrgs, isLoading } = useQuery({ queryKey: ['my-organizations'], queryFn: listMyOrganizations });
   const { data: searchResults } = useQuery({ queryKey: ['organization-search', query], queryFn: () => searchOrganizations(query) });
@@ -123,6 +125,32 @@ export default function OrganizationsPage() {
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Save failed'),
   });
 
+  // Close the member-search suggestions on Escape or outside click.
+  useEffect(() => {
+    if (!memberSearchOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setMemberSearchOpen(false);
+    };
+    const onPointerDown = (event: MouseEvent) => {
+      if (memberSearchRef.current && !memberSearchRef.current.contains(event.target as Node)) {
+        setMemberSearchOpen(false);
+      }
+    };
+    document.addEventListener('keydown', onKeyDown);
+    document.addEventListener('mousedown', onPointerDown);
+    return () => {
+      document.removeEventListener('keydown', onKeyDown);
+      document.removeEventListener('mousedown', onPointerDown);
+    };
+  }, [memberSearchOpen]);
+
+  const copyToClipboard = (value: string, label: string) => {
+    navigator.clipboard?.writeText(value).then(
+      () => toast.success(`${label} copied`),
+      () => toast.error('Copy failed'),
+    );
+  };
+
   return (
     <div className="min-h-screen bg-muted/20">
       <AppHeader />
@@ -149,7 +177,7 @@ export default function OrganizationsPage() {
           <Card>
             <CardHeader className="pb-2"><CardTitle className="text-base">Create Organization</CardTitle></CardHeader>
             <CardContent className="space-y-2">
-              <Input value={newOrgName} onChange={(e) => setNewOrgName(e.target.value)} placeholder="Lab or institution name" />
+              <Input value={newOrgName} onChange={(e) => setNewOrgName(e.target.value)} placeholder="Lab or institution name" aria-label="Organization name" />
               <Button className="w-full" onClick={() => createOrg.mutate()} disabled={createOrg.isPending || !newOrgName.trim()}>
                 {createOrg.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Create'}
               </Button>
@@ -159,7 +187,7 @@ export default function OrganizationsPage() {
           <Card>
             <CardHeader className="pb-2"><CardTitle className="flex items-center gap-2 text-base"><Search className="h-4 w-4" /> Find Organization</CardTitle></CardHeader>
             <CardContent className="space-y-2">
-              <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search name, slug, domain" />
+              <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search name, slug, domain" aria-label="Search organizations" />
               <div className="max-h-60 space-y-1 overflow-auto">
                 {(searchResults ?? []).map((org) => (
                   <div key={org.id} className="rounded-md border bg-background p-2 text-sm">
@@ -193,7 +221,15 @@ export default function OrganizationsPage() {
                   </CardTitle>
                 </CardHeader>
                 <CardContent className="grid gap-3 text-sm md:grid-cols-3">
-                  <div><span className="text-muted-foreground">Slug</span><div className="font-medium">{selected.organization.slug}</div></div>
+                  <div>
+                    <span className="text-muted-foreground">Slug</span>
+                    <div className="flex items-center gap-1 font-medium">
+                      <span className="min-w-0 truncate">{selected.organization.slug}</span>
+                      <Button type="button" variant="ghost" size="icon-xs" aria-label="Copy slug" onClick={() => copyToClipboard(selected.organization.slug, 'Slug')}>
+                        <Copy className="h-3 w-3" />
+                      </Button>
+                    </div>
+                  </div>
                   <div><span className="text-muted-foreground">Domain</span><div className="font-medium">{selected.organization.domain || '-'}</div></div>
                   <div><span className="text-muted-foreground">Membership</span><div className="font-medium">{selected.membership.status}</div></div>
                 </CardContent>
@@ -211,21 +247,21 @@ export default function OrganizationsPage() {
                       </div>
                       <div className="grid items-end gap-3 md:grid-cols-4">
                         <div className="space-y-1">
-                          <Label>Provider</Label>
-                          <select className="w-full rounded-md border px-3 py-2 text-sm" value={activeProvider} onChange={(e) => setProvider(e.target.value)}>
+                          <Label htmlFor="org-ai-provider">Provider</Label>
+                          <select id="org-ai-provider" className="w-full rounded-md border px-3 py-2 text-sm" value={activeProvider} onChange={(e) => setProvider(e.target.value)}>
                             <option value="claude">Claude (Anthropic)</option>
                             <option value="gemini">Gemini (Google)</option>
                           </select>
                         </div>
                         {activeProvider === 'claude' ? (
                           <>
-                            <div className="space-y-1"><Label>Claude model</Label><Input value={activeClaudeModel} onChange={(e) => setClaudeModel(e.target.value)} /></div>
-                            <div className="space-y-1"><Label>Anthropic key {aiCfg?.has_anthropic_key && <span className="text-xs text-green-600">(set)</span>}</Label><Input type="password" value={anthropicKey} onChange={(e) => setAnthropicKey(e.target.value)} placeholder={aiCfg?.has_anthropic_key ? 'leave blank to keep' : 'sk-ant-...'} /></div>
+                            <div className="space-y-1"><Label htmlFor="org-claude-model">Claude model</Label><Input id="org-claude-model" value={activeClaudeModel} onChange={(e) => setClaudeModel(e.target.value)} /></div>
+                            <div className="space-y-1"><Label htmlFor="org-anthropic-key">Anthropic key {aiCfg?.has_anthropic_key && <span className="text-xs text-green-600">(set)</span>}</Label><Input id="org-anthropic-key" type="password" value={anthropicKey} onChange={(e) => setAnthropicKey(e.target.value)} placeholder={aiCfg?.has_anthropic_key ? 'leave blank to keep' : 'sk-ant-...'} /></div>
                           </>
                         ) : (
                           <>
-                            <div className="space-y-1"><Label>Gemini model</Label><Input value={activeGeminiModel} onChange={(e) => setGeminiModel(e.target.value)} /></div>
-                            <div className="space-y-1"><Label>Gemini key {aiCfg?.has_gemini_key && <span className="text-xs text-green-600">(set)</span>}</Label><Input type="password" value={geminiKey} onChange={(e) => setGeminiKey(e.target.value)} placeholder={aiCfg?.has_gemini_key ? 'leave blank to keep' : 'AIza...'} /></div>
+                            <div className="space-y-1"><Label htmlFor="org-gemini-model">Gemini model</Label><Input id="org-gemini-model" value={activeGeminiModel} onChange={(e) => setGeminiModel(e.target.value)} /></div>
+                            <div className="space-y-1"><Label htmlFor="org-gemini-key">Gemini key {aiCfg?.has_gemini_key && <span className="text-xs text-green-600">(set)</span>}</Label><Input id="org-gemini-key" type="password" value={geminiKey} onChange={(e) => setGeminiKey(e.target.value)} placeholder={aiCfg?.has_gemini_key ? 'leave blank to keep' : 'AIza...'} /></div>
                           </>
                         )}
                         <Button onClick={() => saveAi.mutate()} disabled={saveAi.isPending}>
@@ -240,10 +276,10 @@ export default function OrganizationsPage() {
                     <CardHeader className="pb-2"><CardTitle className="flex items-center gap-2 text-base"><Users className="h-4 w-4" /> Members</CardTitle></CardHeader>
                     <CardContent className="space-y-4 overflow-x-auto">
                       <div className="grid items-end gap-2 rounded-md border bg-muted/20 p-3 md:grid-cols-[minmax(0,1fr)_140px_auto]">
-                        <div className="relative space-y-1">
-                          <Label>Existing user email</Label>
-                          <Input type="email" value={memberEmail} onChange={(e) => setMemberEmail(e.target.value)} placeholder="user@lab.edu" />
-                          {memberEmail.trim().length >= 2 && (
+                        <div className="relative space-y-1" ref={memberSearchRef}>
+                          <Label htmlFor="member-email">Existing user email</Label>
+                          <Input id="member-email" type="email" value={memberEmail} onFocus={() => setMemberSearchOpen(true)} onChange={(e) => { setMemberEmail(e.target.value); setMemberSearchOpen(true); }} placeholder="user@lab.edu" />
+                          {memberSearchOpen && memberEmail.trim().length >= 2 && (
                             <div className="absolute left-0 right-0 top-full z-20 mt-1 max-h-56 overflow-auto rounded-md border bg-background shadow-lg">
                               {searchingUsers ? (
                                 <div className="flex items-center gap-2 px-3 py-2 text-xs text-muted-foreground"><Loader2 className="h-3.5 w-3.5 animate-spin" /> Searching...</div>
@@ -252,7 +288,7 @@ export default function OrganizationsPage() {
                                   <button
                                     key={match.id}
                                     type="button"
-                                    onClick={() => setMemberEmail(match.email)}
+                                    onClick={() => { setMemberEmail(match.email); setMemberSearchOpen(false); }}
                                     className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-sm hover:bg-muted"
                                   >
                                     <span className="min-w-0">
@@ -272,8 +308,8 @@ export default function OrganizationsPage() {
                           )}
                         </div>
                         <div className="space-y-1">
-                          <Label>Role</Label>
-                          <select className="w-full rounded-md border bg-background px-3 py-2 text-sm" value={memberRole} onChange={(e) => setMemberRole(e.target.value as 'admin' | 'member')}>
+                          <Label htmlFor="member-role">Role</Label>
+                          <select id="member-role" className="w-full rounded-md border bg-background px-3 py-2 text-sm" value={memberRole} onChange={(e) => setMemberRole(e.target.value as 'admin' | 'member')}>
                             <option value="member">Member</option>
                             <option value="admin">Admin</option>
                           </select>
@@ -283,7 +319,7 @@ export default function OrganizationsPage() {
                         </Button>
                       </div>
                       <table className="w-full text-sm">
-                        <thead><tr className="border-b text-left text-muted-foreground"><th className="px-2 py-2">User</th><th className="px-2 py-2">Role</th><th className="px-2 py-2">Status</th><th className="px-2 py-2">Actions</th></tr></thead>
+                        <thead><tr className="border-b text-left text-muted-foreground"><th scope="col" className="px-2 py-2">User</th><th scope="col" className="px-2 py-2">Role</th><th scope="col" className="px-2 py-2">Status</th><th scope="col" className="px-2 py-2">Actions</th></tr></thead>
                         <tbody>
                           {(members ?? []).map((m) => (
                             <tr key={m.id} className="border-b last:border-0">

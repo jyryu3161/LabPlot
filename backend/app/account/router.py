@@ -6,9 +6,15 @@ from app.account import service
 from app.account.schemas import AccountDeleteRequest
 from app.auth.models import User
 from app.common.deps import get_current_user, get_db
+from app.common.quotas import quota_summary
 from app.common.security import rate_limit
 
 router = APIRouter(prefix="/api/account", tags=["account"])
+
+
+@router.get("/usage")
+def account_usage(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    return quota_summary(db, current_user)
 
 
 @router.get("/export", dependencies=[Depends(rate_limit("account_export", 10, 3600))])

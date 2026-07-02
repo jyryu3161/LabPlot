@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
@@ -8,14 +8,24 @@ import { toast } from 'sonner';
 import { useAuthContext } from '@/components/auth/AuthProvider';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import { ThemeToggle } from '@/components/theme/ThemeToggle';
 import { cn } from '@/lib/utils';
 import { acceptProjectInvitation, listProjectInvitations, rejectProjectInvitation } from '@/lib/api';
-import { BarChart3, Bell, Building2, Check, FolderKanban, Images, Shield, LogOut, GalleryHorizontalEnd, UserCircle, X } from 'lucide-react';
+import { BarChart3, Bell, Building2, Check, FolderKanban, Images, LayoutGrid, Menu, Shield, LogOut, GalleryHorizontalEnd, UserCircle, X } from 'lucide-react';
 
 const NAV = [
   { href: '/projects', label: 'Projects', icon: FolderKanban },
   { href: '/gallery', label: 'Gallery', icon: GalleryHorizontalEnd },
   { href: '/figures', label: 'Figures', icon: Images },
+  { href: '/canvases', label: 'Canvases', icon: LayoutGrid },
   { href: '/organizations', label: 'Organizations', icon: Building2 },
 ];
 
@@ -24,6 +34,7 @@ export function AppHeader() {
   const pathname = usePathname();
   const qc = useQueryClient();
   const [invitationsOpen, setInvitationsOpen] = useState(false);
+  const invitationsRef = useRef<HTMLDivElement>(null);
   const { data: invitations } = useQuery({
     queryKey: ['project-invitations'],
     queryFn: listProjectInvitations,
@@ -51,13 +62,32 @@ export function AppHeader() {
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Decline failed'),
   });
 
+  // Close the invitations popover on Escape or outside click.
+  useEffect(() => {
+    if (!invitationsOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setInvitationsOpen(false);
+    };
+    const onPointerDown = (event: MouseEvent) => {
+      if (invitationsRef.current && !invitationsRef.current.contains(event.target as Node)) {
+        setInvitationsOpen(false);
+      }
+    };
+    document.addEventListener('keydown', onKeyDown);
+    document.addEventListener('mousedown', onPointerDown);
+    return () => {
+      document.removeEventListener('keydown', onKeyDown);
+      document.removeEventListener('mousedown', onPointerDown);
+    };
+  }, [invitationsOpen]);
+
   return (
     <header className="border-b bg-background sticky top-0 z-30">
       <div className="mx-auto flex h-14 max-w-7xl items-center gap-6 px-4">
         <Link href="/" className="flex items-center gap-2 font-semibold">
           <BarChart3 className="h-5 w-5 text-primary" /> LabPlot AI
         </Link>
-        <nav className="flex items-center gap-1">
+        <nav className="hidden items-center gap-1 md:flex">
           {NAV.map((n) => {
             const Icon = n.icon;
             const active = pathname.startsWith(n.href);
@@ -80,7 +110,8 @@ export function AppHeader() {
           </Link>
         </nav>
         <div className="ml-auto flex items-center gap-3">
-          <div className="relative">
+          <ThemeToggle />
+          <div className="relative" ref={invitationsRef}>
             <Button
               type="button"
               variant="ghost"
@@ -127,11 +158,45 @@ export function AppHeader() {
               </div>
             )}
           </div>
-          <span className="text-sm text-muted-foreground">{user?.display_name}{user?.is_admin ? ' (admin)' : ''}</span>
-          <Button variant="outline" size="sm" onClick={logout}>
+          <span className="hidden text-sm text-muted-foreground md:inline">{user?.display_name}{user?.is_admin ? ' (admin)' : ''}</span>
+          <Button variant="outline" size="sm" onClick={logout} className="hidden md:inline-flex">
             <LogOut className="h-4 w-4" />
             <span>Log out</span>
           </Button>
+
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              render={<Button type="button" variant="ghost" size="icon-sm" className="md:hidden" aria-label="Open navigation menu" />}
+            >
+              <Menu className="h-4 w-4" />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-56">
+              {NAV.map((n) => {
+                const Icon = n.icon;
+                const active = pathname.startsWith(n.href);
+                return (
+                  <DropdownMenuItem key={n.href} render={<Link href={n.href} />} className={cn(active && 'font-medium')}>
+                    <Icon className="h-4 w-4" /> {n.label}
+                  </DropdownMenuItem>
+                );
+              })}
+              {user?.is_admin && (
+                <DropdownMenuItem render={<Link href="/admin" />} className={cn(pathname.startsWith('/admin') && 'font-medium')}>
+                  <Shield className="h-4 w-4" /> Admin
+                </DropdownMenuItem>
+              )}
+              <DropdownMenuItem render={<Link href="/account" />} className={cn(pathname.startsWith('/account') && 'font-medium')}>
+                <UserCircle className="h-4 w-4" /> Account
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              {user?.display_name && (
+                <DropdownMenuLabel className="truncate">{user.display_name}{user.is_admin ? ' (admin)' : ''}</DropdownMenuLabel>
+              )}
+              <DropdownMenuItem onClick={logout}>
+                <LogOut className="h-4 w-4" /> Log out
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </div>
     </header>

@@ -89,6 +89,13 @@ export interface ColumnProfile {
   stats: Record<string, number> | null;
 }
 
+export interface ColumnValues {
+  column: string;
+  values: string[];
+  distinct_count: number;
+  truncated: boolean;
+}
+
 export interface DatasetListItem {
   id: string;
   name: string;
@@ -267,7 +274,12 @@ export interface FigureVersion {
   svg_url?: string;
   tiff_url?: string;
   pdf_url?: string;
+  eps_url?: string;
   r_url?: string;
+  // Populated when a version is produced by applying AI suggestions: dotted
+  // paths that were applied vs. dropped as unsupported. Empty for plain edits.
+  applied?: string[];
+  skipped?: string[];
 }
 
 export interface FigureListItem {
@@ -288,8 +300,7 @@ export interface FigureListItem {
 export interface GalleryFigureItem extends FigureListItem {
   dataset_name?: string;
   project_name?: string;
-  owner_name?: string;
-  owner_email?: string;
+  is_public: boolean;
   current_version_id?: string;
   r_url?: string;
 }
@@ -330,7 +341,91 @@ export interface FigureDetail {
   created_at: string;
   updated_at: string;
   is_favorite: boolean;
+  is_public: boolean;
+  share_token?: string | null;
   versions: FigureVersion[];
+}
+
+export interface FigureShareResponse {
+  share_token: string | null;
+  share_url: string | null;
+}
+
+export interface SharedFigure {
+  id: string;
+  name: string;
+  plot_type: string;
+  created_at: string;
+  png_url?: string;
+  width_in?: number;
+  height_in?: number;
+  dpi?: number;
+}
+
+export interface UsageSummary {
+  ai_monthly_used: number;
+  ai_monthly_limit: number;
+  render_monthly_used: number;
+  render_monthly_limit: number;
+  storage_used_mb: number;
+  storage_limit_mb: number;
+}
+
+export type TransformOperation =
+  | { op: 'melt'; id_columns: string[]; value_columns: string[]; names_to?: string; values_to?: string }
+  | { op: 'filter'; column: string; operator: '==' | '!=' | '>' | '>=' | '<' | '<=' | 'contains' | 'not_null'; value?: string | number | null }
+  | { op: 'derive'; new_column: string; function: 'add' | 'subtract' | 'multiply' | 'divide' | 'log' | 'log2' | 'log10' | 'sqrt' | 'zscore' | 'abs'; columns: string[]; constant?: number }
+  | { op: 'select'; columns: string[] }
+  | { op: 'rename'; mapping: Record<string, string> };
+
+export interface TransformPreview {
+  columns: string[];
+  rows: (string | number | null)[][];
+  total_rows: number;
+}
+
+export interface CanvasPanelItem {
+  figure_id: string;
+  version_id: string;
+  row: number;
+  col: number;
+  label?: string;
+}
+
+export interface CanvasState {
+  rows: number;
+  cols: number;
+  label_style?: 'lower' | 'upper' | 'none';
+  items: CanvasPanelItem[];
+  output?: { png_path?: string; pdf_path?: string };
+}
+
+export interface CanvasListItem {
+  id: string;
+  project_id?: string | null;
+  name: string;
+  preset: string;
+  width_px: number;
+  height_px: number;
+  panel_count: number;
+  png_url?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CanvasDetail {
+  id: string;
+  project_id?: string | null;
+  name: string;
+  description?: string | null;
+  preset: string;
+  width_px: number;
+  height_px: number;
+  state: CanvasState;
+  png_url?: string | null;
+  pdf_url?: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface Review {
@@ -358,7 +453,28 @@ export interface Improvement {
   param_patch: Record<string, unknown>;
   priority?: string;
   applied: boolean;
+  // Dotted paths this suggestion proposed that were dropped by sanitization.
+  skipped?: string[];
   created_at: string;
+}
+
+export interface MethodsTextResponse { methods_text: string; }
+export interface AltTextResponse { alt_text: string; }
+
+export interface FigureCodeResponse {
+  language: 'python' | 'latex';
+  filename: string;
+  code: string;
+}
+
+export interface FigureComment {
+  id: string;
+  figure_id: string;
+  author_id: string;
+  author_name: string;
+  body: string;
+  created_at: string;
+  can_delete: boolean;
 }
 
 export interface AIConfig {

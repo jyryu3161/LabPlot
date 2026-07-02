@@ -34,3 +34,4 @@ lighthouse-*.html
 
 # os
 .DS_Store
+frontend/tsconfig.tsbuildinfo

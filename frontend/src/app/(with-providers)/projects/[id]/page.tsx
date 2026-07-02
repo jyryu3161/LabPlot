@@ -1,6 +1,6 @@
 'use client';
 
-import { use, useState, type DragEvent } from 'react';
+import { use, useEffect, useState, type DragEvent } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
@@ -158,6 +158,18 @@ export default function ProjectWorkspace({ params }: { params: Promise<{ id: str
     onSuccess: (r) => { setDescDraft(r.enhanced); toast.success('Enhanced'); },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Enhance failed'),
   });
+
+  // Warn before leaving with an unsaved research-description edit.
+  const descDirty = descDraft !== null && descDraft !== (project?.description ?? '');
+  useEffect(() => {
+    if (!descDirty) return;
+    const handler = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [descDirty]);
   const enhanceUpload = useMutation({
     mutationFn: () => enhancePrompt(uploadDesc, 'dataset_description', desc),
     onSuccess: (r) => { setUploadDesc(r.enhanced); toast.success('Enhanced'); },
@@ -249,6 +261,7 @@ export default function ProjectWorkspace({ params }: { params: Promise<{ id: str
           <CardHeader className="pb-2"><CardTitle className="flex items-center gap-2 text-base"><FlaskConical className="h-4 w-4 text-primary" /> Research description</CardTitle></CardHeader>
           <CardContent className="space-y-2">
             <Textarea value={desc} onChange={(e) => setDescDraft(e.target.value)} rows={3} readOnly={!canEditProject}
+              aria-label="Research description"
               placeholder="Describe the study (organism, design, treatments, hypothesis…). This context is given to the AI to improve chart recommendations, reviews and figure legends." />
             {canEditProject ? (
               <div className="flex gap-2">
@@ -403,7 +416,7 @@ export default function ProjectWorkspace({ params }: { params: Promise<{ id: str
                               <Button type="button" variant="ghost" size="sm" onClick={() => beginDatasetRename(d)} aria-label={`Rename ${d.name}`}>
                                 <Pencil className="h-4 w-4 text-muted-foreground" />
                               </Button>
-                              <Button type="button" variant="ghost" size="sm" onClick={() => { if (confirm(`Delete ${d.name}?`)) delDs.mutate(d.id); }}>
+                              <Button type="button" variant="ghost" size="sm" aria-label={`Delete ${d.name}`} onClick={() => { if (confirm(`Delete ${d.name}?`)) delDs.mutate(d.id); }}>
                                 <Trash2 className="h-4 w-4 text-muted-foreground" />
                               </Button>
                             </div>
@@ -495,7 +508,7 @@ export default function ProjectWorkspace({ params }: { params: Promise<{ id: str
                               <Button type="button" variant="ghost" size="sm" onClick={() => beginFigureRename(f)} aria-label={`Rename ${f.name}`}>
                                 <Pencil className="h-4 w-4 text-muted-foreground" />
                               </Button>
-                              <Button type="button" variant="ghost" size="sm" onClick={() => { if (confirm(`Delete ${f.name}?`)) delFig.mutate(f.id); }}>
+                              <Button type="button" variant="ghost" size="sm" aria-label={`Delete ${f.name}`} onClick={() => { if (confirm(`Delete ${f.name}?`)) delFig.mutate(f.id); }}>
                                 <Trash2 className="h-4 w-4 text-muted-foreground" />
                               </Button>
                             </>

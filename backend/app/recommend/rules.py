@@ -261,6 +261,68 @@ def suggest_charts(columns: list[dict[str, Any]], limit: int = MAX_RULE_SUGGESTI
             {"x": group[:3]},
             "strong")
 
+    # --- forest plot: effect estimate + lower/upper CI + a label column ---
+    estimate = _match(
+        numeric_cols + log2fc_cols,
+        r"\b(estimate|effect|coef|coefficient|beta|odds[_\s-]*ratio|or|hazard[_\s-]*ratio|hr|rr|log2fc|logfc|mean[_\s-]*diff)\b",
+    )
+    ci_low = _match(numeric_cols, r"\b(ci[_\s-]*low|ci[_\s-]*lower|lower|lcl|l95|conf[_\s-]*low)\b")
+    ci_high = _match(numeric_cols, r"\b(ci[_\s-]*high|ci[_\s-]*upper|upper|ucl|u95|conf[_\s-]*high)\b")
+    forest_label = _match(text_cols, r"\b(study|trial|variable|term|subgroup|cohort|comparison|outcome|label|name)\b") or _first(text_cols)
+    if estimate and ci_low and ci_high and forest_label and ci_low != ci_high:
+        add("forest", "Forest plot", 0.95,
+            "Detected an effect estimate with lower/upper confidence bounds and a label column, the structure of a forest plot.",
+            {"label": forest_label, "estimate": estimate, "ci_low": ci_low, "ci_high": ci_high},
+            {"label": [forest_label], "estimate": [estimate], "ci_low": [ci_low], "ci_high": [ci_high]},
+            "exact")
+
+    # --- dose-response / curve fit: dose-like x with response-like y ---
+    dose_x = _match(numeric_cols, r"\b(dose|conc|concentration|log[_\s-]*dose|log[_\s-]*conc)\b")
+    resp_y = _match(numeric_cols, r"\b(response|inhibition|viability|activity|signal|absorbance|od|effect|survival|growth)\b")
+    if dose_x and resp_y and dose_x != resp_y:
+        add("curve_fit", "Curve fit / dose-response", 0.9,
+            "Detected dose/concentration and response columns suitable for a fitted dose-response (4PL) curve.",
+            {"x": dose_x, "y": resp_y, "group": primary_group, "fit_model": "4pl"},
+            {"x": [dose_x], "y": [resp_y]},
+            "strong")
+
+    # --- embedding scatter: precomputed 2-D coordinates (UMAP / t-SNE) ---
+    emb_x = _match(numeric_cols, r"\b(umap[_\s-]*1|tsne[_\s-]*1|t[_\s-]*sne[_\s-]*1|dim[_\s-]*1|component[_\s-]*1|embedding[_\s-]*1)\b")
+    emb_y = _match(numeric_cols, r"\b(umap[_\s-]*2|tsne[_\s-]*2|t[_\s-]*sne[_\s-]*2|dim[_\s-]*2|component[_\s-]*2|embedding[_\s-]*2)\b")
+    if emb_x and emb_y and emb_x != emb_y:
+        add("embedding", "Embedding (UMAP / t-SNE)", 0.92,
+            "Detected two precomputed embedding coordinate columns, ideal for a UMAP/t-SNE style labeled scatter.",
+            {"x": emb_x, "y": emb_y, "color": primary_group},
+            {"x": [emb_x], "y": [emb_y]},
+            "exact")
+
+    # --- stacked area: composition over an ordered/time axis by group ---
+    if time and numeric and primary_group:
+        add("area", "Stacked area chart", 0.78,
+            f"Show how the composition of '{numeric[0]}' across '{primary_group}' evolves over '{time[0]}'.",
+            {"x": time[0], "y": numeric[0], "group": primary_group},
+            {"x": time[:3], "y": numeric[:5], "group": group[:3]},
+            "good")
+
+    # --- sina / beeswarm and single-column distribution diagnostics ---
+    if primary_group and numeric:
+        add("sina", "Sina / beeswarm plot", 0.7,
+            f"Show every observation of '{numeric[0]}' across '{primary_group}' with a beeswarm/sina layout.",
+            {"x": primary_group, "y": numeric[0], "color": primary_group},
+            {"x": group[:3], "y": numeric[:5]},
+            "good")
+    if numeric:
+        add("ecdf", "Empirical CDF (ECDF)", 0.6,
+            f"Show the empirical cumulative distribution of '{numeric[0]}'.",
+            {"value": numeric[0], "group": primary_group},
+            {"value": numeric[:5]},
+            "good")
+        add("qq", "Q-Q (normal) plot", 0.58,
+            f"Assess the normality of '{numeric[0]}' with a quantile-quantile plot.",
+            {"value": numeric[0], "group": primary_group},
+            {"value": numeric[:5]},
+            "good")
+
     best_by_type: dict[str, dict[str, Any]] = {}
     for suggestion in suggestions:
         current = best_by_type.get(suggestion["plot_type"])

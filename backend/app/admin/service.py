@@ -23,7 +23,8 @@ from app.common.exceptions import BadRequestError, NotFoundError
 from app.common.quotas import quota_summary
 from app.config import settings
 from app.datasets.models import Dataset
-from app.figures.models import Figure, FigureCodeArtifact
+from app.figures.models import Figure, FigureCodeArtifact, FigureVersion
+from app.figures.service import _url as figure_asset_url
 from app.organizations.models import Organization, OrganizationMembership
 
 
@@ -262,3 +263,48 @@ def delete_user(db: Session, user_id: uuid.UUID, acting_user: User, request=None
 
 def list_audit_logs(db: Session, limit: int = 200) -> list:
     return audit_service.list_events(db, limit=limit)
+
+
+def list_gallery_figures(db: Session, limit: int = 200) -> list[dict]:
+    limit = max(1, min(limit, 500))
+    rows = (
+        db.query(Figure, User, FigureVersion)
+        .join(User, Figure.owner_id == User.id)
+        .outerjoin(FigureVersion, Figure.current_version_id == FigureVersion.id)
+        .filter(Figure.is_public == True)
+        .order_by(Figure.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    return [
+        {
+            "id": fig.id,
+            "name": fig.name,
+            "plot_type": fig.plot_type,
+            "status": fig.status,
+            "created_at": fig.created_at,
+            "updated_at": fig.updated_at,
+            "owner_email": owner.email,
+            "owner_name": owner.display_name,
+            "thumb_url": figure_asset_url(current.png_path) if current else None,
+        }
+        for fig, owner, current in rows
+    ]
+
+
+def unpublish_gallery_figure(db: Session, figure_id: uuid.UUID, acting_user: User, request=None) -> dict:
+    fig = db.query(Figure).filter(Figure.id == figure_id).first()
+    if not fig:
+        raise NotFoundError("Figure", str(figure_id))
+    fig.is_public = False
+    audit_service.log_event(
+        db,
+        actor_id=acting_user.id,
+        action="admin.gallery.unpublish",
+        target_type="figure",
+        target_id=fig.id,
+        metadata={"name": fig.name, "owner_id": str(fig.owner_id)},
+        request=request,
+    )
+    db.commit()
+    return {"ok": True}

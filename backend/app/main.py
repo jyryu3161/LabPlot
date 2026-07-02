@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
 from app.common.exceptions import AppError, app_error_handler
-from app.common.security import allowed_origins
+from app.common.security import allowed_origins, SECURITY_HEADERS
 
 # import models so metadata is registered before migrations
 from sqlalchemy import text
@@ -20,6 +20,7 @@ from app.datasets import models as _ds_models  # noqa: F401
 from app.figures import models as _fig_models  # noqa: F401
 from app.ai import models as _ai_models  # noqa: F401
 from app.audit import models as _audit_models  # noqa: F401
+from app.canvases import models as _canvas_models  # noqa: F401
 from app.client_errors import models as _client_error_models  # noqa: F401
 from app.palettes import models as _palette_models  # noqa: F401
 from app.database import engine
@@ -27,6 +28,7 @@ from app.database import engine
 from app.auth.router import router as auth_router
 from app.admin.router import router as admin_router
 from app.assets.router import router as assets_router
+from app.canvases.router import router as canvases_router
 from app.client_errors.router import router as client_errors_router
 from app.organizations.router import router as organizations_router
 from app.projects.router import router as projects_router
@@ -57,7 +59,16 @@ def _init_sentry() -> None:
 
 _init_sentry()
 
-app = FastAPI(title="LabPlot AI", description="AI-powered publication figure copilot", version="1.0.0")
+app = FastAPI(
+    title="LabPlot AI",
+    description="AI-powered publication figure copilot",
+    version="1.0.0",
+    # Interactive API docs / OpenAPI schema are disabled in production and only
+    # exposed when insecure dev config is explicitly allowed.
+    docs_url="/docs" if settings.ALLOW_INSECURE_DEV_CONFIG else None,
+    redoc_url="/redoc" if settings.ALLOW_INSECURE_DEV_CONFIG else None,
+    openapi_url="/openapi.json" if settings.ALLOW_INSECURE_DEV_CONFIG else None,
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -68,12 +79,21 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def apply_security_headers(request, call_next):
+    response = await call_next(request)
+    for header, value in SECURITY_HEADERS.items():
+        response.headers[header] = value
+    return response
+
+
 app.add_exception_handler(AppError, app_error_handler)
 
 app.include_router(auth_router)
 app.include_router(account_router)
 app.include_router(admin_router)
 app.include_router(assets_router)
+app.include_router(canvases_router)
 app.include_router(client_errors_router)
 app.include_router(organizations_router)
 app.include_router(projects_router)

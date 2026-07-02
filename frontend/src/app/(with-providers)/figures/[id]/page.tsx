@@ -1,19 +1,22 @@
 'use client';
 
-import { use, useState } from 'react';
+import { use, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import {
   getFigure, getDataset, getPlotTypes, getStyles, getPalettes, rerenderFigure, reviewVersion,
   improveVersion, applyImprovement, applyImprovements, updateFigure, generateLegend, downloadExport, enhancePrompt,
-  deleteFigureVersion, getProject, saveFigureTemplateFavorite, deleteFigureTemplateFavorite,
+  deleteFigureVersion, getProject, saveFigureTemplateFavorite, deleteFigureTemplateFavorite, setFigureShare,
   createCustomPalette, updateCustomPalette, deleteCustomPalette,
+  getColumnValues, getMethodsText, getAltText,
 } from '@/lib/api';
 import type { ImproveVersionRequest } from '@/lib/api';
 import type { FigureVersion, Review, Improvement, PlotTypeDef, ColumnProfile, PaletteDef } from '@/lib/types';
 import { formatStylePreset } from '@/lib/style-presets';
 import { AiFigureEditor } from '@/components/figures/AiFigureEditor';
+import { FigureCodeExport } from '@/components/figures/FigureCodeExport';
+import { FigureComments } from '@/components/figures/FigureComments';
 import { AppHeader } from '@/components/layout/AppHeader';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -21,7 +24,9 @@ import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
-import { Loader2, Star, Download, History, Pencil, FileText, Sparkles, Trash2 } from 'lucide-react';
+import { Slider } from '@/components/ui/slider';
+import { Switch } from '@/components/ui/switch';
+import { Loader2, Star, Download, History, Pencil, FileText, Sparkles, Trash2, Copy, ArrowUp, ArrowDown, RefreshCw } from 'lucide-react';
 
 const SCORE_COLOR = (s: number) => (s >= 80 ? 'text-green-600' : s >= 60 ? 'text-amber-600' : 'text-red-600');
 const HEX_COLOR_RE = /^#[0-9A-Fa-f]{6}$/;
@@ -32,6 +37,77 @@ const REPRESENTATIVE_COLORS = [
   '#332288', '#88CCEE', '#44AA99', '#117733', '#DDCC77', '#CC6677',
   '#882255', '#999933', '#000000', '#666666',
 ];
+// Plot types whose color is driven by a continuous fill scale, where the
+// universal discrete `palette_name` selector is a no-op. These expose their own
+// `palette`/continuous color option instead (rendered by the generic loop).
+const CONTINUOUS_FILL_KEYS = new Set([
+  'heatmap', 'annotated_heatmap', 'correlation_heatmap', 'confusion_matrix',
+  'volcano', 'contour', 'manhattan',
+]);
+function isContinuousFill(plotType: string): boolean {
+  return CONTINUOUS_FILL_KEYS.has(plotType) || plotType.includes('enrichment') || plotType.includes('heatmap');
+}
+const FONT_FAMILY_OPTIONS = [
+  { value: '', label: 'Default (sans)' },
+  { value: 'sans', label: 'Sans-serif' },
+  { value: 'serif', label: 'Serif' },
+  { value: 'mono', label: 'Monospace' },
+];
+const DPI_OPTIONS = ['150', '300', '600', '1200'];
+const FACET_SCALE_OPTIONS = [
+  { value: 'fixed', label: 'Fixed (shared)' },
+  { value: 'free', label: 'Free (both)' },
+  { value: 'free_x', label: 'Free X' },
+  { value: 'free_y', label: 'Free Y' },
+];
+const ERROR_TYPE_OPTIONS = [
+  { value: 'sd', label: 'Std. deviation (SD)' },
+  { value: 'se', label: 'Std. error (SE)' },
+  { value: 'ci95', label: '95% CI' },
+];
+
+function sliderNumber(value: number | readonly number[]): number {
+  return Array.isArray(value) ? Number(value[0]) : Number(value);
+}
+function alphaSliderValue(value: unknown, fallback: number): number {
+  const num = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(num) ? Math.min(1, Math.max(0.05, num)) : fallback;
+}
+function setStringOption(options: Record<string, unknown>, key: string, value: string): Record<string, unknown> {
+  const next = { ...options };
+  if (value) next[key] = value;
+  else delete next[key];
+  return next;
+}
+function deleteOption(options: Record<string, unknown>, key: string): Record<string, unknown> {
+  const next = { ...options };
+  delete next[key];
+  return next;
+}
+function stringListOption(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+}
+// Merge a saved level order with the true distinct levels: keep saved entries
+// that still exist (in order), then append any new levels not yet ordered.
+function mergeLevelOrder(order: string[], levels: string[]): string[] {
+  const known = new Set(levels);
+  const seen = new Set<string>();
+  const merged: string[] = [];
+  for (const level of order) {
+    if (known.has(level) && !seen.has(level)) { merged.push(level); seen.add(level); }
+  }
+  for (const level of levels) {
+    if (!seen.has(level)) { merged.push(level); seen.add(level); }
+  }
+  return merged;
+}
+function swapItems<T>(items: T[], index: number, direction: -1 | 1): T[] {
+  const target = index + direction;
+  if (target < 0 || target >= items.length) return items;
+  const next = [...items];
+  [next[index], next[target]] = [next[target], next[index]];
+  return next;
+}
 
 function normalizeHexColor(value: string): string {
   const clean = value.trim();
@@ -84,14 +160,18 @@ function categoryColorColumn(plotType: string, mapping: Record<string, unknown>,
   return null;
 }
 
-function categoryLevels(profile: ColumnProfile | undefined, colors: Record<string, string>): string[] {
-  const levels = new Set<string>();
-  (profile?.sample_values ?? []).forEach((value) => {
-    const label = String(value ?? '').trim();
-    if (label) levels.add(label);
-  });
-  Object.keys(colors).forEach((level) => levels.add(level));
-  return Array.from(levels).slice(0, 30);
+// True distinct levels of the grouping column, sourced from the column-values
+// endpoint and falling back to the profiled sample values before it loads.
+function distinctColumnLevels(values: string[] | undefined, profile: ColumnProfile | undefined): string[] {
+  const levels: string[] = [];
+  const seen = new Set<string>();
+  const push = (raw: unknown) => {
+    const label = String(raw ?? '').trim();
+    if (label && !seen.has(label)) { seen.add(label); levels.push(label); }
+  };
+  if (values?.length) values.forEach(push);
+  else (profile?.sample_values ?? []).forEach(push);
+  return levels;
 }
 
 export default function FigureDetailPage({ params }: { params: Promise<{ id: string }> }) {
@@ -122,6 +202,8 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
   const [paletteName, setPaletteName] = useState('');
   const [paletteColors, setPaletteColors] = useState<string[]>(DEFAULT_CUSTOM_COLORS);
   const [newCategoryColorLevel, setNewCategoryColorLevel] = useState('');
+  const [methodsText, setMethodsText] = useState<string | null>(null);
+  const [altText, setAltText] = useState<string | null>(null);
 
   const plotTypes = plotTypesData?.plot_types ?? [];
   const styles = stylesData?.styles ?? [];
@@ -140,16 +222,40 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
   const legendValue = legend ?? fig?.legend ?? '';
   const currentDef: PlotTypeDef | undefined = plotTypes.find((p) => p.type === effectivePlotType);
   const editablePlotOptions = (currentDef?.options ?? []).filter((option) => !AXIS_RANGE_OPTION_KEYS.has(option.key));
+  const continuousFill = isContinuousFill(effectivePlotType);
   const categoryColors = normalizedCategoryColors(effectiveOptions.category_colors);
   const categoryColorColumnName = categoryColorColumn(effectivePlotType, effectiveMapping, effectiveOptions);
   const categoryColorProfile = columns.find((column) => column.name === categoryColorColumnName);
-  const categoryColorLevels = categoryLevels(categoryColorProfile, categoryColors);
+  // True distinct levels of the currently-mapped grouping column, used to drive
+  // both the per-category color pickers and the level-order reorder UI.
+  const { data: columnValues } = useQuery({
+    queryKey: ['column-values', fig?.dataset_id, categoryColorColumnName],
+    queryFn: () => getColumnValues(fig!.dataset_id, categoryColorColumnName!),
+    enabled: !!fig?.dataset_id && !!categoryColorColumnName,
+  });
+  const distinctLevels = distinctColumnLevels(columnValues?.values, categoryColorProfile);
+  const categoryColorLevels = [
+    ...distinctLevels,
+    ...Object.keys(categoryColors).filter((level) => !distinctLevels.includes(level)),
+  ].slice(0, 60);
+  const orderedLevels = mergeLevelOrder(stringListOption(effectiveOptions.level_order), distinctLevels);
+  const hasLevelOrder = Array.isArray(effectiveOptions.level_order);
   const canEditFigure = !fig?.project_id || project?.role === 'owner' || project?.role === 'editor';
   const isViewerOnly = Boolean(fig?.project_id && project?.role === 'viewer');
+  const hasUnsavedEdits = Boolean(
+    mapping !== null || options !== null
+    || (plotType !== null && plotType !== fig?.plot_type)
+    || (style !== null && style !== fig?.style_preset)
+    || (description !== null && description !== (fig?.description ?? ''))
+    || (legend !== null && legend !== (fig?.legend ?? '')),
+  );
 
+  function resetEditDrafts() {
+    setPlotType(null); setMapping(null); setOptions(null); setStyle(null);
+  }
   const apply = useMutation({
     mutationFn: () => rerenderFigure(id, { plot_type: effectivePlotType, mapping: effectiveMapping, options: effectiveOptions, style_preset: effectiveStyle, change_note: 'Edited in figure editor' }),
-    onSuccess: (v) => { toast.success(`Re-rendered (v${v.version_number})`); setSelectedVid(v.id); setReview(null); setImprovements(null); qc.invalidateQueries({ queryKey: ['figure', id] }); qc.invalidateQueries({ queryKey: ['figures'] }); },
+    onSuccess: (v) => { toast.success(`Re-rendered (v${v.version_number})`); setSelectedVid(v.id); setReview(null); setImprovements(null); resetEditDrafts(); qc.invalidateQueries({ queryKey: ['figure', id] }); qc.invalidateQueries({ queryKey: ['figures'] }); },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Render failed'),
   });
   const runReview = useMutation({
@@ -166,14 +272,23 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
     onSuccess: (l) => { setImprovements(l); toast.success(`${l.length} suggestions`); },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Improve failed'),
   });
+  function toastAppliedSkipped(v: FigureVersion, successMsg: string) {
+    const skipped = v.skipped ?? [];
+    if (skipped.length) {
+      const appliedCount = (v.applied ?? []).length;
+      toast.warning(`${appliedCount} change${appliedCount === 1 ? '' : 's'} applied; ${skipped.length} not supported: ${skipped.join(', ')}`);
+    } else {
+      toast.success(successMsg);
+    }
+  }
   const applyImp = useMutation({
     mutationFn: (impId: string) => applyImprovement(id, impId),
-    onSuccess: (v) => { toast.success(`Applied as v${v.version_number}; R script regenerated`); setSelectedVid(v.id); setReview(null); setImprovements(null); qc.invalidateQueries({ queryKey: ['figure', id] }); },
+    onSuccess: (v) => { toastAppliedSkipped(v, `Applied as v${v.version_number}; R script regenerated`); setSelectedVid(v.id); setReview(null); setImprovements(null); resetEditDrafts(); qc.invalidateQueries({ queryKey: ['figure', id] }); },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Apply failed'),
   });
   const applyImps = useMutation({
     mutationFn: (impIds: string[]) => applyImprovements(id, impIds),
-    onSuccess: (v) => { toast.success(`Applied checked suggestions as v${v.version_number}; R script regenerated`); setSelectedVid(v.id); setReview(null); setImprovements(null); qc.invalidateQueries({ queryKey: ['figure', id] }); qc.invalidateQueries({ queryKey: ['figures'] }); },
+    onSuccess: (v) => { toastAppliedSkipped(v, `Applied checked suggestions as v${v.version_number}; R script regenerated`); setSelectedVid(v.id); setReview(null); setImprovements(null); resetEditDrafts(); qc.invalidateQueries({ queryKey: ['figure', id] }); qc.invalidateQueries({ queryKey: ['figures'] }); },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Apply failed'),
   });
   const directAiEdit = useMutation({
@@ -194,11 +309,12 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
       return { suggestions, appliedIds, version };
     },
     onSuccess: ({ suggestions, appliedIds, version }) => {
-      toast.success(`AI edit applied as v${version.version_number}; R script regenerated`);
+      toastAppliedSkipped(version, `AI edit applied as v${version.version_number}; R script regenerated`);
       const applied = new Set(appliedIds);
       setImprovements(suggestions.map((item) => applied.has(item.id) ? { ...item, applied: true } : item));
       setSelectedVid(version.id);
       setReview(null);
+      resetEditDrafts();
       qc.invalidateQueries({ queryKey: ['figure', id] });
       qc.invalidateQueries({ queryKey: ['figures'] });
     },
@@ -206,7 +322,7 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
   });
   const saveDesc = useMutation({
     mutationFn: () => updateFigure(id, { description: descriptionValue }),
-    onSuccess: () => { toast.success('Interpretation saved'); qc.invalidateQueries({ queryKey: ['figure', id] }); },
+    onSuccess: () => { toast.success('Interpretation saved'); setDescription(null); qc.invalidateQueries({ queryKey: ['figure', id] }); },
   });
   const enhanceNotes = useMutation({
     mutationFn: () => enhancePrompt(descriptionValue, 'interpretation', fig ? `${fig.plot_type} figure: ${fig.name}` : undefined),
@@ -215,7 +331,7 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
   });
   const saveLegend = useMutation({
     mutationFn: () => updateFigure(id, { legend: legendValue }),
-    onSuccess: () => { toast.success('Legend saved'); qc.invalidateQueries({ queryKey: ['figure', id] }); },
+    onSuccess: () => { toast.success('Legend saved'); setLegend(null); qc.invalidateQueries({ queryKey: ['figure', id] }); },
   });
   const aiLegend = useMutation({
     mutationFn: () => generateLegend(id, effectiveSelectedVid!, {
@@ -295,6 +411,66 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
     },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Palette delete failed'),
   });
+  const publishToggle = useMutation({
+    mutationFn: (isPublic: boolean) => updateFigure(id, { is_public: isPublic }),
+    onSuccess: (updated) => {
+      toast.success(updated.is_public ? 'Published to the gallery' : 'Removed from the gallery');
+      qc.setQueryData(['figure', id], updated);
+      qc.invalidateQueries({ queryKey: ['figure', id] });
+      qc.invalidateQueries({ queryKey: ['figures'] });
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Publish failed'),
+  });
+  const shareToggle = useMutation({
+    mutationFn: (enable: boolean) => setFigureShare(id, enable),
+    onSuccess: (res) => {
+      toast.success(res.share_token ? 'Share link ready' : 'Share link disabled');
+      qc.setQueryData(['figure', id], fig ? { ...fig, share_token: res.share_token } : fig);
+      qc.invalidateQueries({ queryKey: ['figure', id] });
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Share link update failed'),
+  });
+  const methodsMut = useMutation({
+    mutationFn: () => getMethodsText(id, effectiveSelectedVid!),
+    onSuccess: (r) => { setMethodsText(r.methods_text); toast.success('Methods text generated'); },
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Methods text failed'),
+  });
+  const altMut = useMutation({
+    mutationFn: () => getAltText(id, effectiveSelectedVid!),
+    onSuccess: (r) => { setAltText(r.alt_text); toast.success('Alt-text generated'); },
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Alt-text failed'),
+  });
+
+  // Warn before losing unsaved edit-panel / notes / legend drafts on reload/close.
+  useEffect(() => {
+    if (!hasUnsavedEdits) return;
+    const handler = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ''; };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [hasUnsavedEdits]);
+
+  function confirmLeave(event: React.MouseEvent) {
+    if (hasUnsavedEdits && !window.confirm('You have unsaved figure edits. Leave this page and discard them?')) {
+      event.preventDefault();
+    }
+  }
+  async function copyToClipboard(text: string, label: string) {
+    try { await navigator.clipboard.writeText(text); toast.success(`${label} copied to clipboard`); }
+    catch { toast.error('Copy failed'); }
+  }
+  async function copyRCode() {
+    if (!version?.r_url) return;
+    try {
+      const res = await fetch(version.r_url);
+      if (!res.ok) throw new Error('fetch failed');
+      await copyToClipboard(await res.text(), 'R code');
+    } catch { toast.error('Could not load R code'); }
+  }
+  function moveLevel(index: number, direction: -1 | 1) {
+    const next = swapItems(orderedLevels, index, direction);
+    if (next === orderedLevels) return;
+    setOptions({ ...effectiveOptions, level_order: next });
+  }
 
   async function doExport(fmt: string) {
     if (!version) return;
@@ -309,6 +485,7 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
     { fmt: 'svg', label: 'SVG', available: Boolean(version?.svg_url) },
     { fmt: 'tiff', label: 'TIFF', available: Boolean(version?.tiff_url) },
     { fmt: 'pdf', label: 'PDF', available: Boolean(version?.pdf_url) },
+    { fmt: 'eps', label: 'EPS', available: Boolean(version?.eps_url) },
     { fmt: 'r', label: 'R script', available: Boolean(version?.r_url) },
   ].filter((item) => item.available);
 
@@ -383,11 +560,11 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
       <AppHeader />
       <main className="mx-auto max-w-7xl px-4 py-8">
         <div className="mb-2 flex items-center gap-2 text-sm text-muted-foreground">
-          <Link href="/figures" className="hover:underline">Figures</Link>
-          {fig.project_id && <>/ <Link href={`/projects/${fig.project_id}`} className="hover:underline">project</Link></>}
+          <Link href="/figures" className="hover:underline" onClick={confirmLeave}>Figures</Link>
+          {fig.project_id && <>/ <Link href={`/projects/${fig.project_id}`} className="hover:underline" onClick={confirmLeave}>project</Link></>}
           / {fig.name}
         </div>
-        <div className="mb-6 flex items-center gap-3">
+        <div className="mb-6 flex flex-wrap items-center gap-3">
           <h1 className="text-2xl font-bold">{fig.name}</h1>
           <Badge variant="secondary">{fig.plot_type}</Badge>
           <Badge variant="outline">{formatStylePreset(fig.style_preset)}</Badge>
@@ -403,7 +580,65 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
             <Star className={`h-4 w-4 ${fig.is_favorite ? 'fill-amber-400 text-amber-500' : 'text-muted-foreground'}`} />
             {fig.is_favorite ? 'Saved template' : 'Save as template'}
           </Button>
+          {canEditFigure && (
+            <div className="ml-auto flex items-center gap-2 rounded-md border px-3 py-1.5">
+              <Label htmlFor="publish-gallery" className="cursor-pointer text-sm text-muted-foreground">Publish to gallery</Label>
+              <Switch
+                id="publish-gallery"
+                checked={fig.is_public}
+                onCheckedChange={(checked) => publishToggle.mutate(checked)}
+                disabled={publishToggle.isPending}
+                aria-label="Publish this figure to the public gallery"
+              />
+              <Badge variant={fig.is_public ? 'default' : 'secondary'} className="text-[10px]">{fig.is_public ? 'Public' : 'Private'}</Badge>
+            </div>
+          )}
         </div>
+
+        {/* private share link (read-only, anyone with the URL) */}
+        {canEditFigure && (
+          <div className="mb-6 flex flex-wrap items-center gap-2 rounded-md border px-3 py-2">
+            <Label htmlFor="share-link" className="cursor-pointer text-sm text-muted-foreground">Share link</Label>
+            <Switch
+              id="share-link"
+              checked={Boolean(fig.share_token)}
+              onCheckedChange={(checked) => shareToggle.mutate(checked)}
+              disabled={shareToggle.isPending}
+              aria-label="Enable a read-only share link for this figure"
+            />
+            {fig.share_token ? (
+              <>
+                <Input
+                  readOnly
+                  value={typeof window !== 'undefined' ? `${window.location.origin}/share/${fig.share_token}` : `/share/${fig.share_token}`}
+                  onFocus={(e) => e.currentTarget.select()}
+                  className="h-8 min-w-0 flex-1 basis-64 font-mono text-xs"
+                  aria-label="Share link URL"
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => copyToClipboard(`${window.location.origin}/share/${fig.share_token}`, 'Share link')}
+                >
+                  <Copy className="mr-1 h-4 w-4" /> Copy
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  disabled={shareToggle.isPending}
+                  title="Generate a new link; the previous link stops working"
+                  onClick={() => shareToggle.mutate(true)}
+                >
+                  <RefreshCw className="mr-1 h-4 w-4" /> Rotate
+                </Button>
+              </>
+            ) : (
+              <span className="text-xs text-muted-foreground">Anyone with the link can view this figure (read-only). Turn on to create a link.</span>
+            )}
+          </div>
+        )}
 
         <div className="grid gap-6 lg:grid-cols-3">
           {/* left: image + paper-writing */}
@@ -436,6 +671,12 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
               <CardHeader className="pb-2"><CardTitle className="flex items-center gap-2 text-base"><Download className="h-4 w-4" /> Export {version && `(v${version.version_number})`}</CardTitle></CardHeader>
               <CardContent className="flex flex-wrap gap-2">
                 {exportFormats.map((f) => <Button key={f.fmt} variant="outline" size="sm" onClick={() => doExport(f.fmt)}>{f.label}</Button>)}
+                {version?.r_url && (
+                  <Button variant="outline" size="sm" onClick={copyRCode} aria-label="Copy R code to clipboard">
+                    <Copy className="mr-1 h-4 w-4" /> Copy R code
+                  </Button>
+                )}
+                <FigureCodeExport figureId={id} versionId={effectiveSelectedVid} />
                 {exportFormats.length === 0 && <p className="text-sm text-muted-foreground">No export files available for this version.</p>}
               </CardContent>
             </Card>
@@ -489,6 +730,45 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
                 ) : (
                   <p className="text-xs text-muted-foreground">Editor access is required to change notes.</p>
                 )}
+              </CardContent>
+            </Card>
+
+            {/* Methods text + accessibility alt-text */}
+            <Card>
+              <CardHeader className="pb-2"><CardTitle className="flex items-center gap-2 text-base"><FileText className="h-4 w-4" /> Methods &amp; accessibility</CardTitle></CardHeader>
+              <CardContent className="space-y-3">
+                <div className="space-y-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <Label className="text-xs">Methods text</Label>
+                    <div className="flex gap-2">
+                      <Button size="sm" variant="outline" onClick={() => methodsMut.mutate()} disabled={methodsMut.isPending || !effectiveSelectedVid}>
+                        {methodsMut.isPending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <FileText className="mr-1 h-4 w-4" />} Generate Methods text
+                      </Button>
+                      {methodsText && (
+                        <Button size="sm" variant="ghost" onClick={() => copyToClipboard(methodsText, 'Methods text')} aria-label="Copy methods text to clipboard">
+                          <Copy className="h-4 w-4" />
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                  {methodsText && <Textarea value={methodsText} readOnly rows={4} className="text-xs" />}
+                </div>
+                <div className="space-y-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <Label className="text-xs">Figure alt-text</Label>
+                    <div className="flex gap-2">
+                      <Button size="sm" variant="outline" onClick={() => altMut.mutate()} disabled={altMut.isPending || !effectiveSelectedVid}>
+                        {altMut.isPending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Sparkles className="mr-1 h-4 w-4" />} Generate alt-text
+                      </Button>
+                      {altText && (
+                        <Button size="sm" variant="ghost" onClick={() => copyToClipboard(altText, 'Alt-text')} aria-label="Copy alt-text to clipboard">
+                          <Copy className="h-4 w-4" />
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                  {altText && <Textarea value={altText} readOnly rows={3} className="text-xs" />}
+                </div>
               </CardContent>
             </Card>
           </div>
@@ -549,6 +829,33 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
                       </div>
                     ))}
 
+                    {/* error-bar statistic (bar charts only) */}
+                    {effectivePlotType === 'bar' && !editablePlotOptions.some((o) => o.key === 'error_type') && (
+                      <div className="space-y-1">
+                        <Label htmlFor="error-type" className="text-xs">Error bars</Label>
+                        <select id="error-type" className="w-full rounded-md border px-2 py-1.5 text-sm" value={String(effectiveOptions.error_type ?? 'sd')} onChange={(e) => setOptions({ ...effectiveOptions, error_type: e.target.value })}>
+                          {ERROR_TYPE_OPTIONS.map((opt) => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
+                        </select>
+                      </div>
+                    )}
+
+                    {/* secondary Y axis (line & scatter only) */}
+                    {(effectivePlotType === 'line' || effectivePlotType === 'scatter') && !editablePlotOptions.some((o) => o.key === 'y2_column') && (
+                      <>
+                        <div className="space-y-1">
+                          <Label htmlFor="y2-column" className="text-xs">Secondary Y column</Label>
+                          <select id="y2-column" className="w-full rounded-md border px-2 py-1.5 text-sm" value={String(effectiveOptions.y2_column ?? '')} onChange={(e) => setOptions(setStringOption(effectiveOptions, 'y2_column', e.target.value))}>
+                            <option value="">None</option>
+                            {columns.map((c) => <option key={c.name} value={c.name}>{c.name} ({c.role})</option>)}
+                          </select>
+                        </div>
+                        <div className="space-y-1">
+                          <Label htmlFor="y2-label" className="text-xs">Secondary Y label</Label>
+                          <Input id="y2-label" className="text-sm" maxLength={120} value={String(effectiveOptions.y2_label ?? '')} onChange={(e) => setOptions(setStringOption(effectiveOptions, 'y2_label', e.target.value))} placeholder="Right axis label" />
+                        </div>
+                      </>
+                    )}
+
                     {/* universal label/axis/appearance controls */}
                     <div className="grid grid-cols-1 gap-2 border-t pt-2">
                       <div className="space-y-1"><Label className="text-xs">In-plot title (usually blank)</Label><Input className="text-sm" value={String(effectiveOptions.title ?? '')} onChange={(e) => setOptions({ ...effectiveOptions, title: e.target.value })} placeholder="Leave blank for manuscript-style figures" /></div>
@@ -601,16 +908,25 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
                           {selectedStyle.description} Color palette overrides the style colors; manuscript styles use no gridlines by default.
                         </p>
                       )}
-                      {/* color palette */}
+                      {/* color palette (discrete) — a no-op for continuous-fill charts, which use their own color scale */}
+                      {continuousFill ? (
+                        <div className="space-y-1 rounded-md border bg-muted/20 p-2">
+                          <Label className="text-xs">Fill color scale</Label>
+                          <p className="text-[11px] text-muted-foreground">This chart type uses a continuous color scale. Adjust it with the chart-specific color options above (e.g. palette / diverging midpoint); the discrete palette selector does not apply here.</p>
+                        </div>
+                      ) : (
                       <div className="space-y-1">
                         <Label className="text-xs">Color palette</Label>
                         <select className="w-full rounded-md border px-2 py-1.5 text-sm" value={selectedPaletteKey} onChange={(e) => setOptions({ ...effectiveOptions, palette_name: e.target.value })}>
-                          {palettes.map((pl) => <option key={pl.key} value={pl.key}>{pl.label}</option>)}
+                          {palettes.map((pl) => <option key={pl.key} value={pl.key}>{pl.label}{pl.colorblind_safe ? ' · colorblind-safe' : ''}</option>)}
                         </select>
-                        {selectedPalette?.hex?.length ? (
-                          <div className="mt-1 flex gap-0.5">{selectedPalette.hex.map((h) => <span key={h} className="h-3 w-4 rounded-sm border" style={{ backgroundColor: h }} />)}</div>
-                        ) : null}
-                        {categoryColorColumnName && (
+                        <div className="mt-1 flex items-center gap-2">
+                          {selectedPalette?.hex?.length ? (
+                            <div className="flex gap-0.5">{selectedPalette.hex.map((h) => <span key={h} className="h-3 w-4 rounded-sm border" style={{ backgroundColor: h }} />)}</div>
+                          ) : null}
+                          {selectedPalette?.colorblind_safe && <Badge variant="outline" className="text-[10px]">Colorblind-safe</Badge>}
+                        </div>
+                        {categoryColorColumnName && (<>
                           <div className="mt-2 space-y-2 rounded-md border bg-muted/20 p-2">
                             <div>
                               <Label className="text-xs">Category colors</Label>
@@ -656,7 +972,30 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
                               <Button type="button" variant="outline" size="sm" onClick={addCategoryColorLevel}>Add</Button>
                             </div>
                           </div>
-                        )}
+                          {orderedLevels.length > 1 && (
+                            <div className="mt-2 space-y-2 rounded-md border bg-muted/20 p-2">
+                              <div className="flex items-center justify-between gap-2">
+                                <div>
+                                  <Label className="text-xs">Category &amp; legend order</Label>
+                                  <p className="text-[11px] text-muted-foreground">Order of <span className="font-medium">{categoryColorColumnName}</span> levels in the legend and axis.</p>
+                                </div>
+                                {hasLevelOrder && (
+                                  <Button type="button" variant="ghost" size="sm" onClick={() => setOptions(deleteOption(effectiveOptions, 'level_order'))}>Reset</Button>
+                                )}
+                              </div>
+                              <div className="space-y-1">
+                                {orderedLevels.map((level, index) => (
+                                  <div key={level} className="flex items-center gap-1">
+                                    <span className="w-5 shrink-0 text-center text-[11px] text-muted-foreground">{index + 1}</span>
+                                    <span className="min-w-0 flex-1 truncate text-xs" title={level}>{level}</span>
+                                    <Button type="button" variant="ghost" size="icon-xs" aria-label={`Move ${level} up`} disabled={index === 0} onClick={() => moveLevel(index, -1)}><ArrowUp className="h-3.5 w-3.5" /></Button>
+                                    <Button type="button" variant="ghost" size="icon-xs" aria-label={`Move ${level} down`} disabled={index === orderedLevels.length - 1} onClick={() => moveLevel(index, 1)}><ArrowDown className="h-3.5 w-3.5" /></Button>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </>)}
                         <div className="flex flex-wrap gap-2 pt-1">
                           <Button type="button" variant="outline" size="sm" onClick={openNewPalette}>New custom palette</Button>
                           {selectedPalette?.custom && (
@@ -733,6 +1072,48 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
                           </div>
                         )}
                       </div>
+                      )}
+                      {/* opacity (universal) */}
+                      <div className="grid grid-cols-2 gap-3">
+                        <div className="space-y-1">
+                          <div className="flex items-center justify-between">
+                            <Label className="text-xs">Fill opacity</Label>
+                            <span className="text-[11px] text-muted-foreground">{effectiveOptions.fill_alpha !== undefined ? Number(effectiveOptions.fill_alpha).toFixed(2) : 'default'}</span>
+                          </div>
+                          <Slider min={0.05} max={1} step={0.05} value={[alphaSliderValue(effectiveOptions.fill_alpha, 1)]} onValueChange={(v) => setOptions({ ...effectiveOptions, fill_alpha: sliderNumber(v) })} aria-label="Fill opacity" />
+                        </div>
+                        <div className="space-y-1">
+                          <div className="flex items-center justify-between">
+                            <Label className="text-xs">Point opacity</Label>
+                            <span className="text-[11px] text-muted-foreground">{effectiveOptions.point_alpha !== undefined ? Number(effectiveOptions.point_alpha).toFixed(2) : 'default'}</span>
+                          </div>
+                          <Slider min={0.05} max={1} step={0.05} value={[alphaSliderValue(effectiveOptions.point_alpha, 1)]} onValueChange={(v) => setOptions({ ...effectiveOptions, point_alpha: sliderNumber(v) })} aria-label="Point opacity" />
+                        </div>
+                      </div>
+                      {/* reference lines (universal) */}
+                      <div className="grid grid-cols-2 gap-2">
+                        <div className="space-y-1">
+                          <Label htmlFor="hline-at" className="text-xs">Horizontal ref. line (y)</Label>
+                          <Input id="hline-at" type="number" step="any" className="text-sm" value={numericOptionValue(effectiveOptions.hline_at)} onChange={(e) => setOptions(updateNumericOption(effectiveOptions, 'hline_at', e.target.value))} placeholder="none" />
+                        </div>
+                        <div className="space-y-1">
+                          <Label htmlFor="vline-at" className="text-xs">Vertical ref. line (x)</Label>
+                          <Input id="vline-at" type="number" step="any" className="text-sm" value={numericOptionValue(effectiveOptions.vline_at)} onChange={(e) => setOptions(updateNumericOption(effectiveOptions, 'vline_at', e.target.value))} placeholder="none" />
+                        </div>
+                      </div>
+                      {/* split into panels / faceting (universal) */}
+                      <div className="space-y-2 rounded-md border bg-muted/20 p-2">
+                        <Label htmlFor="facet-by" className="text-xs">Split into panels by…</Label>
+                        <div className="grid grid-cols-2 gap-2">
+                          <select id="facet-by" className="w-full rounded-md border px-2 py-1.5 text-sm" value={String(effectiveOptions.facet_by ?? '')} onChange={(e) => setOptions(setStringOption(effectiveOptions, 'facet_by', e.target.value))}>
+                            <option value="">No panels</option>
+                            {columns.map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}
+                          </select>
+                          <select aria-label="Panel axis scales" className="w-full rounded-md border px-2 py-1.5 text-sm disabled:opacity-60" disabled={!effectiveOptions.facet_by} value={String(effectiveOptions.facet_scales ?? 'fixed')} onChange={(e) => setOptions({ ...effectiveOptions, facet_scales: e.target.value })}>
+                            {FACET_SCALE_OPTIONS.map((opt) => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
+                          </select>
+                        </div>
+                      </div>
                       {/* figure size */}
                       <div className="grid grid-cols-3 gap-2">
                         <div className="space-y-1">
@@ -753,11 +1134,28 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
                           <Input type="number" step="0.1" disabled={effectiveOptions.size !== 'custom'} value={String(effectiveOptions.height_in ?? 4.2)} onChange={(e) => setOptions({ ...effectiveOptions, height_in: parseFloat(e.target.value) })} />
                         </div>
                       </div>
+                      {/* export DPI + typography (universal) */}
+                      <div className="grid grid-cols-2 gap-2">
+                        <div className="space-y-1">
+                          <Label htmlFor="output-dpi" className="text-xs">Export DPI</Label>
+                          <select id="output-dpi" className="w-full rounded-md border px-2 py-1.5 text-sm" value={String(effectiveOptions.dpi ?? '')} onChange={(e) => setOptions(e.target.value ? { ...effectiveOptions, dpi: Number(e.target.value) } : deleteOption(effectiveOptions, 'dpi'))}>
+                            <option value="">Default (300)</option>
+                            {DPI_OPTIONS.map((d) => <option key={d} value={d}>{d} dpi</option>)}
+                          </select>
+                        </div>
+                        <div className="space-y-1">
+                          <Label htmlFor="font-family" className="text-xs">Font family</Label>
+                          <select id="font-family" className="w-full rounded-md border px-2 py-1.5 text-sm" value={String(effectiveOptions.font_family ?? '')} onChange={(e) => setOptions(setStringOption(effectiveOptions, 'font_family', e.target.value))}>
+                            {FONT_FAMILY_OPTIONS.map((opt) => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
+                          </select>
+                        </div>
+                      </div>
                       <div className="flex flex-wrap gap-3 text-xs">
                         <label className="flex items-center gap-1"><input type="checkbox" checked={Boolean(effectiveOptions.hide_legend)} onChange={(e) => setOptions({ ...effectiveOptions, hide_legend: e.target.checked })} /> Hide legend</label>
                         <label className="flex items-center gap-1"><input type="checkbox" checked={Boolean(effectiveOptions.log_y)} onChange={(e) => setOptions({ ...effectiveOptions, log_y: e.target.checked })} /> log Y</label>
                         <label className="flex items-center gap-1"><input type="checkbox" checked={Boolean(effectiveOptions.log_x)} onChange={(e) => setOptions({ ...effectiveOptions, log_x: e.target.checked })} /> log X</label>
                         <label className="flex items-center gap-1"><input type="checkbox" checked={Boolean(effectiveOptions.flip_coords)} onChange={(e) => setOptions({ ...effectiveOptions, flip_coords: e.target.checked })} /> flip</label>
+                        <label className="flex items-center gap-1"><input type="checkbox" checked={Boolean(effectiveOptions.transparent_background)} onChange={(e) => setOptions({ ...effectiveOptions, transparent_background: e.target.checked })} /> Transparent background</label>
                       </div>
                     </div>
                     <Button className="w-full" onClick={() => apply.mutate()} disabled={apply.isPending}>
@@ -838,6 +1236,9 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
                 )}
               </CardContent>
             </Card>
+
+            {/* comments / discussion */}
+            <FigureComments figureId={id} />
 
           </div>
         </div>

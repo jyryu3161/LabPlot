@@ -26,6 +26,43 @@ class DatasetReorderRequest(BaseModel):
     dataset_ids: list[uuid.UUID] = Field(..., min_length=1, max_length=200)
 
 
+class TransformOperation(BaseModel):
+    """One step of a dataset transform pipeline.
+
+    Fields are a union across all supported ops; the service validates that
+    the fields required for the given ``op`` are present and well-formed.
+    """
+
+    op: str  # melt | filter | derive | select | rename
+    # melt
+    id_columns: list[str] | None = None
+    value_columns: list[str] | None = None
+    names_to: str | None = None
+    values_to: str | None = None
+    # filter
+    column: str | None = None
+    operator: str | None = None
+    value: Any | None = None
+    # derive
+    new_column: str | None = None
+    function: str | None = None
+    columns: list[str] | None = None
+    constant: float | None = None
+    # rename
+    mapping: dict[str, str] | None = None
+
+
+class DatasetTransformRequest(BaseModel):
+    name: str | None = None
+    operations: list[TransformOperation] = Field(..., min_length=1, max_length=20)
+
+
+class DatasetTransformPreviewResponse(BaseModel):
+    columns: list[str]
+    rows: list[list[Any]]
+    total_rows: int
+
+
 class DatasetPreviewResponse(BaseModel):
     filename: str
     format: str

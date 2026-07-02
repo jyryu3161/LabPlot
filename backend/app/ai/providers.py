@@ -9,12 +9,17 @@ run_structured(...) returns a validated dict (parsed JSON object).
 from __future__ import annotations
 
 import json
+import re
 import urllib.request
 import urllib.error
 
 from app.common.exceptions import BadRequestError
+from app.config import settings
 
 _GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+# Gemini model names are interpolated into the request URL path; only accept the
+# characters real model ids use so a bad config value can't alter the URL.
+_GEMINI_MODEL_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 def run_structured(provider: str, model: str, key: str | None, system: str,
@@ -132,6 +137,9 @@ def _supports_thinking_level(model: str) -> bool:
 
 
 def _gemini(model, key, system, content, schema, max_tokens, thinking_level: str | None = None) -> tuple[dict, dict]:
+    # Reject anything that isn't a plain model id before it reaches the URL path.
+    if not isinstance(model, str) or not _GEMINI_MODEL_RE.fullmatch(model):
+        model = settings.GEMINI_MODEL
     parts = []
     for c in content:
         if c["kind"] == "text":

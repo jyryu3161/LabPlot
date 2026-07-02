@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.admin import service
 from app.admin.schemas import (
+    AdminGalleryFigureItem, AdminGalleryUnpublishResponse,
     AdminPasswordReset, AdminUserCreate, AdminUserItem, AdminUserUpdate,
     AIConfigUpdate, AIConfigView, AuditLogItem, ClientErrorItem,
     EmailDeliveryStatus, EmailTestRequest, EmailTestResponse,
@@ -90,6 +91,21 @@ def delete_user(
     admin: User = Depends(get_current_admin),
 ):
     service.delete_user(db, user_id, acting_user=admin, request=request)
+
+
+@router.get("/gallery", response_model=list[AdminGalleryFigureItem])
+def list_gallery_figures(limit: int = 200, db: Session = Depends(get_db), _: User = Depends(get_current_admin)):
+    return service.list_gallery_figures(db, limit=limit)
+
+
+@router.post("/gallery/{figure_id}/unpublish", response_model=AdminGalleryUnpublishResponse)
+def unpublish_gallery_figure(
+    figure_id: uuid.UUID,
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    return service.unpublish_gallery_figure(db, figure_id, acting_user=admin, request=request)
 
 
 @router.get("/audit-logs", response_model=list[AuditLogItem])

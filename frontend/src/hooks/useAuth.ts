@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
-import { login as apiLogin, register as apiRegister, logout as apiLogout, getMe, clearTokens } from '@/lib/api';
+import { login as apiLogin, register as apiRegister, logout as apiLogout, getMe, clearTokens, ApiError } from '@/lib/api';
 import type { User, LoginRequest, RegisterRequest } from '@/lib/types';
 
 export function useAuth() {
@@ -15,8 +15,12 @@ export function useAuth() {
       const token = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
       if (!token) { setUser(null); setLoading(false); return; }
       setUser(await getMe());
-    } catch {
-      clearTokens(); setUser(null);
+    } catch (err) {
+      // Only drop the session on a genuine auth failure (401). Transient
+      // network blips or 5xx errors must NOT clear tokens / log the user out.
+      if (err instanceof ApiError && err.status === 401) {
+        clearTokens(); setUser(null);
+      }
     } finally {
       setLoading(false);
     }
@@ -34,7 +38,7 @@ export function useAuth() {
     await apiRegister(data);
   };
 
-  const logout = () => { apiLogout(); setUser(null); router.push('/login'); };
+  const logout = async () => { await apiLogout(); setUser(null); router.push('/login'); };
 
   return { user, loading, login, register, logout, isAuthenticated: !!user };
 }

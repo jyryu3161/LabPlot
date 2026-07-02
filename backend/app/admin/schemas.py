@@ -103,6 +103,24 @@ class EmailTestResponse(BaseModel):
     message: str
 
 
+class AdminGalleryFigureItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    name: str
+    plot_type: str
+    status: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    owner_email: str
+    owner_name: str | None = None
+    thumb_url: str | None = None
+
+
+class AdminGalleryUnpublishResponse(BaseModel):
+    ok: bool
+
+
 class AuditLogItem(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

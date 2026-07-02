@@ -32,6 +32,16 @@ class FigureUpdate(BaseModel):
     description: str | None = None
     legend: str | None = None
     is_favorite: bool | None = None
+    is_public: bool | None = None
+
+
+class FigureShareRequest(BaseModel):
+    enable: bool
+
+
+class FigureShareResponse(BaseModel):
+    share_token: str | None = None
+    share_url: str | None = None
 
 
 class FigureReorderRequest(BaseModel):
@@ -50,6 +60,40 @@ class LegendResponse(BaseModel):
 class LegendRequest(BaseModel):
     prompt: str | None = Field(default=None, max_length=1500)
     current_legend: str | None = Field(default=None, max_length=5000)
+
+
+class MethodsTextResponse(BaseModel):
+    methods_text: str
+
+
+class FigureCommentCreate(BaseModel):
+    # Length is validated after stripping in the service layer (1-2000 chars);
+    # the schema cap only guards against pathological payloads.
+    body: str = Field(..., min_length=1, max_length=10_000)
+
+
+class FigureCommentItem(BaseModel):
+    id: uuid.UUID
+    figure_id: uuid.UUID
+    author_id: uuid.UUID
+    author_name: str
+    body: str
+    created_at: datetime
+    can_delete: bool
+
+
+class FigureCodeResponse(BaseModel):
+    language: str
+    filename: str
+    code: str
+
+
+class AltTextRequest(BaseModel):
+    prompt: str | None = Field(default=None, max_length=1000)
+
+
+class AltTextResponse(BaseModel):
+    alt_text: str
 
 
 class EnhancePromptRequest(BaseModel):
@@ -88,7 +132,12 @@ class VersionResponse(BaseModel):
     svg_url: str | None = None
     tiff_url: str | None = None
     pdf_url: str | None = None
+    eps_url: str | None = None
     r_url: str | None = None
+    # Populated when a version is produced by applying AI suggestions; empty for
+    # plain rerenders / manual edits. Lets the UI show "N of M changes applied".
+    applied: list[str] = Field(default_factory=list)
+    skipped: list[str] = Field(default_factory=list)
 
 
 class FigureListItem(BaseModel):
@@ -116,12 +165,11 @@ class GalleryFigureItem(BaseModel):
     dataset_name: str | None = None
     project_id: uuid.UUID | None = None
     project_name: str | None = None
-    owner_name: str | None = None
-    owner_email: str | None = None
     current_version_id: uuid.UUID | None = None
     created_at: datetime
     updated_at: datetime
     is_favorite: bool = False
+    is_public: bool = False
     thumb_url: str | None = None
     r_url: str | None = None
 
@@ -162,7 +210,30 @@ class FigureDetail(BaseModel):
     created_at: datetime
     updated_at: datetime
     is_favorite: bool = False
+    is_public: bool = False
+    share_token: str | None = None
     versions: list[VersionResponse] = Field(default_factory=list)
+
+
+class ComplianceCheckItem(BaseModel):
+    name: str
+    ok: bool
+    actual: str
+    expected: str
+    hint: str | None = None
+
+
+class ComplianceReport(BaseModel):
+    figure_id: uuid.UUID
+    version_id: uuid.UUID
+    style_preset: str
+    journal: str
+    passed: bool
+    width_in: float
+    height_in: float
+    dpi: int
+    available_formats: list[str] = Field(default_factory=list)
+    checks: list[ComplianceCheckItem] = Field(default_factory=list)
 
 
 class ReviewResponse(BaseModel):
@@ -185,6 +256,9 @@ class ImprovementResponse(BaseModel):
     priority: str | None = None
     applied: bool
     created_at: datetime
+    # Dotted paths the AI proposed for this suggestion that were dropped by
+    # sanitization (unsupported key, wrong type, or unknown column).
+    skipped: list[str] = Field(default_factory=list)
 
 
 class RecommendationItem(BaseModel):

@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import base64
 import binascii
+import io
 import json
+import math
 import os
 import re
+import secrets
 import shutil
+import tempfile
 import uuid
+import zipfile
 import xml.etree.ElementTree as ET
 from types import SimpleNamespace
 from typing import Any
@@ -17,16 +22,17 @@ from sqlalchemy.orm import Session, joinedload
 from app.ai import client as ai_client
 from app.auth.models import User
 from app.common import storage
-from app.common.exceptions import BadRequestError, NotFoundError
+from app.common.exceptions import BadRequestError, ForbiddenError, NotFoundError
 from app.common.quotas import enforce_render_quota
 from app.config import settings
 from app.datasets.models import Dataset
 from app.datasets import service as ds_service
-from app.figures.models import Figure, FigureCodeArtifact, FigureTemplateFavorite, FigureVersion, Improvement, Recommendation, Review
+from app.figures import codegen
+from app.figures.models import Figure, FigureCodeArtifact, FigureComment, FigureTemplateFavorite, FigureVersion, Improvement, Recommendation, Review
 from app.palettes import service as palette_service
 from app.projects.models import Project
 from app.r_engine import renderer
-from app.r_engine.presets import PRESETS
+from app.r_engine.presets import PRESETS, journal_spec
 from app.r_engine.templates import PLOT_TYPES, PLOT_TYPE_KEYS, rq
 
 _STATIC_ROOT = os.path.dirname(settings.figures_dir.rstrip("/"))
@@ -36,6 +42,19 @@ _UNIVERSAL_OPTION_KEYS = {
     "hide_legend", "log_x", "log_y", "flip_coords", "x_text_angle", "legend_position",
     "x_min", "x_max", "y_min", "y_max",
     "custom_palette_values", "custom_palette_label", "category_colors",
+    # New visual/layout options (contract with the R-engine agent). Universal so
+    # they pass the allow-list for any plot type that renders them; unused keys
+    # are simply ignored by templates that do not consume them.
+    "fill_alpha", "point_alpha", "error_type", "color_midpoint", "level_order",
+    "facet_by", "facet_scales", "hline_at", "vline_at", "font_family", "transparent_background",
+    # Statistical-annotation / model-fit options (contract with the plot-types
+    # agent in templates.py). Universal so they pass the allow-list for any plot
+    # type that renders them; unused keys are ignored by templates that do not.
+    "fit_model", "show_n", "show_significance", "show_fit_stats",
+    # Secondary-axis options (contract with the plot-types agent in
+    # templates.py): y2_column must reference a real dataset column and
+    # y2_label is a plain axis-label string.
+    "y2_column", "y2_label",
 }
 _OPTION_CHOICES = {
     "palette_name": {"preset", "journal_muted", "okabe_ito", "tol_bright", "set2", "npg", "tableau10"},
@@ -48,15 +67,31 @@ _OPTION_CHOICES = {
     "legend_position": {"right", "bottom", "none"},
     "line_type": {"solid", "dashed", "dotted", "dotdash", "longdash"},
     "point_shape": {"circle", "square", "triangle", "diamond", "none"},
+    "error_type": {"sd", "se", "ci95"},
+    "facet_scales": {"fixed", "free", "free_x", "free_y"},
+    "font_family": {"sans", "serif", "mono"},
+    # Curve-fit model for regression/dose-response templates (default "linear"
+    # applied by the template; invalid values are dropped so the render falls
+    # back to that default).
+    "fit_model": {"linear", "4pl", "mm", "exponential", "logistic"},
+    # Stacked-area stacking mode.
+    "stack_mode": {"stack", "fill"},
 }
 _BOOL_OPTIONS = {
     "show_points", "show_box", "error_bars", "scale_rows", "add_smooth", "show_density", "show_rug",
     "show_values", "hide_legend", "log_x", "log_y", "flip_coords", "connect_points", "show_contour_lines",
     "cluster_rows", "cluster_cols", "show_row_names", "show_labels", "color_bars", "paired_rows_only",
+    "transparent_background",
+    "show_n", "show_significance", "show_fit_stats",
+    # Per-type toggles for the new plot types (sina/qq/forest/dot_plot/lollipop/embedding).
+    "show_violin", "show_line", "sort_by_estimate", "sort_desc", "show_cluster_labels",
 }
 _NUMBER_OPTIONS = {
     "fc_threshold", "p_threshold", "label_top", "font_scale", "dpi", "width_in", "height_in",
     "bins", "sig_threshold", "bar_alpha", "bar_width", "x_text_angle", "x_min", "x_max", "y_min", "y_max",
+    "fill_alpha", "point_alpha", "color_midpoint", "hline_at", "vline_at",
+    # Forest reference line + ridgeline overlap factor (new plot types).
+    "ref_line", "overlap",
 }
 _COLOR_WORDS = {
     "blue": "#2563EB",
@@ -186,7 +221,57 @@ def validate_mapping(plot_type: str, mapping: dict) -> None:
         raise BadRequestError("Missing required mapping: " + ", ".join(missing), error_code="MISSING_MAPPING")
 
 
-def sanitize_options(plot_type: str, options: dict | None) -> dict:
+def _dataset_column_names(ds: Dataset | None) -> set[str]:
+    """Real column names of a dataset, taken from its stored column_profile.
+
+    Used as the authoritative allow-list when validating any option/mapping value
+    that references a data column (new AI encodings, facet_by, ...).
+    """
+    names: set[str] = set()
+    if ds is None:
+        return names
+    for column in (ds.column_profile or []):
+        if not isinstance(column, dict):
+            continue
+        name = column.get("name")
+        if isinstance(name, str) and name:
+            names.add(name)
+    return names
+
+
+def _dataset_columns_for_ai(ds: Dataset | None, limit: int = 60) -> list[dict[str, Any]]:
+    """Compact column descriptors for the AI improve context: name, role, dtype,
+    and low-cardinality distinct values (cheap, straight from the stored profile).
+
+    This is what lets the editor add a NEW encoding (e.g. "color points by
+    treatment") because the model can see which real columns exist and what the
+    small categorical levels are.
+    """
+    out: list[dict[str, Any]] = []
+    if ds is None:
+        return out
+    for column in (ds.column_profile or []):
+        if not isinstance(column, dict):
+            continue
+        name = column.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        entry: dict[str, Any] = {"name": name}
+        if column.get("role"):
+            entry["role"] = column.get("role")
+        if column.get("dtype"):
+            entry["dtype"] = column.get("dtype")
+        n_unique = column.get("n_unique")
+        sample = column.get("sample_values")
+        if isinstance(n_unique, int) and 0 < n_unique <= 12 and isinstance(sample, list) and sample:
+            entry["distinct_values"] = [str(v) for v in sample[:12]]
+        out.append(entry)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def sanitize_options(plot_type: str, options: dict | None, valid_columns: set[str] | None = None) -> dict:
     pdef = _plot_def(plot_type)
     allowed_options = {o["key"] for o in pdef.get("options", [])} | _UNIVERSAL_OPTION_KEYS
     clean: dict[str, Any] = {}
@@ -195,7 +280,7 @@ def sanitize_options(plot_type: str, options: dict | None) -> dict:
     for key, value in options.items():
         if key not in allowed_options:
             continue
-        sanitized = _sanitize_option(key, value)
+        sanitized = _sanitize_option(key, value, valid_columns)
         if sanitized is not None:
             clean[key] = sanitized
     return clean
@@ -236,6 +321,7 @@ def version_response(v: FigureVersion) -> dict:
         "svg_url": _url(v.svg_path),
         "tiff_url": _url(v.tiff_path),
         "pdf_url": _url(v.pdf_path),
+        "eps_url": _url(v.eps_path),
         "r_url": _url(v.r_path),
     }
 
@@ -420,19 +506,18 @@ def list_template_favorites(db: Session, owner_id: uuid.UUID) -> list[dict]:
 def list_gallery_figures(db: Session, limit: int = 200) -> list[dict]:
     limit = max(1, min(limit, 500))
     rows = (
-        db.query(Figure, FigureVersion, Dataset.name, Project.name, User.display_name, User.email)
+        db.query(Figure, FigureVersion, Dataset.name, Project.name)
         .join(FigureVersion, Figure.current_version_id == FigureVersion.id)
         .outerjoin(Dataset, Figure.dataset_id == Dataset.id)
         .outerjoin(Project, Figure.project_id == Project.id)
-        .outerjoin(User, Figure.owner_id == User.id)
-        .filter(Figure.current_version_id.isnot(None), Figure.status == "ready")
+        .filter(Figure.current_version_id.isnot(None), Figure.status == "ready", Figure.is_public == True)
         .order_by(Figure.updated_at.desc())
         .limit(limit)
         .all()
     )
 
     out = []
-    for f, current, dataset_name, project_name, owner_name, owner_email in rows:
+    for f, current, dataset_name, project_name in rows:
         out.append({
             "id": f.id,
             "name": f.name,
@@ -443,12 +528,11 @@ def list_gallery_figures(db: Session, limit: int = 200) -> list[dict]:
             "dataset_name": dataset_name,
             "project_id": f.project_id,
             "project_name": project_name,
-            "owner_name": owner_name,
-            "owner_email": owner_email,
             "current_version_id": f.current_version_id,
             "created_at": f.created_at,
             "updated_at": f.updated_at,
             "is_favorite": bool(f.is_favorite),
+            "is_public": bool(f.is_public),
             "thumb_url": _url(current.png_path),
             "r_url": (
                 f"/api/figures/gallery/{f.id}/versions/{current.id}/export?format=r"
@@ -468,17 +552,22 @@ def figure_detail(db: Session, figure_id: uuid.UUID, owner_id: uuid.UUID) -> dic
         "current_version_id": fig.current_version_id,
         "created_at": fig.created_at, "updated_at": fig.updated_at,
         "is_favorite": _is_template_favorite(db, owner_id, fig.id),
+        "is_public": bool(fig.is_public),
+        "share_token": fig.share_token,
         "versions": [version_response(v) for v in sorted(fig.versions, key=lambda x: x.version_number)],
     }
 
 
 def update_figure(db: Session, figure_id: uuid.UUID, owner_id: uuid.UUID, data: dict) -> dict:
     favorite_value = data.pop("is_favorite", None) if "is_favorite" in data else None
+    public_value = data.pop("is_public", None) if "is_public" in data else None
     metadata = {k: v for k, v in data.items() if k in {"name", "description", "legend"} and v is not None}
-    if metadata:
+    if metadata or public_value is not None:
         fig = get_figure(db, figure_id, owner_id, write=True)
         for key, value in metadata.items():
             setattr(fig, key, value)
+        if public_value is not None:
+            fig.is_public = public_value
         db.commit()
     if favorite_value is True:
         save_template_favorite(db, figure_id, owner_id)
@@ -567,6 +656,244 @@ def generate_legend(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, ow
     return {"legend": legend}
 
 
+# ------------------------------------------------------ methods text / alt text
+_R_BASE_PACKAGES = {
+    "ggplot2", "dplyr", "tidyr", "readr", "scales", "grid", "grDevices",
+    "stats", "methods", "utils", "base", "svglite",
+}
+_METHODS_PLOT_LABEL = {
+    "box": "box plot", "violin": "violin plot", "scatter": "scatter plot",
+    "bar": "bar chart", "grouped_bar": "grouped bar chart", "overlap_bar": "overlapped bar chart",
+    "line": "line chart", "histogram": "histogram", "density": "density plot",
+    "correlation_heatmap": "correlation heatmap", "heatmap": "heatmap",
+    "error_bar": "error-bar plot", "ribbon": "ribbon plot", "contour": "contour plot",
+    "radar": "radar chart", "volcano": "volcano plot", "pca": "principal component analysis (PCA) plot",
+    "kaplan_meier": "Kaplan-Meier survival curve", "annotated_heatmap": "annotated heatmap",
+    "network": "network graph", "enrichment_dot": "enrichment dot plot", "enrichment_bar": "enrichment bar chart",
+    "manhattan": "Manhattan plot", "chemical_space": "chemical-space scatter plot",
+}
+_PRESET_METHOD_LABELS = {
+    "nature": "clean classic (Nature-style)", "science": "Science-style classic",
+    "cell": "biomedical classic", "minimal": "minimal monochrome", "colorblind": "colorblind-safe",
+}
+_SIZE_METHOD_LABELS = {
+    "single_column": "single-column", "wide": "wide single-column",
+    "double_column": "double-column", "square": "square", "custom": "custom-size",
+}
+_R_METHOD_SIGNS = [
+    (re.compile(r"\bprcomp\s*\("), "principal components were computed with prcomp (base R stats)"),
+    (re.compile(r"\bcor\s*\("), "pairwise correlations were computed with cor (base R stats)"),
+    (re.compile(r"\bsurvfit\s*\("), "survival curves were estimated with survfit (survival package)"),
+    (re.compile(r"\bkmeans\s*\("), "groups were derived by k-means clustering (base R stats)"),
+    (re.compile(r"\bhclust\s*\("), "rows/columns were ordered by hierarchical clustering with hclust (base R stats)"),
+    (re.compile(r"geom_smooth\s*\("), "a fitted trend line was added with geom_smooth"),
+]
+
+
+def _english_join(items: list[str]) -> str:
+    items = [i for i in items if i]
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0]
+    if len(items) == 2:
+        return f"{items[0]} and {items[1]}"
+    return ", ".join(items[:-1]) + f", and {items[-1]}"
+
+
+def _r_packages_from_code(r_code: str | None) -> list[str]:
+    found: list[str] = []
+    for name in re.findall(r'(?:library|require)\(\s*["\']?([A-Za-z][\w.]*)', r_code or ""):
+        if name not in found:
+            found.append(name)
+    return found
+
+
+def _assemble_methods_text(plot_type: str, mapping: dict, options: dict, preset: str,
+                           r_code: str | None) -> str:
+    """Deterministic, low-hallucination methods paragraph.
+
+    Everything asserted here is grounded in the actual generated R code (real
+    library() calls and statistical function calls) plus the stored style/size/
+    dpi options. No AI is involved, so it cannot invent findings or packages.
+    """
+    options = options or {}
+    packages = _r_packages_from_code(r_code)
+    has_ggplot = "ggplot2" in packages or "geom_" in (r_code or "")
+    extra = [p for p in packages if p not in _R_BASE_PACKAGES]
+    methods = [desc for pattern, desc in _R_METHOD_SIGNS if pattern.search(r_code or "")]
+    plot_label = _METHODS_PLOT_LABEL.get(plot_type, plot_type.replace("_", " ") + " plot")
+
+    sentences: list[str] = []
+    core = "Figures were generated in R"
+    if has_ggplot:
+        core += " using the ggplot2 package"
+    if extra:
+        connector = ", together with the " if has_ggplot else " with the "
+        core += connector + _english_join(extra) + (" packages" if len(extra) != 1 else " package")
+    core += "."
+    sentences.append(core)
+
+    data_sentence = f"The data were visualized as a {plot_label}"
+    if methods:
+        data_sentence += "; " + _english_join(methods)
+    data_sentence += "."
+    sentences.append(data_sentence)
+
+    style_bits: list[str] = [f"the {_PRESET_METHOD_LABELS.get(preset, preset)} style"]
+    size_label = _SIZE_METHOD_LABELS.get(str(options.get("size") or "wide"))
+    if size_label:
+        style_bits.append(f"a {size_label} layout")
+    try:
+        dpi_val = int(float(options.get("dpi"))) if options.get("dpi") is not None else None
+    except (TypeError, ValueError):
+        dpi_val = None
+    if dpi_val:
+        style_bits.append(f"{dpi_val} dpi export")
+    font_word = {"serif": "a serif font", "mono": "a monospace font", "sans": "a sans-serif font"}.get(
+        options.get("font_family")
+    )
+    if font_word:
+        style_bits.append(font_word)
+    sentences.append("Figures use " + _english_join(style_bits) + " on a white background.")
+    return " ".join(sentences)
+
+
+def generate_methods_text(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID,
+                          owner_id: uuid.UUID) -> dict:
+    fig = get_figure(db, figure_id, owner_id)
+    v = get_version(fig, version_id)
+    text = _assemble_methods_text(
+        fig.plot_type, v.mapping or {}, v.options or {},
+        v.style_preset or fig.style_preset, v.r_code,
+    )
+    return {"methods_text": text}
+
+
+# -------- comments --------
+
+_COMMENT_MAX_LEN = 2000
+_COMMENT_LIST_LIMIT = 500
+
+
+def _comment_author_name(author: User | None) -> str:
+    """Display name for a comment author (mirrors organizations/admin naming)."""
+    if author is None:
+        return "Unknown"
+    return author.display_name or author.email.split("@")[0]
+
+
+def _comment_response(comment: FigureComment, author: User | None,
+                      viewer_id: uuid.UUID, figure_owner_id: uuid.UUID) -> dict:
+    return {
+        "id": comment.id,
+        "figure_id": comment.figure_id,
+        "author_id": comment.author_id,
+        "author_name": _comment_author_name(author),
+        "body": comment.body,
+        "created_at": comment.created_at,
+        "can_delete": comment.author_id == viewer_id or figure_owner_id == viewer_id,
+    }
+
+
+def list_comments(db: Session, figure_id: uuid.UUID, user_id: uuid.UUID) -> list[dict]:
+    """Comments on a figure, oldest first. Access mirrors figure_detail."""
+    fig = get_figure(db, figure_id, user_id)
+    rows = (
+        db.query(FigureComment, User)
+        .outerjoin(User, User.id == FigureComment.author_id)
+        .filter(FigureComment.figure_id == fig.id)
+        .order_by(FigureComment.created_at.asc(), FigureComment.id.asc())
+        .limit(_COMMENT_LIST_LIMIT)
+        .all()
+    )
+    return [_comment_response(comment, author, user_id, fig.owner_id) for comment, author in rows]
+
+
+def create_comment(db: Session, figure_id: uuid.UUID, user_id: uuid.UUID, body: str) -> dict:
+    fig = get_figure(db, figure_id, user_id)
+    cleaned = (body or "").strip()
+    if not cleaned:
+        raise BadRequestError("Comment body must not be empty", error_code="COMMENT_EMPTY")
+    if len(cleaned) > _COMMENT_MAX_LEN:
+        raise BadRequestError(
+            f"Comment body must be at most {_COMMENT_MAX_LEN} characters",
+            error_code="COMMENT_TOO_LONG",
+        )
+    comment = FigureComment(figure_id=fig.id, author_id=user_id, body=cleaned)
+    db.add(comment)
+    db.commit()
+    db.refresh(comment)
+    author = db.query(User).filter(User.id == user_id).first()
+    return _comment_response(comment, author, user_id, fig.owner_id)
+
+
+def delete_comment(db: Session, figure_id: uuid.UUID, comment_id: uuid.UUID, user_id: uuid.UUID) -> None:
+    fig = get_figure(db, figure_id, user_id)
+    comment = (
+        db.query(FigureComment)
+        .filter(FigureComment.id == comment_id, FigureComment.figure_id == fig.id)
+        .first()
+    )
+    if not comment:
+        raise NotFoundError("Comment", str(comment_id))
+    if comment.author_id != user_id and fig.owner_id != user_id:
+        raise ForbiddenError("Only the comment author or figure owner can delete a comment")
+    db.delete(comment)
+    db.commit()
+
+
+def generate_figure_code(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID,
+                         owner_id: uuid.UUID, lang: str) -> dict:
+    """Deterministic reproducible-code export (Python/matplotlib or LaTeX).
+
+    Pure text generation via app.figures.codegen — no plotting libraries are
+    imported server-side. Access control mirrors generate_methods_text.
+    """
+    lang = (lang or "python").strip().lower()
+    if lang not in ("python", "latex"):
+        raise BadRequestError("lang must be 'python' or 'latex'", error_code="INVALID_CODE_LANG")
+    fig = get_figure(db, figure_id, owner_id)
+    v = get_version(fig, version_id)
+    basename = f"figure_{str(fig.id)[:8]}"
+    if lang == "python":
+        ds = fig.dataset
+        code = codegen.generate_python_code(
+            figure_name=fig.name,
+            dataset_name=(ds.name if ds is not None and ds.name else "dataset"),
+            column_names=_dataset_column_names(ds),
+            plot_type=fig.plot_type,
+            mapping=v.mapping or {},
+            options=v.options or {},
+            output_basename=basename,
+        )
+        filename = basename + ".py"
+    else:
+        code = codegen.generate_latex_snippet(fig.name, fig.legend, basename)
+        filename = basename + ".tex"
+    return {"language": lang, "filename": filename, "code": code}
+
+
+def generate_alt_text(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, owner_id: uuid.UUID,
+                      prompt: str | None = None) -> dict:
+    fig = get_figure(db, figure_id, owner_id)
+    v = get_version(fig, version_id)
+    ds = ds_service.get_dataset(db, fig.dataset_id, owner_id)
+    dataset_summary = {
+        "name": ds.name, "n_rows": ds.n_rows,
+        "columns": [{"name": c["name"], "role": c["role"]} for c in (ds.column_profile or [])],
+    }
+    pc = _project_context(db, fig.project_id)
+    if ds.description and ds.description.strip():
+        pc = ((pc + " ") if pc else "") + "Dataset: " + ds.description.strip()
+    alt_text = ai_client.generate_alt_text(
+        db, fig.plot_type, v.mapping or {}, v.options or {},
+        dataset_summary, fig.description, project_context=pc, user_id=owner_id,
+        user_request=(prompt or "").strip() or None,
+    )
+    return {"alt_text": alt_text}
+
+
 # ---------------------------------------------------------------- rendering
 def _render_into_version(df, plot_type, mapping, options, preset, figure_id, version_id):
     out_dir = os.path.join(settings.figures_dir, str(figure_id), str(version_id))
@@ -581,6 +908,7 @@ def _render_into_version(df, plot_type, mapping, options, preset, figure_id, ver
             "svg": "image/svg+xml",
             "tiff": "image/tiff",
             "pdf": "application/pdf",
+            "eps": "application/postscript",
             "r": "text/plain",
         }
         for kind, path in (res.outputs or {}).items():
@@ -685,7 +1013,7 @@ def create_figure(db: Session, owner_id: uuid.UUID, data) -> dict:
         project_service.require_project_write(db, ds.project_id, owner_id)
     preset = data.style_preset if data.style_preset in PRESETS else "nature"
     validate_mapping(data.plot_type, data.mapping)
-    options = sanitize_options(data.plot_type, data.options)
+    options = sanitize_options(data.plot_type, data.options, _dataset_column_names(ds))
     options = _resolve_custom_palette_options(db, owner_id, options)
     df = ds_service.load_dataframe(ds)
 
@@ -709,6 +1037,7 @@ def create_figure(db: Session, owner_id: uuid.UUID, data) -> dict:
         r_code=res.r_code, change_note="Initial figure",
         png_path=res.outputs.get("png"), svg_path=res.outputs.get("svg"),
         tiff_path=res.outputs.get("tiff"), pdf_path=res.outputs.get("pdf"),
+        eps_path=res.outputs.get("eps"),
         r_path=res.outputs.get("r"), render_log=res.log,
     )
     db.add(version)
@@ -733,6 +1062,7 @@ def _auto_quality_correct_initial_figure(db: Session, owner_id: uuid.UUID, ds: D
     try:
         if not version.png_path or not storage.exists(version.png_path):
             return
+        cols = _dataset_column_names(ds)
         png_path = storage.materialize(version.png_path, suffix=".png")
         review_payload = ai_client.review_figure(
             db,
@@ -755,6 +1085,7 @@ def _auto_quality_correct_initial_figure(db: Session, owner_id: uuid.UUID, ds: D
         available = {
             "options": pdef.get("options", []),
             "mapping_keys": [r["key"] for r in pdef["required"]] + [o["key"] for o in pdef.get("optional", [])],
+            "dataset_columns": _dataset_columns_for_ai(ds),
         }
         suggestions = ai_client.improve_figure(
             db,
@@ -773,7 +1104,7 @@ def _auto_quality_correct_initial_figure(db: Session, owner_id: uuid.UUID, ds: D
                 "and choose a suitable single-column, wide, square, or custom figure size rather than shrinking text."
             ),
         )
-        patch = _combined_quality_patch(suggestions, pdef, mapping or {}, options or {}, preset)
+        patch = _combined_quality_patch(suggestions, pdef, mapping or {}, options or {}, preset, cols)
         _drop_unneeded_auto_x_rotation(patch, df, mapping or {}, options or {})
         if not patch:
             return
@@ -781,7 +1112,7 @@ def _auto_quality_correct_initial_figure(db: Session, owner_id: uuid.UUID, ds: D
         new_options = {**(options or {}), **(patch.get("options") or {})}
         new_preset = patch.get("style_preset") or preset
         validate_mapping(plot_type, new_mapping)
-        new_options = sanitize_options(plot_type, new_options)
+        new_options = sanitize_options(plot_type, new_options, cols)
         new_options = _resolve_custom_palette_options(db, owner_id, new_options)
         next_num = (db.query(func.max(FigureVersion.version_number))
                     .filter(FigureVersion.figure_id == fig.id).scalar() or 0) + 1
@@ -800,6 +1131,7 @@ def _auto_quality_correct_initial_figure(db: Session, owner_id: uuid.UUID, ds: D
             svg_path=res.outputs.get("svg"),
             tiff_path=res.outputs.get("tiff"),
             pdf_path=res.outputs.get("pdf"),
+            eps_path=res.outputs.get("eps"),
             r_path=res.outputs.get("r"),
             render_log=res.log,
         )
@@ -808,7 +1140,7 @@ def _auto_quality_correct_initial_figure(db: Session, owner_id: uuid.UUID, ds: D
         fig.style_preset = new_preset
         fig.status = "ready"
         for suggestion in suggestions:
-            clean = _sanitize_param_patch(suggestion.get("param_patch", {}), pdef, mapping or {})
+            clean = _sanitize_param_patch(suggestion.get("param_patch", {}), pdef, mapping or {}, cols)
             if not clean:
                 continue
             db.add(Improvement(
@@ -828,10 +1160,11 @@ def _auto_quality_correct_initial_figure(db: Session, owner_id: uuid.UUID, ds: D
 
 
 def _combined_quality_patch(suggestions: list[dict], pdef: dict, base_mapping: dict[str, Any],
-                            base_options: dict[str, Any], base_preset: str) -> dict[str, Any]:
+                            base_options: dict[str, Any], base_preset: str,
+                            valid_columns: set[str] | None = None) -> dict[str, Any]:
     combined: dict[str, Any] = {}
     for suggestion in suggestions or []:
-        clean = _sanitize_param_patch(suggestion.get("param_patch", {}), pdef, base_mapping)
+        clean = _sanitize_param_patch(suggestion.get("param_patch", {}), pdef, base_mapping, valid_columns)
         if not clean:
             continue
         if clean.get("style_preset"):
@@ -1157,12 +1490,28 @@ def _ai_edit_checklist(improvements: list[Improvement], version: FigureVersion) 
     return rows
 
 
-def _append_internal_ai_edit_checklist(version: FigureVersion, improvements: list[Improvement]) -> None:
-    checklist = _ai_edit_checklist(improvements, version)
+def _append_internal_ai_edit_checklist(version: FigureVersion, improvements: list[Improvement],
+                                       checklist: list[dict[str, Any]] | None = None) -> None:
+    if checklist is None:
+        checklist = _ai_edit_checklist(improvements, version)
     if not checklist:
         return
     note = "AI edit internal checklist:\n" + json.dumps(checklist, ensure_ascii=False, indent=2)
     version.render_log = ((version.render_log or "").rstrip() + "\n" + note).strip()
+
+
+def _applied_skipped_from_checklist(checklist: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
+    """Split a verification checklist into applied vs skipped dotted paths so the
+    client can show "N of M changes applied; 'X' not supported"."""
+    applied: list[str] = []
+    skipped: list[str] = []
+    for row in checklist:
+        path = str(row.get("path"))
+        if row.get("status") == "applied":
+            applied.append(path)
+        else:
+            skipped.append(path)
+    return applied, skipped
 
 
 def rerender(db: Session, figure_id: uuid.UUID, owner_id: uuid.UUID, req) -> dict:
@@ -1178,10 +1527,10 @@ def rerender(db: Session, figure_id: uuid.UUID, owner_id: uuid.UUID, req) -> dic
         preset = "nature"
     plot_type = getattr(req, "plot_type", None) or fig.plot_type
     validate_mapping(plot_type, mapping)
-    options = sanitize_options(plot_type, options)
+    ds = ds_service.get_dataset(db, fig.dataset_id, owner_id)
+    options = sanitize_options(plot_type, options, _dataset_column_names(ds))
     options = _resolve_custom_palette_options(db, owner_id, options)
 
-    ds = ds_service.get_dataset(db, fig.dataset_id, owner_id)
     df = ds_service.load_dataframe(ds)
     next_num = (db.query(func.max(FigureVersion.version_number))
                 .filter(FigureVersion.figure_id == figure_id).scalar() or 0) + 1
@@ -1194,6 +1543,7 @@ def rerender(db: Session, figure_id: uuid.UUID, owner_id: uuid.UUID, req) -> dic
         r_code=res.r_code, change_note=(req.change_note or "Re-rendered"),
         png_path=res.outputs.get("png"), svg_path=res.outputs.get("svg"),
         tiff_path=res.outputs.get("tiff"), pdf_path=res.outputs.get("pdf"),
+        eps_path=res.outputs.get("eps"),
         r_path=res.outputs.get("r"), render_log=res.log,
     )
     db.add(version)
@@ -1247,7 +1597,7 @@ def save_svg_edit(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, owne
         id=new_version_id, figure_id=figure_id, version_number=next_num,
         mapping=base.mapping or {}, options=options, style_preset=base.style_preset,
         r_code=r_code, change_note=(change_note or "Manual SVG edit"),
-        png_path=None, svg_path=svg_path, tiff_path=None, pdf_path=None,
+        png_path=None, svg_path=svg_path, tiff_path=None, pdf_path=None, eps_path=None,
         r_path=r_path, render_log="Manual SVG edit saved from vector editor.",
     )
     db.add(version)
@@ -1260,6 +1610,27 @@ def save_svg_edit(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, owne
     )
     db.commit()
     return version_response(version)
+
+
+def set_figure_share(db: Session, figure_id: uuid.UUID, owner_id: uuid.UUID, enable: bool) -> dict:
+    """Enable (create/rotate) or disable the public share link for a figure.
+
+    Owner-only: project collaborators can view the figure but must not be able
+    to mint public links to it.
+    """
+    fig = get_figure(db, figure_id, owner_id)
+    if fig.owner_id != owner_id:
+        raise NotFoundError("Figure", str(figure_id))
+    if enable:
+        # Calling again while enabled rotates the token (old links stop working).
+        fig.share_token = secrets.token_urlsafe(32)
+    else:
+        fig.share_token = None
+    db.commit()
+    return {
+        "share_token": fig.share_token,
+        "share_url": f"/share/{fig.share_token}" if fig.share_token else None,
+    }
 
 
 def delete_figure(db: Session, figure_id: uuid.UUID, owner_id: uuid.UUID) -> None:
@@ -1278,7 +1649,7 @@ def delete_figure_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UU
     if not remaining:
         raise BadRequestError("A figure must keep at least one version", error_code="LAST_VERSION")
 
-    file_refs = [version.png_path, version.svg_path, version.tiff_path, version.pdf_path, version.r_path]
+    file_refs = [version.png_path, version.svg_path, version.tiff_path, version.pdf_path, version.eps_path, version.r_path]
     version_dir = os.path.join(settings.figures_dir, str(figure_id), str(version_id))
 
     if fig.current_version_id == version_id:
@@ -1332,11 +1703,14 @@ def improve_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, ow
                     prompt: str | None = None, annotated_image: str | None = None) -> list[Improvement]:
     fig = get_figure(db, figure_id, owner_id, write=True)
     v = get_version(fig, version_id)
+    ds = ds_service.get_dataset(db, fig.dataset_id, owner_id)
+    cols = _dataset_column_names(ds)
     last_review = (db.query(Review).filter(Review.figure_version_id == version_id)
                    .order_by(Review.created_at.desc()).first())
     pdef = _plot_def(fig.plot_type)
     available = {"options": pdef.get("options", []),
-                 "mapping_keys": [r["key"] for r in pdef["required"]] + [o["key"] for o in pdef.get("optional", [])]}
+                 "mapping_keys": [r["key"] for r in pdef["required"]] + [o["key"] for o in pdef.get("optional", [])],
+                 "dataset_columns": _dataset_columns_for_ai(ds)}
     image_payload = _decode_ai_editor_image(annotated_image)
     if image_payload is None and v.png_path and storage.exists(v.png_path):
         png_path = storage.materialize(v.png_path, suffix=".png")
@@ -1352,10 +1726,14 @@ def improve_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, ow
     )
     user_intent = bool((prompt or "").strip() or annotated_image)
     rows = []
+    skipped_lists: list[list[str]] = []
     for s in suggestions:
-        patch = _sanitize_param_patch(s.get("param_patch", {}), pdef, v.mapping or {})
+        raw_patch = s.get("param_patch", {})
+        patch = _sanitize_param_patch(raw_patch, pdef, v.mapping or {}, cols)
         if not patch:
             continue
+        kept_paths = set(_patch_key_paths(patch))
+        dropped = [p for p in _patch_key_paths(raw_patch) if p not in kept_paths]
         imp = Improvement(
             figure_version_id=version_id,
             suggestion_type=s.get("suggestion_type"),
@@ -1366,11 +1744,13 @@ def improve_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, ow
         )
         db.add(imp)
         rows.append(imp)
+        skipped_lists.append(dropped)
 
     explicit_patch = _sanitize_param_patch(
         _explicit_visual_patch_from_request(fig.plot_type, prompt),
         pdef,
         v.mapping or {},
+        cols,
     )
     if explicit_patch and _patch_changes_version(explicit_patch, v):
         imp = Improvement(
@@ -1383,6 +1763,7 @@ def improve_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, ow
         )
         db.add(imp)
         rows.append(imp)
+        skipped_lists.append([])
 
     if not rows and not user_intent:
         imp = Improvement(
@@ -1395,11 +1776,15 @@ def improve_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, ow
         )
         db.add(imp)
         rows.append(imp)
+        skipped_lists.append([])
     if not rows:
         return []
     db.commit()
     for r in rows:
         db.refresh(r)
+    # Attach the per-suggestion dropped-key summary AFTER refresh so it survives.
+    for r, sk in zip(rows, skipped_lists):
+        r.skipped = sk
     return rows
 
 
@@ -1431,10 +1816,16 @@ def apply_improvement(db: Session, figure_id: uuid.UUID, improvement_id: uuid.UU
 
     result = rerender(db, figure_id, owner_id, _Req())
     new_version = db.query(FigureVersion).filter(FigureVersion.id == result["id"]).first()
+    applied_paths: list[str] = []
+    skipped_paths: list[str] = []
     if new_version:
-        _append_internal_ai_edit_checklist(new_version, [imp])
+        checklist = _ai_edit_checklist([imp], new_version)
+        _append_internal_ai_edit_checklist(new_version, [imp], checklist)
+        applied_paths, skipped_paths = _applied_skipped_from_checklist(checklist)
     imp.applied = True
     db.commit()
+    result["applied"] = applied_paths
+    result["skipped"] = skipped_paths
     return result
 
 
@@ -1480,11 +1871,18 @@ def apply_improvements(db: Session, figure_id: uuid.UUID, improvement_ids: list[
 
     result = rerender(db, figure_id, owner_id, _Req())
     new_version = db.query(FigureVersion).filter(FigureVersion.id == result["id"]).first()
+    applied_paths: list[str] = []
+    skipped_paths: list[str] = []
     if new_version:
-        _append_internal_ai_edit_checklist(new_version, [imp for imp in ordered if imp is not None])
+        applied_improvements = [imp for imp in ordered if imp is not None]
+        checklist = _ai_edit_checklist(applied_improvements, new_version)
+        _append_internal_ai_edit_checklist(new_version, applied_improvements, checklist)
+        applied_paths, skipped_paths = _applied_skipped_from_checklist(checklist)
     for imp in ordered:
         imp.applied = True
     db.commit()
+    result["applied"] = applied_paths
+    result["skipped"] = skipped_paths
     return result
 
 
@@ -1498,7 +1896,7 @@ def _known_mapping_values(mapping: dict[str, Any]) -> set[str]:
     return values
 
 
-def _sanitize_option(key: str, value: Any) -> Any:
+def _sanitize_option(key: str, value: Any, valid_columns: set[str] | None = None) -> Any:
     if key in {"x_label", "y_label"} and value == "":
         return ""
     if key == "category_colors":
@@ -1518,6 +1916,21 @@ def _sanitize_option(key: str, value: Any) -> Any:
             if len(clean) >= 80:
                 break
         return clean or None
+    if key == "level_order":
+        # Ordered category levels: keep as a list of short strings, drop non-str.
+        if not isinstance(value, list):
+            return None
+        clean_levels: list[str] = []
+        for item in value:
+            if not isinstance(item, str):
+                continue
+            text = item.strip()
+            if not text:
+                continue
+            clean_levels.append(text[:120])
+            if len(clean_levels) >= 60:
+                break
+        return clean_levels or None
     if key == "line_color":
         if not isinstance(value, str):
             return None
@@ -1527,6 +1940,12 @@ def _sanitize_option(key: str, value: Any) -> Any:
         return None
     if value in (None, ""):
         return None
+    if key in {"facet_by", "y2_column"}:
+        # Must reference a real dataset column; otherwise the render breaks.
+        return value if isinstance(value, str) and value in (valid_columns or set()) else None
+    if key == "y2_label":
+        # Secondary-axis label: plain free string, length-capped like other labels.
+        return value[:120] if isinstance(value, str) else None
     if key == "palette_name":
         if isinstance(value, str) and value in _OPTION_CHOICES[key]:
             return value
@@ -1560,6 +1979,8 @@ def _sanitize_option(key: str, value: Any) -> Any:
             num = float(value)
         except (TypeError, ValueError):
             return None
+        if not math.isfinite(num):
+            return None
         if key == "dpi":
             return int(max(72, min(1200, num)))
         if key == "label_top":
@@ -1570,19 +1991,23 @@ def _sanitize_option(key: str, value: Any) -> Any:
             return max(0.6, min(2.0, num))
         if key == "bar_alpha":
             return max(0.15, min(1.0, num))
+        if key in {"fill_alpha", "point_alpha"}:
+            return max(0.05, min(1.0, num))
         if key == "bar_width":
             return max(0.2, min(1.0, num))
         if key == "x_text_angle":
             return max(0, min(90, num))
         if key in {"width_in", "height_in"}:
             return max(1.0, min(20.0, num))
+        # color_midpoint, hline_at, vline_at and any other finite numbers.
         return num
     if isinstance(value, str):
         return value[:200]
     return None
 
 
-def _sanitize_param_patch(patch: dict[str, Any], pdef: dict, base_mapping: dict[str, Any]) -> dict[str, Any]:
+def _sanitize_param_patch(patch: dict[str, Any], pdef: dict, base_mapping: dict[str, Any],
+                          valid_columns: set[str] | None = None) -> dict[str, Any]:
     if not isinstance(patch, dict):
         return {}
 
@@ -1592,17 +2017,21 @@ def _sanitize_param_patch(patch: dict[str, Any], pdef: dict, base_mapping: dict[
         clean["style_preset"] = style
 
     allowed_mapping = {r["key"] for r in pdef["required"]} | {o["key"] for o in pdef.get("optional", [])}
-    known_columns = _known_mapping_values(base_mapping)
+    # A mapping value is accepted if it is already used in the base mapping OR is
+    # a REAL column of the figure's dataset. The dataset column list is what
+    # unlocks brand-new AI encodings (e.g. "color points by treatment"); values
+    # that are not real columns are still rejected so renders cannot break.
+    allowed_column_values = _known_mapping_values(base_mapping) | (valid_columns or set())
     mapping_patch = {}
     raw_mapping = patch.get("mapping")
     if isinstance(raw_mapping, dict):
         for key, value in raw_mapping.items():
             if key not in allowed_mapping:
                 continue
-            if isinstance(value, str) and value in known_columns:
+            if isinstance(value, str) and value in allowed_column_values:
                 mapping_patch[key] = value
             elif isinstance(value, list):
-                vals = [v for v in value if isinstance(v, str) and v in known_columns]
+                vals = [v for v in value if isinstance(v, str) and v in allowed_column_values]
                 if vals:
                     mapping_patch[key] = vals
     if mapping_patch:
@@ -1615,12 +2044,29 @@ def _sanitize_param_patch(patch: dict[str, Any], pdef: dict, base_mapping: dict[
         for key, value in raw_options.items():
             if key not in allowed_options:
                 continue
-            sanitized = _sanitize_option(key, value)
+            sanitized = _sanitize_option(key, value, valid_columns)
             if sanitized is not None:
                 options_patch[key] = sanitized
     if options_patch:
         clean["options"] = options_patch
     return clean
+
+
+def _patch_key_paths(patch: dict[str, Any] | None) -> list[str]:
+    """Flatten a param_patch into stable dotted paths (style_preset, mapping.<k>,
+    options.<k>) for applied/skipped reporting to the client."""
+    paths: list[str] = []
+    if not isinstance(patch, dict):
+        return paths
+    if patch.get("style_preset"):
+        paths.append("style_preset")
+    mapping = patch.get("mapping")
+    if isinstance(mapping, dict):
+        paths.extend(f"mapping.{k}" for k in mapping)
+    options = patch.get("options")
+    if isinstance(options, dict):
+        paths.extend(f"options.{k}" for k in options)
+    return paths
 
 
 def _score_value(value: Any) -> float | None:
@@ -1753,6 +2199,7 @@ _EXPORT = {
     "svg": ("svg_path", "image/svg+xml", "svg"),
     "tiff": ("tiff_path", "image/tiff", "tiff"),
     "pdf": ("pdf_path", "application/pdf", "pdf"),
+    "eps": ("eps_path", "application/postscript", "eps"),
     "r": ("r_path", "text/plain", "R"),
 }
 
@@ -1777,7 +2224,7 @@ def gallery_export_path(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID
     fig = (
         db.query(Figure)
         .options(joinedload(Figure.versions))
-        .filter(Figure.id == figure_id, Figure.status == "ready")
+        .filter(Figure.id == figure_id, Figure.status == "ready", Figure.is_public == True)
         .first()
     )
     if not fig:
@@ -1790,3 +2237,233 @@ def gallery_export_path(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID
     safe = re.sub(r"[^A-Za-z0-9_-]+", "_", fig.name)
     filename = f"gallery_{safe}_v{v.version_number}.{ext}"
     return path, media, filename
+
+
+# ---------------------------------------------------------------- compliance
+# Small tolerance (~6 mm) when matching a rendered width to a journal column
+# width, and the set of vector / high-resolution raster formats that count as
+# publication-grade for the format check.
+_WIDTH_TOL_IN = 0.25
+_HQ_FORMATS = ("tiff", "pdf", "svg", "eps")
+
+
+def _available_formats(v: FigureVersion) -> list[str]:
+    """Rendered image formats that actually exist for a version (png/svg/tiff/pdf/eps)."""
+    formats: list[str] = []
+    for fmt in ("png", "svg", "tiff", "pdf", "eps"):
+        attr = _EXPORT[fmt][0]
+        path = getattr(v, attr, None)
+        if path and storage.exists(path):
+            formats.append(fmt)
+    return formats
+
+
+def check_compliance(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID,
+                     owner_id: uuid.UUID) -> dict:
+    """Deterministic (no AI) comparison of a version's actual rendered attributes
+    against the journal spec of its style preset. Returns an overall pass/fail
+    plus a per-check list of {name, ok, actual, expected, hint}."""
+    fig = get_figure(db, figure_id, owner_id)
+    v = get_version(fig, version_id)
+    preset = v.style_preset or fig.style_preset or "nature"
+    spec = journal_spec(preset)
+
+    width_in, height_in, dpi = renderer._dimensions(v.options or {})
+    available = _available_formats(v)
+    single = float(spec["single_col_in"])
+    double = float(spec["double_col_in"])
+    checks: list[dict[str, Any]] = []
+
+    # 1) Column width -- must match single or double column within tolerance.
+    # Round the measured difference to sidestep float-representation noise at the
+    # tolerance boundary (e.g. |7.0 - 7.2| == 0.2000000000000002).
+    matches_single = round(abs(width_in - single), 3) <= _WIDTH_TOL_IN
+    matches_double = round(abs(width_in - double), 3) <= _WIDTH_TOL_IN
+    width_ok = matches_single or matches_double
+    if width_ok:
+        width_hint = None
+    elif width_in <= double + _WIDTH_TOL_IN:
+        width_hint = (f"Resize to a single-column ({single:.2f} in) or double-column "
+                      f"({double:.2f} in) width for {spec['journal']}.")
+    else:
+        width_hint = (f"Figure is wider than the {spec['journal']} double-column width "
+                      f"({double:.2f} in); reduce the width.")
+    checks.append({
+        "name": "Column width",
+        "ok": width_ok,
+        "actual": f"{width_in:.2f} in",
+        "expected": f"{single:.2f} in (single) or {double:.2f} in (double)",
+        "hint": width_hint,
+    })
+
+    # 2) Resolution -- dpi must be at least the journal minimum.
+    min_dpi = int(spec["min_dpi"])
+    max_dpi = int(spec["max_dpi"])
+    dpi_ok = dpi >= min_dpi
+    if not dpi_ok:
+        dpi_hint = f"Increase export resolution to at least {min_dpi} dpi."
+    elif dpi > max_dpi:
+        dpi_hint = (f"{spec['journal']} recommends no more than {max_dpi} dpi; the current "
+                    "export is larger than needed.")
+    else:
+        dpi_hint = None
+    checks.append({
+        "name": "Resolution",
+        "ok": dpi_ok,
+        "actual": f"{dpi} dpi",
+        "expected": f">= {min_dpi} dpi",
+        "hint": dpi_hint,
+    })
+
+    # 3) A preferred vector / TIFF export must be available.
+    hq_available = [f for f in available if f in _HQ_FORMATS]
+    format_ok = bool(hq_available)
+    checks.append({
+        "name": "Vector/TIFF format",
+        "ok": format_ok,
+        "actual": (", ".join(available) if available else "none"),
+        "expected": "one of: " + ", ".join(spec["preferred_formats"]),
+        "hint": (None if format_ok else
+                 "Export a vector (PDF/EPS) or TIFF file; "
+                 f"{spec['journal']} prefers " + ", ".join(spec["preferred_formats"]) + "."),
+    })
+
+    # 4) Font family -- should match the journal's preferred family.
+    font_family = (v.options or {}).get("font_family") or "sans"
+    preferred_font = spec["preferred_font"]
+    font_ok = font_family == preferred_font
+    checks.append({
+        "name": "Font family",
+        "ok": font_ok,
+        "actual": font_family,
+        "expected": preferred_font,
+        "hint": (None if font_ok else
+                 f"{spec['journal']} figures prefer a {preferred_font} font; current is {font_family}."),
+    })
+
+    return {
+        "figure_id": fig.id,
+        "version_id": v.id,
+        "style_preset": preset,
+        "journal": spec["journal"],
+        "passed": all(c["ok"] for c in checks),
+        "width_in": round(width_in, 2),
+        "height_in": round(height_in, 2),
+        "dpi": dpi,
+        "available_formats": available,
+        "checks": checks,
+    }
+
+
+# ---------------------------------------------------------------- submission bundle
+def build_submission_bundle(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID,
+                            owner_id: uuid.UUID, column: str = "single") -> tuple[bytes, str]:
+    """Owner-scoped ZIP for journal submission.
+
+    Best-effort re-renders the figure at the journal's exact column width using
+    the same render machinery; if that is unavailable (manual SVG edit, missing
+    dataset, or a render error) it falls back to the version's existing rendered
+    files. Always includes the reproducible figure.R and a README/caption stub.
+    Returns (zip_bytes, filename).
+    """
+    fig = get_figure(db, figure_id, owner_id)
+    v = get_version(fig, version_id)
+    column = "double" if str(column or "").lower() == "double" else "single"
+    preset = v.style_preset or fig.style_preset or "nature"
+    spec = journal_spec(preset)
+    target_width = float(spec["double_col_in"] if column == "double" else spec["single_col_in"])
+
+    base_w, base_h, base_dpi = renderer._dimensions(v.options or {})
+    target_dpi = int(min(int(spec["max_dpi"]), max(int(spec["min_dpi"]), int(base_dpi))))
+    aspect = (base_h / base_w) if base_w else 0.75
+    target_height = round(max(1.0, min(20.0, target_width * aspect)), 2)
+
+    plot_label = _METHODS_PLOT_LABEL.get(fig.plot_type, fig.plot_type.replace("_", " "))
+    manual_svg = bool((v.options or {}).get("manual_svg_edit"))
+
+    rendered: dict[str, bytes] = {}
+    did_rerender = False
+    zip_buf = io.BytesIO()
+
+    with tempfile.TemporaryDirectory(prefix="labplot_bundle_") as work:
+        # ---- best-effort re-render at the exact journal column width ----
+        if not manual_svg:
+            try:
+                ds = ds_service.get_dataset(db, fig.dataset_id, owner_id)
+                df = ds_service.load_dataframe(ds)
+                new_options = dict(v.options or {})
+                new_options.update({
+                    "size": "custom", "width_in": target_width,
+                    "height_in": target_height, "dpi": target_dpi,
+                })
+                new_options = sanitize_options(fig.plot_type, new_options, _dataset_column_names(ds))
+                new_options = _resolve_custom_palette_options(db, owner_id, new_options)
+                out_dir = os.path.join(work, "render")
+                res = renderer.render(fig.plot_type, v.mapping or {}, new_options, preset, df, out_dir)
+                if res.success:
+                    for ext in ("png", "tiff", "pdf", "svg", "eps", "r"):
+                        path = (res.outputs or {}).get(ext)
+                        if path and os.path.exists(path):
+                            with open(path, "rb") as fh:
+                                rendered[ext] = fh.read()
+                    did_rerender = bool(rendered)
+            except Exception:
+                rendered = {}
+                did_rerender = False
+
+        # ---- fallback: bundle the version's existing rendered files ----
+        if not rendered:
+            for fmt in ("tiff", "pdf", "png", "svg", "eps", "r"):
+                attr = _EXPORT[fmt][0]
+                path = getattr(v, attr, None)
+                if path and storage.exists(path):
+                    rendered[fmt] = storage.read_bytes(path)
+
+        if did_rerender:
+            note = (f"Re-rendered at the {spec['journal']} {column}-column width "
+                    f"{target_width:.2f} in x {target_height:.2f} in @ {target_dpi} dpi.")
+            size_line = f"Render size  : {target_width:.2f} in x {target_height:.2f} in @ {target_dpi} dpi"
+        elif manual_svg:
+            note = "Manually SVG-edited version bundled as-is (not re-rendered)."
+            size_line = f"Source size  : {base_w:.2f} in x {base_h:.2f} in @ {base_dpi} dpi"
+        else:
+            note = "Bundled the version's existing rendered files (re-render unavailable)."
+            size_line = f"Source size  : {base_w:.2f} in x {base_h:.2f} in @ {base_dpi} dpi"
+
+        included = ", ".join(sorted(rendered.keys())) or "none"
+        caption_stub = fig.legend or (
+            f"Figure. {fig.name}. Describe the figure content, sample sizes (n), "
+            "and statistical tests here."
+        )
+        readme = "\n".join([
+            "LabPlot AI - journal submission bundle",
+            "",
+            f"Figure name  : {fig.name}",
+            f"Plot type    : {plot_label}",
+            f"Journal style: {spec['journal']} ({preset})",
+            f"Target column: {column} ({target_width:.2f} in)",
+            size_line,
+            f"Files        : {included}",
+            f"Note         : {note}",
+            "",
+            "Caption (stub):",
+            caption_stub,
+            "",
+            "Interpretation:",
+            (fig.description or "-"),
+            "",
+            "Reproducibility:",
+            "See figure.R for the exact, self-contained R script that regenerates this figure.",
+        ])
+
+        safe = re.sub(r"[^A-Za-z0-9_-]+", "_", fig.name) or "figure"
+        name_map = {
+            "png": f"{safe}.png", "tiff": f"{safe}.tiff", "pdf": f"{safe}.pdf",
+            "svg": f"{safe}.svg", "eps": f"{safe}.eps", "r": "figure.R",
+        }
+        with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as z:
+            for ext, data in rendered.items():
+                z.writestr(name_map.get(ext, f"{safe}.{ext}"), data)
+            z.writestr("README.txt", readme)
+
+    return zip_buf.getvalue(), f"{safe}_v{v.version_number}_{column}_submission.zip"

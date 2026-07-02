@@ -1,7 +1,7 @@
 import type {
   User, TokenResponse, LoginRequest, RegisterRequest,
-  DatasetIngestOptions, DatasetListItem, DatasetDetail, DatasetPreview, ChartSuggestion, PlotTypeDef, StyleDef,
-  FigureListItem, FigureDetail, FigureVersion, Review, Improvement, AdminUser, AIConfig, GalleryFigureItem, AuditLogItem,
+  DatasetIngestOptions, DatasetListItem, DatasetDetail, DatasetPreview, ChartSuggestion, PlotTypeDef, StyleDef, ColumnValues,
+  FigureListItem, FigureDetail, FigureVersion, Review, Improvement, MethodsTextResponse, AltTextResponse, AdminUser, AIConfig, GalleryFigureItem, AuditLogItem,
   ClientErrorItem, Project, ProjectListItem, EmailDeliveryStatus, FigureTemplateFavoriteItem,
   MembershipItem, MyOrganizationItem, OrganizationAIConfig, OrganizationItem, OrganizationSearchItem, OrganizationUsageSummary, OrganizationUserSearchItem,
   ProjectCollaborator, ProjectInvitation, ProjectUserSearchItem, GalleryTemplate, RecommendationCache,
@@ -69,6 +69,17 @@ function parseErrorMessage(body: string, statusText: string): string {
   return body || `Request failed: ${statusText}`;
 }
 
+// Single-flight refresh: concurrent 401s share ONE /api/auth/refresh call so
+// that refresh-token rotation (which invalidates the old token) doesn't cause
+// all-but-one refresh to fail and spuriously log the user out.
+let refreshPromise: Promise<TokenResponse> | null = null;
+function ensureRefreshed(): Promise<TokenResponse> {
+  if (!refreshPromise) {
+    refreshPromise = refreshToken().finally(() => { refreshPromise = null; });
+  }
+  return refreshPromise;
+}
+
 async function fetcher<T>(path: string, options?: RequestInit, retried = false): Promise<T> {
   const token = getAccessToken();
   const headers: Record<string, string> = {
@@ -79,7 +90,7 @@ async function fetcher<T>(path: string, options?: RequestInit, retried = false):
   const res = await fetch(`${BASE_URL}${path}`, { ...options, headers });
   if (res.status === 401 && !retried) {
     try {
-      await refreshToken();
+      await ensureRefreshed();
       return fetcher<T>(path, options, true);
     } catch {
       clearTokens();
@@ -119,7 +130,22 @@ export async function refreshToken(): Promise<TokenResponse> {
   return r;
 }
 export async function getMe(): Promise<User> { return fetcher<User>('/api/auth/me'); }
-export function logout(): void { clearTokens(); }
+export async function logout(): Promise<void> {
+  // Best-effort server-side revocation (bumps token_version), then always
+  // clear local tokens. Uses a direct fetch to bypass the auto-refresh/redirect
+  // machinery in `fetcher`; the endpoint is authenticated so we send the token
+  // BEFORE clearing it.
+  try {
+    const token = getAccessToken();
+    if (token) {
+      await fetch(`${BASE_URL}/api/auth/logout`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      });
+    }
+  } catch { /* network/best-effort: ignore */ }
+  finally { clearTokens(); }
+}
 
 // ── organizations ──
 export async function searchOrganizations(q = ''): Promise<OrganizationSearchItem[]> {
@@ -209,6 +235,9 @@ export async function listDatasets(projectId?: string): Promise<DatasetListItem[
   return fetcher(`/api/datasets${projectId ? `?project_id=${projectId}` : ''}`);
 }
 export async function getDataset(id: string): Promise<DatasetDetail> { return fetcher(`/api/datasets/${id}`); }
+export async function getColumnValues(datasetId: string, column: string, limit = 200): Promise<ColumnValues> {
+  return fetcher(`/api/datasets/${datasetId}/columns/${encodeURIComponent(column)}/values?limit=${limit}`);
+}
 export async function deleteDataset(id: string): Promise<void> { return fetcher(`/api/datasets/${id}`, { method: 'DELETE' }); }
 export async function updateDataset(
   id: string,
@@ -218,6 +247,18 @@ export async function updateDataset(
 }
 export async function reorderDatasets(datasetIds: string[]): Promise<DatasetListItem[]> {
   return fetcher('/api/datasets/reorder', { method: 'POST', body: JSON.stringify({ dataset_ids: datasetIds }) });
+}
+export async function transformDataset(
+  datasetId: string,
+  data: { name?: string; operations: import('./types').TransformOperation[] },
+): Promise<DatasetDetail> {
+  return fetcher(`/api/datasets/${datasetId}/transform`, { method: 'POST', body: JSON.stringify(data) });
+}
+export async function previewDatasetTransform(
+  datasetId: string,
+  data: { operations: import('./types').TransformOperation[] },
+): Promise<import('./types').TransformPreview> {
+  return fetcher(`/api/datasets/${datasetId}/transform/preview`, { method: 'POST', body: JSON.stringify(data) });
 }
 export async function getPublicGallery(limit = 12): Promise<{ figures: import('./types').PublicFigure[] }> {
   return fetcher(`/api/public/gallery?limit=${limit}`);
@@ -336,8 +377,36 @@ export async function deleteFigure(id: string): Promise<void> { return fetcher(`
 export async function deleteFigureVersion(figureId: string, versionId: string): Promise<FigureDetail> {
   return fetcher(`/api/figures/${figureId}/versions/${versionId}`, { method: 'DELETE' });
 }
-export async function updateFigure(id: string, data: { name?: string; description?: string; legend?: string; is_favorite?: boolean }): Promise<FigureDetail> {
+export async function updateFigure(id: string, data: { name?: string; description?: string; legend?: string; is_favorite?: boolean; is_public?: boolean }): Promise<FigureDetail> {
   return fetcher(`/api/figures/${id}`, { method: 'PATCH', body: JSON.stringify(data) });
+}
+export async function getFigureCode(figureId: string, versionId: string, lang: 'python' | 'latex'): Promise<import('./types').FigureCodeResponse> {
+  return fetcher(`/api/figures/${figureId}/versions/${versionId}/code?lang=${lang}`);
+}
+export async function listFigureComments(figureId: string): Promise<import('./types').FigureComment[]> {
+  return fetcher(`/api/figures/${figureId}/comments`);
+}
+export async function addFigureComment(figureId: string, body: string): Promise<import('./types').FigureComment> {
+  return fetcher(`/api/figures/${figureId}/comments`, { method: 'POST', body: JSON.stringify({ body }) });
+}
+export async function deleteFigureComment(figureId: string, commentId: string): Promise<void> {
+  return fetcher(`/api/figures/${figureId}/comments/${commentId}`, { method: 'DELETE' });
+}
+export async function setFigureShare(figureId: string, enable: boolean): Promise<import('./types').FigureShareResponse> {
+  return fetcher(`/api/figures/${figureId}/share`, { method: 'POST', body: JSON.stringify({ enable }) });
+}
+export async function getSharedFigure(token: string): Promise<import('./types').SharedFigure> {
+  return fetcher(`/api/public/figures/shared/${encodeURIComponent(token)}`);
+}
+export async function getAccountUsage(): Promise<import('./types').UsageSummary> {
+  return fetcher('/api/account/usage');
+}
+export async function getMethodsText(figureId: string, versionId: string): Promise<MethodsTextResponse> {
+  return fetcher(`/api/figures/${figureId}/versions/${versionId}/methods-text`, { method: 'POST' });
+}
+export async function getAltText(figureId: string, versionId: string, prompt?: string): Promise<AltTextResponse> {
+  const body = prompt?.trim() ? JSON.stringify({ prompt: prompt.trim() }) : undefined;
+  return fetcher(`/api/figures/${figureId}/versions/${versionId}/alt-text`, { method: 'POST', body });
 }
 export async function saveFigureTemplateFavorite(id: string, data?: { source_version_id?: string; name?: string }): Promise<FigureTemplateFavoriteItem> {
   return fetcher(`/api/figures/${id}/template-favorite`, { method: 'POST', body: JSON.stringify(data ?? {}) });
@@ -385,6 +454,42 @@ export async function applyImprovements(figureId: string, improvementIds: string
     method: 'POST',
     body: JSON.stringify({ improvement_ids: improvementIds }),
   });
+}
+export async function listCanvases(projectId?: string): Promise<import('./types').CanvasListItem[]> {
+  return fetcher(`/api/canvases${projectId ? `?project_id=${projectId}` : ''}`);
+}
+export async function createCanvas(data: {
+  name: string; description?: string; project_id?: string; preset?: string;
+  width_px?: number; height_px?: number; state?: import('./types').CanvasState;
+}): Promise<import('./types').CanvasDetail> {
+  return fetcher('/api/canvases', { method: 'POST', body: JSON.stringify(data) });
+}
+export async function getCanvas(id: string): Promise<import('./types').CanvasDetail> {
+  return fetcher(`/api/canvases/${id}`);
+}
+export async function updateCanvas(id: string, data: {
+  name?: string; description?: string; preset?: string;
+  width_px?: number; height_px?: number; state?: import('./types').CanvasState;
+}): Promise<import('./types').CanvasDetail> {
+  return fetcher(`/api/canvases/${id}`, { method: 'PATCH', body: JSON.stringify(data) });
+}
+export async function deleteCanvas(id: string): Promise<void> {
+  return fetcher(`/api/canvases/${id}`, { method: 'DELETE' });
+}
+export async function renderCanvas(id: string): Promise<{ png_url: string; pdf_url: string }> {
+  return fetcher(`/api/canvases/${id}/render`, { method: 'POST' });
+}
+export async function downloadCanvasExport(id: string, fmt: 'png' | 'pdf', filename: string): Promise<void> {
+  const headers: Record<string, string> = {};
+  const token = getAccessToken();
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const res = await fetch(`${BASE_URL}/api/canvases/${id}/export?format=${fmt}`, { headers });
+  if (!res.ok) throw new ApiError('Canvas export failed', res.status);
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename; document.body.appendChild(a); a.click();
+  a.remove(); URL.revokeObjectURL(url);
 }
 export function exportUrl(figureId: string, versionId: string, fmt: string): string {
   return `${BASE_URL}/api/figures/${figureId}/versions/${versionId}/export?format=${fmt}`;

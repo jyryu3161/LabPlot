@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { toast } from 'sonner';
@@ -13,16 +13,43 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
-import { Check, Loader2, FolderKanban, Plus, Trash2, Database, Images, X } from 'lucide-react';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { AlertTriangle, Check, Loader2, FolderKanban, Plus, RotateCcw, Search, SearchX, Trash2, Database, Images, X } from 'lucide-react';
+
+type SortKey = 'saved' | 'name' | 'newest' | 'oldest';
+const SORT_LABELS: Record<SortKey, string> = {
+  saved: 'Default',
+  name: 'Name A–Z',
+  newest: 'Newest',
+  oldest: 'Oldest',
+};
 
 export default function ProjectsPage() {
   const qc = useQueryClient();
-  const { data: projects, isLoading } = useQuery({ queryKey: ['projects'], queryFn: listProjects });
+  const { data: projects, isLoading, isError, error, refetch } = useQuery({ queryKey: ['projects'], queryFn: listProjects });
   const { data: invitations } = useQuery({ queryKey: ['project-invitations'], queryFn: listProjectInvitations });
   const [name, setName] = useState('');
   const [desc, setDesc] = useState('');
   const [open, setOpen] = useState(false);
   const [collaborators, setCollaborators] = useState<ProjectInviteDraft[]>([]);
+  const [search, setSearch] = useState('');
+  const [sort, setSort] = useState<SortKey>('saved');
+
+  const visibleProjects = useMemo(() => {
+    if (!projects) return [];
+    const q = search.trim().toLowerCase();
+    const filtered = q
+      ? projects.filter((p) =>
+          p.name.toLowerCase().includes(q) ||
+          (p.description ?? '').toLowerCase().includes(q))
+      : projects;
+    if (sort === 'saved') return filtered;
+    const sorted = [...filtered];
+    if (sort === 'name') sorted.sort((a, b) => a.name.localeCompare(b.name));
+    else if (sort === 'newest') sorted.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+    else if (sort === 'oldest') sorted.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+    return sorted;
+  }, [projects, search, sort]);
 
   const create = useMutation({
     mutationFn: () => createProject({
@@ -118,13 +145,43 @@ export default function ProjectsPage() {
 
         {isLoading ? (
           <div className="flex justify-center py-12"><Loader2 className="h-6 w-6 animate-spin" /></div>
+        ) : isError ? (
+          <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-12 text-center">
+            <AlertTriangle className="mx-auto mb-2 h-8 w-8 text-destructive" />
+            <p className="mb-4 text-sm text-muted-foreground">{error instanceof Error ? error.message : 'Could not load projects.'}</p>
+            <Button variant="outline" size="sm" onClick={() => refetch()}><RotateCcw className="mr-1 h-4 w-4" /> Retry</Button>
+          </div>
         ) : !projects?.length ? (
           <div className="rounded-lg border border-dashed p-12 text-center text-muted-foreground">
             <FolderKanban className="mx-auto mb-2 h-8 w-8" /> No projects yet. Create one to get started.
           </div>
         ) : (
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {projects.map((p) => (
+          <>
+            <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="relative w-full sm:max-w-xs">
+                <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                <Label htmlFor="projects-search" className="sr-only">Search projects</Label>
+                <Input id="projects-search" type="search" placeholder="Search projects…" className="pl-8" value={search} onChange={(e) => setSearch(e.target.value)} />
+              </div>
+              <Select value={sort} onValueChange={(value) => setSort(value as SortKey)}>
+                <SelectTrigger id="projects-sort" size="sm" aria-label="Sort projects" className="w-[160px]">
+                  <SelectValue>{(value) => SORT_LABELS[value as SortKey] ?? SORT_LABELS.saved}</SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="saved">Default</SelectItem>
+                  <SelectItem value="name">Name A–Z</SelectItem>
+                  <SelectItem value="newest">Newest</SelectItem>
+                  <SelectItem value="oldest">Oldest</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            {visibleProjects.length === 0 ? (
+              <div className="rounded-lg border border-dashed p-12 text-center text-muted-foreground">
+                <SearchX className="mx-auto mb-2 h-8 w-8" /> No projects match your search.
+              </div>
+            ) : (
+              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                {visibleProjects.map((p) => (
               <Card key={p.id} className="h-full transition hover:shadow-md">
                 <CardHeader className="pb-2">
                   <div className="flex items-start justify-between">
@@ -133,7 +190,7 @@ export default function ProjectsPage() {
                       <span className="break-words">{p.name}</span>
                     </CardTitle>
                     {p.role === 'owner' && (
-                      <Button variant="ghost" size="sm" onClick={() => { if (confirm(`Delete project "${p.name}" and all its datasets/figures?`)) del.mutate(p.id); }}>
+                      <Button variant="ghost" size="sm" aria-label={`Delete project ${p.name}`} onClick={() => { if (confirm(`Delete project "${p.name}" and all its datasets/figures?`)) del.mutate(p.id); }}>
                         <Trash2 className="h-4 w-4 text-muted-foreground" />
                       </Button>
                     )}
@@ -150,8 +207,10 @@ export default function ProjectsPage() {
                   <Link href={`/projects/${p.id}`}><Button size="sm" className="w-full">Open project</Button></Link>
                 </CardContent>
               </Card>
-            ))}
-          </div>
+                ))}
+              </div>
+            )}
+          </>
         )}
       </main>
     </div>

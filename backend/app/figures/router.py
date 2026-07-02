@@ -11,12 +11,20 @@ from app.common.deps import get_current_user, get_db
 from app.common.security import rate_limit
 from app.figures import service
 from app.figures.schemas import (
+    AltTextRequest,
+    AltTextResponse,
+    ComplianceReport,
     EnhancePromptRequest,
     EnhancePromptResponse,
+    FigureCodeResponse,
+    FigureCommentCreate,
+    FigureCommentItem,
     FigureCreate,
     FigureDetail,
     FigureListItem,
     FigureReorderRequest,
+    FigureShareRequest,
+    FigureShareResponse,
     FigureTemplateFavoriteItem,
     FigureUpdate,
     GalleryFigureItem,
@@ -25,6 +33,7 @@ from app.figures.schemas import (
     ImprovementResponse,
     LegendRequest,
     LegendResponse,
+    MethodsTextResponse,
     RecommendationCacheResponse,
     RecommendationItem,
     RecommendationRequest,
@@ -157,6 +166,24 @@ def update_figure(figure_id: uuid.UUID, data: FigureUpdate, db: Session = Depend
     return service.update_figure(db, figure_id, current_user.id, data.model_dump(exclude_unset=True))
 
 
+@router.post("/{figure_id}/share", response_model=FigureShareResponse,
+             dependencies=[Depends(rate_limit("figure_share", 60, 3600))])
+def set_share(figure_id: uuid.UUID, data: FigureShareRequest, request: Request,
+              db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    result = service.set_figure_share(db, figure_id, current_user.id, data.enable)
+    audit_service.log_event(
+        db,
+        actor_id=current_user.id,
+        action="figure.share" if data.enable else "figure.unshare",
+        target_type="figure",
+        target_id=figure_id,
+        metadata={"enabled": data.enable},
+        request=request,
+    )
+    db.commit()
+    return result
+
+
 @router.post("/{figure_id}/template-favorite", response_model=FigureTemplateFavoriteItem)
 def save_template_favorite(
     figure_id: uuid.UUID,
@@ -192,6 +219,46 @@ def generate_legend(figure_id: uuid.UUID, version_id: uuid.UUID, data: LegendReq
         prompt=req.prompt,
         current_legend=req.current_legend,
     )
+
+
+@router.get("/{figure_id}/comments", response_model=list[FigureCommentItem])
+def list_comments(figure_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    return service.list_comments(db, figure_id, current_user.id)
+
+
+@router.post("/{figure_id}/comments", response_model=FigureCommentItem, status_code=201,
+             dependencies=[Depends(rate_limit("figure_comment_create", 120, 3600))])
+def create_comment(figure_id: uuid.UUID, data: FigureCommentCreate,
+                   db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    return service.create_comment(db, figure_id, current_user.id, data.body)
+
+
+@router.delete("/{figure_id}/comments/{comment_id}", status_code=204)
+def delete_comment(figure_id: uuid.UUID, comment_id: uuid.UUID,
+                   db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    service.delete_comment(db, figure_id, comment_id, current_user.id)
+
+
+@router.post("/{figure_id}/versions/{version_id}/methods-text", response_model=MethodsTextResponse,
+             dependencies=[Depends(rate_limit("figure_methods_text", 120, 3600))])
+def generate_methods_text(figure_id: uuid.UUID, version_id: uuid.UUID,
+                          db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    return service.generate_methods_text(db, figure_id, version_id, current_user.id)
+
+
+@router.get("/{figure_id}/versions/{version_id}/code", response_model=FigureCodeResponse,
+            dependencies=[Depends(rate_limit("figure_code_export", 120, 3600))])
+def export_figure_code(figure_id: uuid.UUID, version_id: uuid.UUID, lang: str = "python",
+                       db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    return service.generate_figure_code(db, figure_id, version_id, current_user.id, lang)
+
+
+@router.post("/{figure_id}/versions/{version_id}/alt-text", response_model=AltTextResponse,
+             dependencies=[Depends(rate_limit("ai_alt_text", 60, 3600))])
+def generate_alt_text(figure_id: uuid.UUID, version_id: uuid.UUID, data: AltTextRequest | None = None,
+                      db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    req = data or AltTextRequest()
+    return service.generate_alt_text(db, figure_id, version_id, current_user.id, prompt=req.prompt)
 
 
 @router.delete("/{figure_id}", status_code=204)
@@ -296,3 +363,21 @@ def export(figure_id: uuid.UUID, version_id: uuid.UUID, format: str = "png",
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
     return FileResponse(path, media_type=media, filename=filename)
+
+
+@router.get("/{figure_id}/versions/{version_id}/compliance", response_model=ComplianceReport)
+def compliance(figure_id: uuid.UUID, version_id: uuid.UUID,
+               db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    return service.check_compliance(db, figure_id, version_id, current_user.id)
+
+
+@router.get("/{figure_id}/versions/{version_id}/submission-bundle",
+            dependencies=[Depends(rate_limit("figure_submission_bundle", 30, 3600))])
+def submission_bundle(figure_id: uuid.UUID, version_id: uuid.UUID, column: str = "single",
+                      db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    data, filename = service.build_submission_bundle(db, figure_id, version_id, current_user.id, column)
+    return Response(
+        data,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
