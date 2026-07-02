@@ -20,6 +20,11 @@ class RerenderRequest(BaseModel):
     options: dict[str, Any] | None = None
     style_preset: str | None = None
     change_note: str | None = None
+    # Optimistic-concurrency guard: when supplied, the rerender only proceeds if
+    # the figure's current version still matches what the client last loaded.
+    # Mismatch -> 409 VERSION_CONFLICT (no version created). Omitted (None) keeps
+    # the legacy behavior for the figure editor and other existing callers.
+    base_version_id: uuid.UUID | None = None
 
 
 class SvgEditRequest(BaseModel):

@@ -1,6 +1,6 @@
 {
   "version": "2.0",
-  "lastUpdated": "2026-07-02T14:09:32.219Z",
+  "lastUpdated": "2026-07-02T23:51:45.595Z",
   "activeFeatures": [
     "labplot-ai",
     "backend",
@@ -30,7 +30,8 @@
     "[token]",
     "canvases",
     "qa-e2e",
-    "tests"
+    "tests",
+    "alembic"
   ],
   "primaryFeature": "labplot-ai",
   "features": {
@@ -57,7 +58,7 @@
       "documents": {},
       "timestamps": {
         "started": "2026-06-13T05:51:00.501Z",
-        "lastUpdated": "2026-07-02T06:32:24.431Z"
+        "lastUpdated": "2026-07-02T14:47:35.624Z"
       },
       "lastFile": "/home/ubuntu/web_projects/LabPlot/backend/app/main.py"
     },
@@ -122,9 +123,9 @@
       "documents": {},
       "timestamps": {
         "started": "2026-06-13T05:54:43.103Z",
-        "lastUpdated": "2026-07-02T12:38:38.397Z"
+        "lastUpdated": "2026-07-02T22:46:14.556Z"
       },
-      "lastFile": "/home/ubuntu/web_projects/LabPlot/backend/app/r_engine/renderer.py"
+      "lastFile": "/home/ubuntu/web_projects/LabPlot/backend/app/r_engine/templates.py"
     },
     "ai": {
       "phase": "do",
@@ -148,9 +149,9 @@
       "documents": {},
       "timestamps": {
         "started": "2026-06-13T05:57:59.831Z",
-        "lastUpdated": "2026-07-02T13:08:23.094Z"
+        "lastUpdated": "2026-07-02T23:30:46.301Z"
       },
-      "lastFile": "/home/ubuntu/web_projects/LabPlot/frontend/src/components/figures/FigureAnnotationOverlay.tsx"
+      "lastFile": "/home/ubuntu/web_projects/LabPlot/backend/app/figures/service.py"
     },
     "frontend": {
       "phase": "do",
@@ -161,7 +162,7 @@
       "documents": {},
       "timestamps": {
         "started": "2026-06-13T06:09:55.054Z",
-        "lastUpdated": "2026-07-02T12:37:57.850Z"
+        "lastUpdated": "2026-07-02T22:45:53.852Z"
       },
       "lastFile": "/home/ubuntu/web_projects/LabPlot/frontend/src/lib/types.ts"
     },
@@ -200,7 +201,7 @@
       "documents": {},
       "timestamps": {
         "started": "2026-06-13T06:11:14.912Z",
-        "lastUpdated": "2026-07-02T06:33:05.423Z"
+        "lastUpdated": "2026-07-02T22:18:05.582Z"
       },
       "lastFile": "/home/ubuntu/web_projects/LabPlot/frontend/src/components/layout/AppHeader.tsx"
     },
@@ -213,9 +214,9 @@
       "documents": {},
       "timestamps": {
         "started": "2026-06-13T06:12:48.409Z",
-        "lastUpdated": "2026-07-02T12:44:12.307Z"
+        "lastUpdated": "2026-07-02T22:23:39.404Z"
       },
-      "lastFile": "/home/ubuntu/web_projects/LabPlot/frontend/src/app/(with-providers)/figures/[id]/page.tsx"
+      "lastFile": "/home/ubuntu/web_projects/LabPlot/frontend/src/app/(with-providers)/canvases/[id]/page.tsx"
     },
     "test_data": {
       "phase": "do",
@@ -291,9 +292,9 @@
       "documents": {},
       "timestamps": {
         "started": "2026-07-01T23:30:24.574Z",
-        "lastUpdated": "2026-07-02T12:35:43.359Z"
+        "lastUpdated": "2026-07-02T23:36:25.789Z"
       },
-      "lastFile": "/tmp/claude-1000/-home-ubuntu-web-projects-LabPlot/689b8cb2-60f7-4ec4-816d-e8b630747e66/scratchpad/layout_smoke.py"
+      "lastFile": "/tmp/claude-1000/-home-ubuntu-web-projects-LabPlot/689b8cb2-60f7-4ec4-816d-e8b630747e66/scratchpad/verify_m4.py"
     },
     "versions": {
       "phase": "do",
@@ -304,9 +305,9 @@
       "documents": {},
       "timestamps": {
         "started": "2026-07-01T23:31:10.077Z",
-        "lastUpdated": "2026-07-02T12:34:14.195Z"
+        "lastUpdated": "2026-07-02T14:38:16.527Z"
       },
-      "lastFile": "/home/ubuntu/web_projects/LabPlot/backend/alembic/versions/20260702_0018_figure_layout.py"
+      "lastFile": "/home/ubuntu/web_projects/LabPlot/backend/alembic/versions/20260702_0019_canvases.py"
     },
     "(with-providers)": {
       "phase": "do",
@@ -382,9 +383,9 @@
       "documents": {},
       "timestamps": {
         "started": "2026-07-02T05:37:12.496Z",
-        "lastUpdated": "2026-07-02T05:46:06.007Z"
+        "lastUpdated": "2026-07-02T23:43:17.351Z"
       },
-      "lastFile": "/home/ubuntu/web_projects/LabPlot/frontend/src/app/(with-providers)/canvases/page.tsx"
+      "lastFile": "/home/ubuntu/web_projects/LabPlot/frontend/src/components/canvases/CanvasEditor.tsx"
     },
     "qa-e2e": {
       "phase": "do",
@@ -408,9 +409,22 @@
       "documents": {},
       "timestamps": {
         "started": "2026-07-02T13:44:54.409Z",
-        "lastUpdated": "2026-07-02T14:06:24.176Z"
+        "lastUpdated": "2026-07-02T23:51:45.595Z"
       },
-      "lastFile": "/home/ubuntu/web_projects/LabPlot/frontend/qa-e2e/tests/editor.spec.js"
+      "lastFile": "/home/ubuntu/web_projects/LabPlot/frontend/qa-e2e/tests/canvas.spec.js"
+    },
+    "alembic": {
+      "phase": "do",
+      "phaseNumber": 3,
+      "matchRate": null,
+      "iterationCount": 0,
+      "requirements": [],
+      "documents": {},
+      "timestamps": {
+        "started": "2026-07-02T14:38:21.232Z",
+        "lastUpdated": "2026-07-02T14:38:21.232Z"
+      },
+      "lastFile": "/home/ubuntu/web_projects/LabPlot/backend/alembic/env.py"
     }
   },
   "pipeline": {
@@ -421,7 +435,7 @@
   "session": {
     "startedAt": "2026-06-13T05:06:05.497Z",
     "onboardingCompleted": true,
-    "lastActivity": "2026-07-02T14:09:32.219Z"
+    "lastActivity": "2026-07-02T23:51:45.595Z"
   },
   "history": [
     {
@@ -4533,6 +4547,462 @@
     {
       "timestamp": "2026-07-02T14:09:32.219Z",
       "feature": "qa-e2e",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T14:37:18.236Z",
+      "feature": "canvases",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T14:37:27.603Z",
+      "feature": "canvases",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T14:37:49.076Z",
+      "feature": "canvases",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T14:38:16.527Z",
+      "feature": "versions",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T14:38:21.232Z",
+      "feature": "alembic",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T14:43:37.590Z",
+      "feature": "r_engine",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T14:43:41.500Z",
+      "feature": "r_engine",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T14:43:46.565Z",
+      "feature": "figures",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T14:43:48.283Z",
+      "feature": "figures",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T14:43:49.874Z",
+      "feature": "figures",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T14:44:20.980Z",
+      "feature": "r_engine",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T14:44:27.294Z",
+      "feature": "r_engine",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T14:44:43.835Z",
+      "feature": "r_engine",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T14:44:53.270Z",
+      "feature": "r_engine",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T14:45:09.018Z",
+      "feature": "r_engine",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T14:47:18.993Z",
+      "feature": "canvases",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T14:47:29.939Z",
+      "feature": "canvases",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T14:47:34.623Z",
+      "feature": "backend",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T14:47:35.624Z",
+      "feature": "backend",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T14:48:21.974Z",
+      "feature": "scratchpad",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T14:49:07.608Z",
+      "feature": "r_engine",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T14:50:07.712Z",
+      "feature": "scratchpad",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T22:16:48.417Z",
+      "feature": "canvases",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T22:17:39.278Z",
+      "feature": "canvases",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T22:17:58.829Z",
+      "feature": "canvases",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T22:18:00.336Z",
+      "feature": "canvases",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T22:18:05.582Z",
+      "feature": "layout",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T22:18:56.867Z",
+      "feature": "scratchpad",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T22:20:35.681Z",
+      "feature": "tests",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T22:21:17.313Z",
+      "feature": "canvases",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T22:21:33.181Z",
+      "feature": "canvases",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T22:23:33.177Z",
+      "feature": "canvases",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T22:23:39.404Z",
+      "feature": "[id]",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T22:31:06.415Z",
+      "feature": "tests",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T22:37:34.472Z",
+      "feature": "canvases",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T22:45:53.852Z",
+      "feature": "frontend",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T22:46:14.556Z",
+      "feature": "r_engine",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T22:46:18.682Z",
+      "feature": "figures",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T22:46:21.159Z",
+      "feature": "figures",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T22:47:33.927Z",
+      "feature": "canvases",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T22:47:43.185Z",
+      "feature": "canvases",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T22:47:55.613Z",
+      "feature": "canvases",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T22:54:18.742Z",
+      "feature": "canvases",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T22:55:09.483Z",
+      "feature": "canvases",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T22:55:29.743Z",
+      "feature": "canvases",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T22:55:34.844Z",
+      "feature": "canvases",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T22:55:41.745Z",
+      "feature": "canvases",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T22:55:46.563Z",
+      "feature": "canvases",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T22:55:56.755Z",
+      "feature": "canvases",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T22:57:50.178Z",
+      "feature": "canvases",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T22:57:54.204Z",
+      "feature": "canvases",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T22:57:58.040Z",
+      "feature": "canvases",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T23:30:41.572Z",
+      "feature": "figures",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T23:30:43.011Z",
+      "feature": "figures",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T23:30:46.301Z",
+      "feature": "figures",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T23:31:29.725Z",
+      "feature": "scratchpad",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T23:31:40.346Z",
+      "feature": "scratchpad",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T23:32:41.496Z",
+      "feature": "canvases",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T23:32:51.628Z",
+      "feature": "canvases",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T23:33:02.395Z",
+      "feature": "canvases",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T23:33:08.872Z",
+      "feature": "canvases",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T23:33:16.332Z",
+      "feature": "canvases",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T23:33:21.396Z",
+      "feature": "canvases",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T23:34:12.618Z",
+      "feature": "canvases",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T23:34:19.076Z",
+      "feature": "canvases",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T23:34:23.941Z",
+      "feature": "canvases",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T23:34:37.570Z",
+      "feature": "canvases",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T23:36:25.789Z",
+      "feature": "scratchpad",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T23:41:21.919Z",
+      "feature": "canvases",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T23:41:32.370Z",
+      "feature": "canvases",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T23:41:39.976Z",
+      "feature": "canvases",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T23:41:49.838Z",
+      "feature": "canvases",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T23:42:22.976Z",
+      "feature": "canvases",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T23:42:36.707Z",
+      "feature": "canvases",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T23:43:17.351Z",
+      "feature": "canvases",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T23:51:45.595Z",
+      "feature": "tests",
       "phase": "do",
       "action": "updated"
     }

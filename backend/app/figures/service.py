@@ -22,7 +22,7 @@ from sqlalchemy.orm import Session, joinedload
 from app.ai import client as ai_client
 from app.auth.models import User
 from app.common import storage
-from app.common.exceptions import BadRequestError, ForbiddenError, NotFoundError
+from app.common.exceptions import AppError, BadRequestError, ForbiddenError, NotFoundError
 from app.common.quotas import enforce_render_quota
 from app.config import settings
 from app.datasets.models import Dataset
@@ -1592,6 +1592,16 @@ def rerender(db: Session, figure_id: uuid.UUID, owner_id: uuid.UUID, req) -> dic
     if owner:
         enforce_render_quota(db, owner)
     fig = get_figure(db, figure_id, owner_id, write=True)
+    # Optimistic-concurrency guard (M4): if the caller pinned the version it
+    # loaded, reject the rerender when someone else advanced the figure since.
+    # Raised before any render so no version is created on conflict.
+    base_version_id = getattr(req, "base_version_id", None)
+    if base_version_id is not None and base_version_id != fig.current_version_id:
+        raise AppError(
+            status_code=409,
+            detail="Figure was modified since you last loaded it; reload and retry",
+            error_code="VERSION_CONFLICT",
+        )
     base = get_version(fig, fig.current_version_id) if fig.current_version_id else fig.versions[-1]
     mapping = req.mapping if req.mapping is not None else base.mapping
     options = req.options if req.options is not None else base.options

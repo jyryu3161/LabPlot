@@ -95,6 +95,15 @@ export function CanvasColorEditor({
     queryFn: () => getFigure(panel.figure_id),
   });
 
+  // Capture the version the user's edits are based on WHEN the editor first loaded
+  // this figure (the editor remounts per panel via `key`, so this is the version on
+  // screen). It's sent as base_version_id so the backend can reject (409) if the
+  // figure was changed elsewhere in the meantime — see the commit mutation below.
+  const baseVersionIdRef = useRef<string | null>(null);
+  if (baseVersionIdRef.current === null && figure) {
+    baseVersionIdRef.current = panel.effective_version_id ?? figure.current_version_id ?? null;
+  }
+
   const preview = usePanelPreview(panel, true);
   const layout = preview.result?.layout ?? null;
 
@@ -184,6 +193,9 @@ export function CanvasColorEditor({
       return rerenderFigure(panel.figure_id, {
         options: { ...options, series_styles: mergedStyles },
         change_note: `Canvas '${canvasName}': recolor ${Object.keys(edits).join(', ')}`,
+        // Conflict guard: the version the edits are based on. If the figure changed
+        // elsewhere since load, the backend returns 409 (VERSION_CONFLICT).
+        base_version_id: baseVersionIdRef.current ?? undefined,
       });
     },
     onSuccess: () => {
@@ -196,7 +208,17 @@ export function CanvasColorEditor({
       qc.invalidateQueries({ queryKey: ['figure', panel.figure_id] });
     },
     onError: (err) => {
-      // Backend created NO version on failure → roll back the instant preview by
+      if (err instanceof ApiError && err.status === 409) {
+        // The figure was changed elsewhere (another panel / tab) since this editor
+        // loaded it. KEEP the user's edits so they can retry after refreshing, and
+        // reload the newer version underneath (canvas + figure) so the next attempt
+        // bases on the up-to-date version.
+        toast.error('This figure changed elsewhere — reload the canvas and retry.');
+        qc.invalidateQueries({ queryKey: ['canvas', canvasId] });
+        qc.invalidateQueries({ queryKey: ['figure', panel.figure_id] });
+        return;
+      }
+      // Generic failure: backend created NO version → roll back the instant preview by
       // discarding the uncommitted edits so the overlay reverts to the committed
       // colors. Never leave a half-applied state.
       setEdits({});

@@ -8,6 +8,7 @@ import Konva from 'konva';
 import { Stage, Layer, Rect, Group, Image as KonvaImage, Text, Transformer, Line } from 'react-konva';
 import {
   getCanvas, updateCanvas, addCanvasPanel, updateCanvasPanel, deleteCanvasPanel, renderCanvasPreview,
+  downloadCanvasExport,
 } from '@/lib/api';
 import type { CanvasDetail, CanvasPanel, FigureListItem } from '@/lib/types';
 import { Button } from '@/components/ui/button';
@@ -15,13 +16,18 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import {
+  DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem,
+} from '@/components/ui/dropdown-menu';
+import {
   Loader2, Plus, Trash2, ArrowUp, ArrowDown, Maximize2, ZoomIn, ZoomOut, Lock, Unlock, Tag, Pencil, Check,
+  Download,
 } from 'lucide-react';
 import {
   mmToPx, pxToMm, roundMm, fitPxPerMm, clampCanvasMm, clampPanelMm, PANEL_MM_MIN,
 } from './mm';
 import { FigurePickerDialog } from './FigurePickerDialog';
 import { CanvasColorEditor } from './CanvasColorEditor';
+import { CanvasApplyStyle } from './CanvasApplyStyle';
 
 // ── panel figure image cache ────────────────────────────────────────────────
 // Keyed by (figure_id, version_id, round(w_mm), round(h_mm)) per design §3/§4:
@@ -345,6 +351,16 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     onError: () => toast.error('Could not update canvas'),
   });
 
+  // ── export: compose the canvas into a vector file (SVG/PDF) and download it. ──
+  const exportCanvas = useMutation({
+    mutationFn: (format: 'svg' | 'pdf') => {
+      const base = (canvas?.name?.trim() || 'canvas').replace(/[/\\:*?"<>|]+/g, '_');
+      return downloadCanvasExport(canvasId, format, `${base}.${format}`);
+    },
+    onSuccess: (_res, format) => toast.success(`Canvas exported as ${format.toUpperCase()}`),
+    onError: () => toast.error('Could not export canvas'),
+  });
+
   // ── move: convert node px → mm; position only (NO re-render) ──
   function handleDragMove(panel: CanvasPanel, e: Konva.KonvaEventObject<DragEvent>) {
     if (!canvas) return;
@@ -604,6 +620,31 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
             <Button type="button" size="icon-sm" variant="outline" onClick={() => zoomBy(1.2)} aria-label="Zoom in"><ZoomIn className="h-4 w-4" /></Button>
             <Button type="button" size="icon-sm" variant="outline" onClick={fitView} aria-label="Fit to view"><Maximize2 className="h-4 w-4" /></Button>
           </div>
+          <CanvasApplyStyle canvasId={canvasId} panels={panels} />
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              render={
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={panels.length === 0 || exportCanvas.isPending}
+                  title={panels.length === 0 ? 'Add a panel before exporting' : 'Export the composed canvas as a vector file'}
+                />
+              }
+            >
+              {exportCanvas.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+              Export
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem disabled={exportCanvas.isPending} onClick={() => exportCanvas.mutate('svg')}>
+                SVG (vector)
+              </DropdownMenuItem>
+              <DropdownMenuItem disabled={exportCanvas.isPending} onClick={() => exportCanvas.mutate('pdf')}>
+                PDF (vector)
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
           <Button type="button" size="sm" onClick={() => setPickerOpen(true)}>
             <Plus className="h-4 w-4" /> Add figure
           </Button>

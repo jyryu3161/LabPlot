@@ -62,6 +62,38 @@ test.describe('canvas (M2)', () => {
     await request.delete(`${base}/api/canvases/${c2.id}`, { headers: auth });
   });
 
+  test('M4 export (vector) + version snapshot + apply-style + conflict 409', async ({ request }) => {
+    const c = await (await request.post(`${base}/api/canvases`, { headers: auth, data: { name: 'M4 e2e', width_mm: 180, height_mm: 120 } })).json();
+    await request.post(`${base}/api/canvases/${c.id}/panels`, { headers: auth, data: { figure_id: ENV.FIG, x_mm: 8, y_mm: 8, width_mm: 78, height_mm: 52, label: 'A' } });
+    await request.post(`${base}/api/canvases/${c.id}/panels`, { headers: auth, data: { figure_id: ENV.FIG, x_mm: 95, y_mm: 62, width_mm: 78, height_mm: 52, label: 'B' } });
+
+    // SVG export is pure vector: nested <svg>, no <image> raster
+    const exp = await (await request.post(`${base}/api/canvases/${c.id}/export`, { headers: auth, data: { format: 'svg' } })).json();
+    expect(exp.url).toBeTruthy();
+    expect(Object.keys(exp.snapshot).length, 'export_snapshot has a version per panel').toBe(2);
+    const svg = await (await request.get(base + exp.url, { headers: auth })).text();
+    expect(svg).toContain('<svg');
+    expect(svg.match(/<svg/g).length, 'parent + nested panel svgs').toBeGreaterThanOrEqual(3);
+    expect(svg.includes('<image'), 'no bitmap raster in the composite').toBe(false);
+
+    // PDF export is a real vector PDF
+    const pexp = await (await request.post(`${base}/api/canvases/${c.id}/export`, { headers: auth, data: { format: 'pdf' } })).json();
+    const pdf = await (await request.get(base + pexp.url, { headers: auth })).body();
+    expect(pdf.slice(0, 5).toString(), 'pdf magic').toBe('%PDF-');
+
+    // conflict detection: a stale base_version_id must 409, creating no version
+    const f0 = await (await request.get(`${base}/api/figures/${ENV.FIG}`, { headers: auth })).json();
+    const nBefore = f0.versions.length;
+    const conflict = await request.post(`${base}/api/figures/${ENV.FIG}/rerender`, {
+      headers: auth, data: { base_version_id: '00000000-0000-0000-0000-000000000000', change_note: 'stale' },
+    });
+    expect(conflict.status(), 'stale base -> 409').toBe(409);
+    const f1 = await (await request.get(`${base}/api/figures/${ENV.FIG}`, { headers: auth })).json();
+    expect(f1.versions.length, 'no version created on conflict').toBe(nBefore);
+
+    await request.delete(`${base}/api/canvases/${c.id}`, { headers: auth });
+  });
+
   test('canvas list + editor pages load without console errors', async ({ page, request }) => {
     const errors = []; attachConsole(page, errors);
     const c = await (await request.post(`${base}/api/canvases`, { headers: auth, data: { name: 'QA smoke canvas', width_mm: 120, height_mm: 90 } })).json();

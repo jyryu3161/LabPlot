@@ -431,7 +431,7 @@ export async function generateLegend(
   }) : undefined;
   return fetcher(`/api/figures/${figureId}/versions/${versionId}/legend`, { method: 'POST', body });
 }
-export async function rerenderFigure(id: string, body: { plot_type?: string; mapping?: Record<string, unknown>; options?: Record<string, unknown>; style_preset?: string; change_note?: string }): Promise<FigureVersion> {
+export async function rerenderFigure(id: string, body: { plot_type?: string; mapping?: Record<string, unknown>; options?: Record<string, unknown>; style_preset?: string; change_note?: string; base_version_id?: string }): Promise<FigureVersion> {
   return fetcher(`/api/figures/${id}/rerender`, { method: 'POST', body: JSON.stringify(body) });
 }
 export async function reviewVersion(figureId: string, versionId: string): Promise<Review> {
@@ -583,4 +583,24 @@ export async function renderCanvasPreview(req: {
   options_overlay?: { series_styles?: Record<string, unknown>; category_colors?: Record<string, string>; base_size?: number };
 }): Promise<import('./types').CanvasPreviewResult> {
   return fetcher('/api/canvases/preview', { method: 'POST', body: JSON.stringify(req) });
+}
+
+export async function exportCanvasFile(id: string, format: 'svg' | 'pdf'): Promise<import('./types').CanvasExportResult> {
+  return fetcher(`/api/canvases/${id}/export`, { method: 'POST', body: JSON.stringify({ format }) });
+}
+export async function downloadCanvasExport(id: string, format: 'svg' | 'pdf', filename: string): Promise<void> {
+  const { url } = await exportCanvasFile(id, format);
+  const headers: Record<string, string> = {};
+  const token = getAccessToken();
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const res = await fetch(url.startsWith('http') ? url : `${BASE_URL}${url}`, { headers });
+  if (!res.ok) throw new ApiError('Export download failed', res.status);
+  const blob = await res.blob();
+  const objUrl = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = objUrl; a.download = filename; document.body.appendChild(a); a.click();
+  a.remove(); URL.revokeObjectURL(objUrl);
+}
+export async function applyCanvasStyle(id: string, sourceFigureId: string): Promise<import('./types').CanvasApplyStyleResult> {
+  return fetcher(`/api/canvases/${id}/apply-style`, { method: 'POST', body: JSON.stringify({ source_figure_id: sourceFigureId }) });
 }

@@ -7,8 +7,12 @@ from app.audit import service as audit_service
 from app.auth.models import User
 from app.canvases import service
 from app.canvases.schemas import (
+    CanvasApplyStyleRequest,
+    CanvasApplyStyleResponse,
     CanvasCreate,
     CanvasDetail,
+    CanvasExportRequest,
+    CanvasExportResponse,
     CanvasListItem,
     CanvasPanel,
     CanvasUpdate,
@@ -153,3 +157,49 @@ def remove_panel(canvas_id: uuid.UUID, panel_id: uuid.UUID, request: Request,
         request=request,
     )
     db.commit()
+
+
+# -------- export (M4, vector composition) --------
+# Composes every panel as VECTOR (nested SVG); PDF via rsvg-convert (librsvg).
+# NEVER bitmap-stretches. Snapshots {panel_id: version_id} for reproducibility.
+@router.post("/{canvas_id}/export", response_model=CanvasExportResponse,
+             dependencies=[Depends(rate_limit("canvas_export", 30, 3600))])
+def export_canvas(canvas_id: uuid.UUID, data: CanvasExportRequest, request: Request,
+                  db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    result = service.export_canvas(db, canvas_id, current_user.id, data.format)
+    audit_service.log_event(
+        db,
+        actor_id=current_user.id,
+        action="canvas.export",
+        target_type="canvas",
+        target_id=canvas_id,
+        metadata={"format": result["format"], "panels": len(result["snapshot"])},
+        request=request,
+    )
+    db.commit()
+    return result
+
+
+# -------- canvas-wide bulk style apply (M4) --------
+# Copies the source panel figure's STYLE-ONLY options to every OTHER panel's
+# figure. Each target gets a NEW version (content ⇒ version bump, decision 3).
+@router.post("/{canvas_id}/apply-style", response_model=CanvasApplyStyleResponse,
+             dependencies=[Depends(rate_limit("canvas_apply_style", 60, 3600))])
+def apply_style(canvas_id: uuid.UUID, data: CanvasApplyStyleRequest, request: Request,
+                db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    result = service.apply_canvas_style(db, canvas_id, current_user.id, data.source_figure_id)
+    audit_service.log_event(
+        db,
+        actor_id=current_user.id,
+        action="canvas.apply_style",
+        target_type="canvas",
+        target_id=canvas_id,
+        metadata={
+            "source_figure_id": str(data.source_figure_id),
+            "updated": len(result["updated"]),
+            "skipped": len(result["skipped"]),
+        },
+        request=request,
+    )
+    db.commit()
+    return result

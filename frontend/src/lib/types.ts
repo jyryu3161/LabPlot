@@ -597,3 +597,13 @@ export interface CanvasPreviewResult {
   cached: boolean;
   layout?: FigureLayout & { series_hex?: Record<string,string>; legend_keys?: { series: string; px: { x0:number;y0:number;x1:number;y1:number } }[]; panels?: unknown[]; layer_geom?: unknown[] } | null;
 }
+
+export interface CanvasExportResult {
+  url: string;
+  format: 'svg' | 'pdf';
+  snapshot: Record<string, string>;
+}
+export interface CanvasApplyStyleResult {
+  updated: string[];
+  skipped: string[];
+}

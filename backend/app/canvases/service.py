@@ -3,9 +3,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
+import subprocess
 import tempfile
 import uuid
+from xml.sax.saxutils import escape as _xml_escape
 
 from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload
@@ -14,7 +17,7 @@ from app.canvases.models import Canvas, CanvasPanel
 from app.canvases.schemas import CanvasCreate, PanelCreate, PreviewRenderRequest
 from app.common import storage
 from app.common.encryption import decrypt_private_bytes
-from app.common.exceptions import BadRequestError, NotFoundError
+from app.common.exceptions import AppError, BadRequestError, NotFoundError
 from app.config import settings
 from app.datasets import service as ds_service
 from app.datasets.models import Dataset
@@ -96,10 +99,25 @@ def _read_layout_object(digest: str) -> dict | None:
 def render_preview(db: Session, owner_id: uuid.UUID, req: PreviewRenderRequest) -> dict:
     """Ephemeral single-SVG preview render (design decision 4, §3, §4).
 
+    Thin public wrapper over :func:`_render_preview_ref` that maps the readable
+    SVG storage ref to a served URL. External contract unchanged
+    (``{svg_url, cached, layout}``).
+    """
+    ref, layout, cached = _render_preview_ref(db, owner_id, req)
+    return {"svg_url": figures_service._url(ref), "cached": cached, "layout": layout}
+
+
+def _render_preview_ref(db: Session, owner_id: uuid.UUID, req: PreviewRenderRequest) -> tuple[str, dict | None, bool]:
+    """Ephemeral single-SVG preview render → (svg_ref, layout, cached).
+
     Renders the figure's current (or pinned) version at a custom physical size
     with an optional color/base_size overlay, WITHOUT creating a FigureVersion
     and WITHOUT touching the rerender() path. Content-hash cached: an identical
     request returns the cached SVG with cached=True and never re-renders.
+
+    ``svg_ref`` is a reference readable by ``storage.read_bytes`` (a local
+    filesystem path or an ``s3://`` object URI) — the canvas export composer
+    reuses this to obtain each panel's raw physical-size vector SVG.
     """
     # 1. Owner/project-scoped figure access (404/403 as usual).
     fig = figures_service.get_figure(db, req.figure_id, owner_id)
@@ -167,11 +185,11 @@ def render_preview(db: Session, owner_id: uuid.UUID, req: PreviewRenderRequest) 
     if storage.object_storage_enabled():
         cache_ref = _object_cache_ref(digest)
         if storage.exists(cache_ref):
-            return {"svg_url": figures_service._url(cache_ref), "cached": True, "layout": _read_layout_object(digest)}
+            return cache_ref, _read_layout_object(digest), True
     else:
         cache_path = _local_cache_path(digest)
         if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
-            return {"svg_url": figures_service._url(cache_path), "cached": True, "layout": _read_layout_local(digest)}
+            return cache_path, _read_layout_local(digest), True
 
     # 4. Render (sandbox intact via renderer.render). Copy ONLY the SVG to the
     #    cache path; never persist png/version/etc. On failure raise RENDER_FAILED
@@ -206,7 +224,7 @@ def render_preview(db: Session, owner_id: uuid.UUID, req: PreviewRenderRequest) 
                     storage.upload_file(layout_src, storage.object_key(*_PREVIEW_PARTS, f"{digest}.layout.json"), content_type="application/json")
                 except Exception:
                     pass
-            return {"svg_url": figures_service._url(cache_ref), "cached": False, "layout": layout}
+            return cache_ref, layout, False
 
         cache_path = _local_cache_path(digest)
         os.makedirs(os.path.dirname(cache_path), exist_ok=True)
@@ -216,7 +234,7 @@ def render_preview(db: Session, owner_id: uuid.UUID, req: PreviewRenderRequest) 
                 shutil.copyfile(layout_src, _local_layout_path(digest))
             except Exception:
                 pass
-        return {"svg_url": figures_service._url(cache_path), "cached": False, "layout": layout}
+        return cache_path, layout, False
 
 
 # ============================================================================
@@ -504,3 +522,243 @@ def list_canvas_presets() -> list[dict]:
                 "height_mm": round(height_mm, 2),
             })
     return out
+
+
+# ============================================================================
+# M4 — canvas export (vector composition) + canvas-wide bulk style apply.
+#
+# CRITICAL (design §1): vector composition ONLY. Each panel is rendered at its
+# exact physical mm size by the SAME renderer the preview uses (fonts stay pt),
+# then its vector SVG is *nested* inside a parent SVG sized to the canvas. There
+# is NO rasterization — the banned rasterGrob/bitmap-stretch path is never used.
+# PDF is produced from that composite by rsvg-convert (librsvg), a vector
+# SVG→PDF converter that keeps text as text.
+# ============================================================================
+
+_EXPORT_PARTS = ("figures", "canvases", "export")
+
+# Panel label (A/B/C…) typography. Absolute pt → mm: the parent SVG's user unit
+# is 1 mm (viewBox in mm, width/height in mm), so a physical pt size maps to
+# `pt * 25.4 / 72` mm regardless of any panel scaling (§5 font invariance).
+_LABEL_PT = 12.0
+_PT_TO_MM = 25.4 / 72.0
+_LABEL_FONT_MM = round(_LABEL_PT * _PT_TO_MM, 4)
+_LABEL_INSET_MM = 1.0  # nudge in from the panel's top-left corner
+
+
+def _num(value: float) -> str:
+    """Format a float for SVG attributes (trim noise, never scientific)."""
+    return f"{float(value):.4f}".rstrip("0").rstrip(".") or "0"
+
+
+def _split_svg(svg_text: str) -> tuple[str, str]:
+    """Return (opening-tag attribute string, inner markup) of an SVG document.
+
+    Strips the XML/doctype preamble and the outer <svg> wrapper, keeping the
+    children verbatim so vector fidelity (paths, text, defs) is preserved.
+    """
+    m = re.search(r"<svg\b([^>]*)>(.*)</svg\s*>", svg_text, re.DOTALL | re.IGNORECASE)
+    if not m:
+        raise BadRequestError("Panel SVG is malformed", error_code="BAD_PANEL_SVG")
+    return m.group(1), m.group(2)
+
+
+def _svg_native_size(attrs: str) -> tuple[float, float]:
+    """Native (px) width/height of a panel SVG from its viewBox (preferred) or
+    width/height attributes. Used as the nested <svg> viewBox so the panel scales
+    cleanly into its mm box."""
+    vb = re.search(r'viewBox\s*=\s*"([^"]+)"', attrs)
+    if vb:
+        parts = re.split(r"[\s,]+", vb.group(1).strip())
+        if len(parts) == 4:
+            try:
+                w, h = float(parts[2]), float(parts[3])
+                if w > 0 and h > 0:
+                    return w, h
+            except ValueError:
+                pass
+
+    def _dim(name: str) -> float | None:
+        mm = re.search(rf'\b{name}\s*=\s*"([0-9.]+)', attrs)
+        return float(mm.group(1)) if mm else None
+
+    return (_dim("width") or 100.0, _dim("height") or 100.0)
+
+
+def _prefix_svg_ids(inner: str, prefix: str) -> str:
+    """Scope every id + fragment reference in a panel's inner SVG with `prefix`.
+
+    Nesting multiple independently-rendered SVGs into one document would collide
+    on shared ids (svglite emits generic ids for <clipPath>/<defs>/gradients).
+    Prefixing definitions AND their references (`url(#id)`, `href="#id"`) with a
+    per-panel token keeps each panel's clip-paths/defs self-consistent.
+    """
+    inner = re.sub(r'\bid="([^"]+)"', lambda m: f'id="{prefix}{m.group(1)}"', inner)
+    inner = re.sub(r"url\(#([^)]+)\)", lambda m: f"url(#{prefix}{m.group(1)})", inner)
+    inner = re.sub(
+        r'\b(xlink:href|href)="#([^"]+)"',
+        lambda m: f'{m.group(1)}="#{prefix}{m.group(2)}"',
+        inner,
+    )
+    return inner
+
+
+def _compose_canvas_svg(db: Session, owner_id: uuid.UUID, canvas: Canvas) -> tuple[str, dict[str, str]]:
+    """Build the composite canvas SVG by nesting each panel's vector render.
+
+    Returns (svg_text, snapshot) where snapshot is {panel_id: version_id} of the
+    versions actually rendered (design §5 reproducibility).
+    """
+    w_mm = _clamp(canvas.width_mm, _CANVAS_MM_MIN, _CANVAS_MM_MAX)
+    h_mm = _clamp(canvas.height_mm, _CANVAS_MM_MIN, _CANVAS_MM_MAX)
+
+    current_map = _figure_current_versions(db, [p.figure_id for p in canvas.panels])
+    # Paint order: ascending z_order (ties by id) → later panels drawn on top (§2).
+    panels = sorted(canvas.panels, key=lambda p: (p.z_order, str(p.id)))
+
+    parts: list[str] = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        (
+            '<svg xmlns="http://www.w3.org/2000/svg" '
+            'xmlns:xlink="http://www.w3.org/1999/xlink" version="1.1" '
+            f'width="{_num(w_mm)}mm" height="{_num(h_mm)}mm" '
+            f'viewBox="0 0 {_num(w_mm)} {_num(h_mm)}">'
+        ),
+    ]
+    # Background: opaque white unless the canvas is explicitly transparent (§2).
+    if canvas.background != "transparent":
+        parts.append(f'<rect x="0" y="0" width="{_num(w_mm)}" height="{_num(h_mm)}" fill="#ffffff"/>')
+
+    snapshot: dict[str, str] = {}
+    for idx, panel in enumerate(panels):
+        effective = panel.pinned_version_id or current_map.get(panel.figure_id)
+        if effective is None:
+            continue  # figure has no version yet → nothing to render
+
+        pw_mm = _clamp(panel.width_mm, _PANEL_MM_MIN, _PANEL_MM_MAX)
+        ph_mm = _clamp(panel.height_mm, _PANEL_MM_MIN, _PANEL_MM_MAX)
+        # Reuse the exact physical-size vector renderer (fonts stay pt, §5).
+        ref, _layout, _cached = _render_preview_ref(
+            db,
+            owner_id,
+            PreviewRenderRequest(
+                figure_id=panel.figure_id,
+                version_id=effective,
+                width_mm=pw_mm,
+                height_mm=ph_mm,
+            ),
+        )
+        svg_text = storage.read_bytes(ref).decode("utf-8")
+        attrs, inner = _split_svg(svg_text)
+        native_w, native_h = _svg_native_size(attrs)
+        inner = _prefix_svg_ids(inner, f"p{idx}_")
+
+        parts.append(
+            f'<svg x="{_num(panel.x_mm)}" y="{_num(panel.y_mm)}" '
+            f'width="{_num(pw_mm)}" height="{_num(ph_mm)}" '
+            f'viewBox="0 0 {_num(native_w)} {_num(native_h)}" '
+            f'preserveAspectRatio="none" overflow="hidden">{inner}</svg>'
+        )
+
+        if panel.label_visible and panel.label:
+            # Absolute-pt bold label pinned to the panel's top-left corner.
+            ty = panel.y_mm + _LABEL_INSET_MM + _LABEL_FONT_MM
+            tx = panel.x_mm + _LABEL_INSET_MM
+            parts.append(
+                f'<text x="{_num(tx)}" y="{_num(ty)}" '
+                f'font-family="Helvetica, Arial, sans-serif" '
+                f'font-size="{_num(_LABEL_FONT_MM)}" font-weight="bold" '
+                f'fill="#000000">{_xml_escape(panel.label)}</text>'
+            )
+
+        snapshot[str(panel.id)] = str(effective)
+
+    parts.append("</svg>")
+    return "\n".join(parts), snapshot
+
+
+def _persist_export(canvas_id: uuid.UUID, data: bytes, ext: str, content_type: str) -> str:
+    """Write the composed export artifact to storage and return a served URL."""
+    filename = f"{canvas_id}_{uuid.uuid4().hex}.{ext}"
+    if storage.object_storage_enabled():
+        key = storage.object_key(*_EXPORT_PARTS, filename)
+        ref = storage.put_bytes(key, data, content_type=content_type)
+        return figures_service._url(ref)
+    out_path = os.path.join(settings.figures_dir, "canvases", "export", filename)
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with open(out_path, "wb") as fh:
+        fh.write(data)
+    return figures_service._url(out_path)
+
+
+def export_canvas(db: Session, canvas_id: uuid.UUID, owner_id: uuid.UUID, fmt: str) -> dict:
+    """Compose all panels as VECTOR and export the canvas as SVG or PDF (§1).
+
+    Records `{panel_id: version_id}` into `canvas.export_snapshot` for
+    reproducibility (§5) and commits.
+    """
+    fmt = (fmt or "svg").lower()
+    if fmt not in {"svg", "pdf"}:
+        raise BadRequestError("format must be 'svg' or 'pdf'", error_code="BAD_EXPORT_FORMAT")
+
+    # Fail fast if PDF is requested but the vector converter is unavailable —
+    # never silently fall back to a raster path (that path is banned).
+    if fmt == "pdf" and shutil.which("rsvg-convert") is None:
+        raise AppError(
+            status_code=501,
+            detail="PDF export requires librsvg (rsvg-convert), which is not installed.",
+            error_code="PDF_EXPORT_UNAVAILABLE",
+        )
+
+    canvas = get_canvas(db, canvas_id, owner_id)
+    composite_svg, snapshot = _compose_canvas_svg(db, owner_id, canvas)
+
+    if fmt == "svg":
+        url = _persist_export(canvas_id, composite_svg.encode("utf-8"), "svg", "image/svg+xml")
+    else:
+        with tempfile.TemporaryDirectory(prefix="labplot_canvas_export_") as td:
+            svg_path = os.path.join(td, "composite.svg")
+            pdf_path = os.path.join(td, "out.pdf")
+            with open(svg_path, "w", encoding="utf-8") as fh:
+                fh.write(composite_svg)
+            # Hardened subprocess: no shell, fixed literal args + trusted temp
+            # paths, bounded runtime.
+            try:
+                subprocess.run(
+                    ["rsvg-convert", "-f", "pdf", "-o", pdf_path, svg_path],
+                    check=True,
+                    capture_output=True,
+                    timeout=60,
+                )
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                raise BadRequestError("PDF conversion failed", error_code="PDF_EXPORT_FAILED") from exc
+            with open(pdf_path, "rb") as fh:
+                pdf_bytes = fh.read()
+        if not pdf_bytes:
+            raise BadRequestError("PDF conversion produced no output", error_code="PDF_EXPORT_FAILED")
+        url = _persist_export(canvas_id, pdf_bytes, "pdf", "application/pdf")
+
+    # Snapshot the versions actually composed (§5), then commit.
+    canvas.export_snapshot = snapshot
+    db.commit()
+    return {"url": url, "format": fmt, "snapshot": snapshot}
+
+
+def apply_canvas_style(db: Session, canvas_id: uuid.UUID, owner_id: uuid.UUID,
+                       source_figure_id: uuid.UUID) -> dict:
+    """Apply the source figure's STYLE-ONLY options to every OTHER panel figure.
+
+    Delegates to `figures_service.bulk_apply_style`, so each target figure gets a
+    NEW version (content ⇒ version bump, design decision 3). The source must be
+    one of the canvas's own panel figures. Returns {updated, skipped}.
+    """
+    canvas = get_canvas(db, canvas_id, owner_id, write=True)
+    panel_figure_ids = [p.figure_id for p in canvas.panels]
+    if source_figure_id not in panel_figure_ids:
+        raise BadRequestError(
+            "source_figure_id must be one of the canvas's panel figures",
+            error_code="BAD_SOURCE_FIGURE",
+        )
+    targets = list({fid for fid in panel_figure_ids if fid != source_figure_id})
+    result = figures_service.bulk_apply_style(db, source_figure_id, targets, owner_id)
+    return {"updated": result.get("updated", []), "skipped": result.get("skipped", [])}

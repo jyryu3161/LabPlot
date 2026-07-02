@@ -20,7 +20,7 @@ RUN pixi project channel add bioconda \
 # substitute these automatically for glyphs missing from the default family.
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      fontconfig fonts-noto-cjk fonts-noto-core fonts-dejavu-core pandoc \
+      fontconfig fonts-noto-cjk fonts-noto-core fonts-dejavu-core pandoc librsvg2-bin \
  && fc-cache -f \
  && rm -rf /var/lib/apt/lists/*
 

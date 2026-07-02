@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -110,3 +110,30 @@ class PreviewRenderRequest(BaseModel):
     options_overlay: PreviewOptionsOverlay | None = None
     width_mm: float = Field(..., ge=_PANEL_MM_MIN, le=_PANEL_MM_MAX)
     height_mm: float = Field(..., ge=_PANEL_MM_MIN, le=_PANEL_MM_MAX)
+
+
+# ---------------------------------------------------------------- M4 export
+class CanvasExportRequest(BaseModel):
+    # Vector composition only (design §1: never bitmap-stretch). SVG nests each
+    # panel's physical-size vector render; PDF converts that composite via
+    # rsvg-convert (librsvg) — a pure vector SVG→PDF, fonts preserved as text.
+    format: Literal["svg", "pdf"] = "svg"
+
+
+class CanvasExportResponse(BaseModel):
+    url: str
+    format: Literal["svg", "pdf"]
+    # {panel_id: version_id} snapshot recorded for reproducibility (design §5).
+    snapshot: dict[str, str] = Field(default_factory=dict)
+
+
+# ---------------------------------------------------------------- M4 apply-style
+class CanvasApplyStyleRequest(BaseModel):
+    # Style-only copy from one panel's figure to every OTHER panel figure. Each
+    # target gets a NEW version (content ⇒ version bump, design decision 3).
+    source_figure_id: uuid.UUID
+
+
+class CanvasApplyStyleResponse(BaseModel):
+    updated: list[uuid.UUID] = Field(default_factory=list)
+    skipped: list[uuid.UUID] = Field(default_factory=list)
