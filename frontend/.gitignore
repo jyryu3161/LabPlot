@@ -1,0 +1,6 @@
+
+# Playwright QA suite local artifacts
+qa-e2e/test-results/
+qa-e2e/env.json
+test-results/
+playwright-report/

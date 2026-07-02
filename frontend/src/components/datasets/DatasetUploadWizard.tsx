@@ -182,7 +182,7 @@ export function DatasetUploadWizard({
         {...getRootProps()}
         className={`flex cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed p-8 transition ${isDragActive ? 'border-primary bg-primary/5' : 'border-muted-foreground/25 hover:border-primary/50'}`}
       >
-        <input {...getInputProps()} />
+        <input {...getInputProps({ 'aria-label': 'Upload data file (CSV, TSV, TXT, or XLSX)' })} />
         <UploadCloud className="h-8 w-8 text-muted-foreground" />
         <p className="mt-3 text-sm font-medium">{isDragActive ? 'Drop file here' : title}</p>
         <p className="text-xs text-muted-foreground">{helper}</p>

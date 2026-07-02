@@ -1,6 +1,6 @@
 {
   "version": "2.0",
-  "lastUpdated": "2026-07-02T13:08:23.094Z",
+  "lastUpdated": "2026-07-02T14:09:32.219Z",
   "activeFeatures": [
     "labplot-ai",
     "backend",
@@ -28,7 +28,9 @@
     "organizations",
     "theme",
     "[token]",
-    "canvases"
+    "canvases",
+    "qa-e2e",
+    "tests"
   ],
   "primaryFeature": "labplot-ai",
   "features": {
@@ -94,9 +96,9 @@
       "documents": {},
       "timestamps": {
         "started": "2026-06-13T05:52:02.226Z",
-        "lastUpdated": "2026-07-02T05:36:58.272Z"
+        "lastUpdated": "2026-07-02T13:50:00.623Z"
       },
-      "lastFile": "/home/ubuntu/web_projects/LabPlot/frontend/src/app/(with-providers)/datasets/page.tsx"
+      "lastFile": "/home/ubuntu/web_projects/LabPlot/frontend/src/components/datasets/DatasetUploadWizard.tsx"
     },
     "recommend": {
       "phase": "do",
@@ -383,6 +385,32 @@
         "lastUpdated": "2026-07-02T05:46:06.007Z"
       },
       "lastFile": "/home/ubuntu/web_projects/LabPlot/frontend/src/app/(with-providers)/canvases/page.tsx"
+    },
+    "qa-e2e": {
+      "phase": "do",
+      "phaseNumber": 3,
+      "matchRate": null,
+      "iterationCount": 0,
+      "requirements": [],
+      "documents": {},
+      "timestamps": {
+        "started": "2026-07-02T13:44:32.444Z",
+        "lastUpdated": "2026-07-02T14:09:32.219Z"
+      },
+      "lastFile": "/home/ubuntu/web_projects/LabPlot/frontend/qa-e2e/helpers.js"
+    },
+    "tests": {
+      "phase": "do",
+      "phaseNumber": 3,
+      "matchRate": null,
+      "iterationCount": 0,
+      "requirements": [],
+      "documents": {},
+      "timestamps": {
+        "started": "2026-07-02T13:44:54.409Z",
+        "lastUpdated": "2026-07-02T14:06:24.176Z"
+      },
+      "lastFile": "/home/ubuntu/web_projects/LabPlot/frontend/qa-e2e/tests/editor.spec.js"
     }
   },
   "pipeline": {
@@ -393,7 +421,7 @@
   "session": {
     "startedAt": "2026-06-13T05:06:05.497Z",
     "onboardingCompleted": true,
-    "lastActivity": "2026-07-02T13:08:23.094Z"
+    "lastActivity": "2026-07-02T14:09:32.219Z"
   },
   "history": [
     {
@@ -4427,6 +4455,84 @@
     {
       "timestamp": "2026-07-02T13:08:23.094Z",
       "feature": "figures",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T13:44:32.444Z",
+      "feature": "qa-e2e",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T13:44:45.339Z",
+      "feature": "qa-e2e",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T13:44:54.410Z",
+      "feature": "tests",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T13:45:07.249Z",
+      "feature": "tests",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T13:45:33.941Z",
+      "feature": "tests",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T13:50:00.623Z",
+      "feature": "datasets",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T13:57:02.935Z",
+      "feature": "tests",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T13:57:10.617Z",
+      "feature": "tests",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T14:01:44.872Z",
+      "feature": "tests",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T14:01:57.766Z",
+      "feature": "tests",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T14:06:10.194Z",
+      "feature": "qa-e2e",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T14:06:24.176Z",
+      "feature": "tests",
+      "phase": "do",
+      "action": "updated"
+    },
+    {
+      "timestamp": "2026-07-02T14:09:32.219Z",
+      "feature": "qa-e2e",
       "phase": "do",
       "action": "updated"
     }
