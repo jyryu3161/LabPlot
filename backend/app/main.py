@@ -32,6 +32,7 @@ from app.organizations.router import router as organizations_router
 from app.projects.router import router as projects_router
 from app.datasets.router import router as datasets_router
 from app.figures.router import router as figures_router, meta_router
+from app.canvases.router import router as canvases_router
 from app.palettes.router import router as palettes_router
 from app.public.router import router as public_router
 
@@ -97,6 +98,7 @@ app.include_router(projects_router)
 app.include_router(datasets_router)
 app.include_router(figures_router)
 app.include_router(meta_router)
+app.include_router(canvases_router)
 app.include_router(palettes_router)
 app.include_router(public_router)
 

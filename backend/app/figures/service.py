@@ -37,7 +37,7 @@ from app.r_engine.templates import PLOT_TYPES, PLOT_TYPE_KEYS, rq
 
 _STATIC_ROOT = os.path.dirname(settings.figures_dir.rstrip("/"))
 _UNIVERSAL_OPTION_KEYS = {
-    "palette_name", "size", "width_in", "height_in", "color_mode", "font_scale", "dpi",
+    "palette_name", "size", "width_in", "height_in", "color_mode", "font_scale", "base_size", "dpi",
     "title", "subtitle", "x_label", "y_label", "legend_title",
     "hide_legend", "log_x", "log_y", "flip_coords", "x_text_angle", "legend_position",
     "x_min", "x_max", "y_min", "y_max",
@@ -124,7 +124,7 @@ _BOOL_OPTIONS = {
     "interactive_html",
 }
 _NUMBER_OPTIONS = {
-    "fc_threshold", "p_threshold", "label_top", "font_scale", "dpi", "width_in", "height_in",
+    "fc_threshold", "p_threshold", "label_top", "font_scale", "base_size", "dpi", "width_in", "height_in",
     "bins", "sig_threshold", "bar_alpha", "bar_width", "x_text_angle", "x_min", "x_max", "y_min", "y_max",
     "fill_alpha", "point_alpha", "color_midpoint", "hline_at", "vline_at",
     # Forest reference line + ridgeline overlap factor (new plot types).
@@ -2347,6 +2347,9 @@ def _sanitize_option(key: str, value: Any, valid_columns: set[str] | None = None
             return int(max(5, min(120, num)))
         if key == "font_scale":
             return max(0.6, min(2.0, num))
+        if key == "base_size":
+            # Absolute font size in points: integer, clamped to a sane range.
+            return int(max(5, min(14, round(num))))
         if key == "bar_alpha":
             return max(0.15, min(1.0, num))
         if key in {"fill_alpha", "point_alpha"}:

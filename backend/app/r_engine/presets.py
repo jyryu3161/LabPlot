@@ -203,10 +203,28 @@ def list_palettes(custom_palettes: list[dict] | None = None) -> list[dict]:
     return out
 
 
+def resolve_base_size(base_size, font_scale=1.0, preset_size=7):
+    """Resolve the absolute base font size (pt) for a render.
+
+    `base_size` (absolute pt) is the single source of truth when set: coerced to
+    an int and clamped to [5, 14]. When unset (None) or non-numeric, fall back to
+    the legacy `font_scale` multiplier over the preset size (default 7). Lives
+    here so the renderer can import it for the R device pointsize and stay in sync
+    with the theme text size.
+    """
+    if base_size is not None:
+        try:
+            return max(5, min(14, int(round(float(base_size)))))
+        except (TypeError, ValueError):
+            pass
+    return max(7, int(round(preset_size * float(font_scale or 1.0))))
+
+
 def theme_r(preset: str, color_mode: str = "color", font_scale: float = 1.0,
             palette_name: str | None = None, custom_palette_values: list[str] | None = None,
             font_family: str | None = None, transparent_background: bool = False,
-            legend_key_size: float | None = None) -> str:
+            legend_key_size: float | None = None,
+            base_size: int | float | None = None) -> str:
     cfg = _BASE.get(preset, _BASE["nature"])
     fam = _FONT_FAMILIES.get(font_family or "sans", "")
     family_arg = f', family = "{fam}"' if fam else ""
@@ -235,10 +253,7 @@ def theme_r(preset: str, color_mode: str = "color", font_scale: float = 1.0,
     if not valid:
         valid = [c.upper() for c in PALETTES["nature"]]
     pal_r = ", ".join(f'"{c}"' for c in valid)
-    try:
-        size = max(7, int(round(cfg["size"] * float(font_scale))))
-    except (TypeError, ValueError):
-        size = cfg["size"]
+    size = resolve_base_size(base_size, font_scale, cfg["size"])
     grid_line = (
         'panel.grid.major = element_line(colour = "grey92", linewidth = 0.18), panel.grid.minor = element_blank(),'
         if cfg["grid"] else

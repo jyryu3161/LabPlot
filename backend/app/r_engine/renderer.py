@@ -12,7 +12,7 @@ import uuid
 import pandas as pd
 
 from app.config import settings
-from app.r_engine.presets import PRESETS, theme_r
+from app.r_engine.presets import PRESETS, resolve_base_size, theme_r
 from app.r_engine.templates import build_plot_r, rq, DEVICE_TYPES, NO_THEME_TYPES
 
 _SIZES = {
@@ -184,6 +184,11 @@ def build_script(plot_type: str, mapping: dict, options: dict, preset: str,
     # (never interpolates it into R), so the raw value stays safe for palette logic.
     safe_color_mode = color_mode if color_mode in ("color", "grayscale") else "color"
     font_scale = opts.get("font_scale", 1.0)
+    # Absolute base font size in pt. Single source of truth for both the ggplot
+    # theme text size (theme_r base_size=) and the non-ggplot device pointsize.
+    # A Python int (clamped 5-14 when base_size set, else legacy font_scale path)
+    # so it is safe to interpolate directly into the generated R.
+    resolved_pt = resolve_base_size(opts.get("base_size"), opts.get("font_scale", 1.0))
     plot_r = build_plot_r(plot_type, mapping, opts)
     w, h, dpi = _dimensions(opts)
     # svglite/ggsave require bg as a string, so use "transparent" (not NA) for
@@ -200,13 +205,13 @@ def build_script(plot_type: str, mapping: dict, options: dict, preset: str,
     if plot_type in DEVICE_TYPES:
         export = f"""
 .pdf_device <- if (isTRUE(capabilities("cairo"))) grDevices::cairo_pdf else grDevices::pdf
-png("figure.png", width = {w} * {dpi}, height = {h} * {dpi}, res = {dpi}, pointsize = 7, bg = {bg_r}); draw_plot(); invisible(dev.off())
-svglite::svglite("figure.svg", width = {w}, height = {h}, pointsize = 7, bg = {bg_r}); draw_plot(); invisible(dev.off())
-tiff("figure.tiff", width = {w} * {dpi}, height = {h} * {dpi}, res = {dpi}, pointsize = 7, compression = "lzw", bg = {bg_r}); draw_plot(); invisible(dev.off())
-.pdf_device("figure.pdf", width = {w}, height = {h}, pointsize = 7, bg = {bg_r}); draw_plot(); invisible(dev.off())
+png("figure.png", width = {w} * {dpi}, height = {h} * {dpi}, res = {dpi}, pointsize = {resolved_pt}, bg = {bg_r}); draw_plot(); invisible(dev.off())
+svglite::svglite("figure.svg", width = {w}, height = {h}, pointsize = {resolved_pt}, bg = {bg_r}); draw_plot(); invisible(dev.off())
+tiff("figure.tiff", width = {w} * {dpi}, height = {h} * {dpi}, res = {dpi}, pointsize = {resolved_pt}, compression = "lzw", bg = {bg_r}); draw_plot(); invisible(dev.off())
+.pdf_device("figure.pdf", width = {w}, height = {h}, pointsize = {resolved_pt}, bg = {bg_r}); draw_plot(); invisible(dev.off())
 if (isTRUE(capabilities("cairo"))) {{
   tryCatch({{
-    grDevices::cairo_ps("figure.eps", width = {w}, height = {h}, pointsize = 7, bg = {bg_r}, fallback_resolution = 600)
+    grDevices::cairo_ps("figure.eps", width = {w}, height = {h}, pointsize = {resolved_pt}, bg = {bg_r}, fallback_resolution = 600)
     draw_plot(); invisible(dev.off())
   }}, error = function(e) message("EPS export skipped: ", conditionMessage(e)))
 }}
@@ -295,27 +300,114 @@ tryCatch({
     layout_export = f"""
 tryCatch({{
   .w <- {w}; .h <- {h}; .dpi <- {dpi}
-  .gt <- ggplot2::ggplotGrob(p)
+  .imgh <- .h * .dpi; .imgw <- .w * .dpi
+  # Build once and reuse for the gtable, the discrete scales and panel ranges so
+  # every derived key describes the SAME render.
+  .gb <- ggplot2::ggplot_build(p)
+  .gt <- ggplot2::ggplot_gtable(.gb)
   grDevices::png(tempfile(fileext = ".png"), width = .w, height = .h, units = "in", res = .dpi)
   grid::grid.newpage(); grid::grid.draw(.gt); grid::grid.force()
-  .pn <- grid::grid.ls(grobs = FALSE, viewports = TRUE, print = FALSE)$name
-  .pnl <- .pn[grepl("^panel", .pn)][1]
-  grid::seekViewport(.pnl)
-  .bl <- grid::deviceLoc(grid::unit(0, "npc"), grid::unit(0, "npc"))
-  .tr <- grid::deviceLoc(grid::unit(1, "npc"), grid::unit(1, "npc"))
-  .x0 <- as.numeric(grid::convertX(.bl$x, "in")) * .dpi
-  .x1 <- as.numeric(grid::convertX(.tr$x, "in")) * .dpi
-  .yb <- as.numeric(grid::convertY(.bl$y, "in")) * .dpi
-  .yt <- as.numeric(grid::convertY(.tr$y, "in")) * .dpi
-  grDevices::dev.off()
-  .imgh <- .h * .dpi; .imgw <- .w * .dpi
-  .panel <- list(x0 = .x0, x1 = .x1, y0 = .imgh - .yt, y1 = .imgh - .yb)
-  .bp <- ggplot2::ggplot_build(p)$layout$panel_params[[1]]
+  .lsv <- grid::grid.ls(grobs = FALSE, viewports = TRUE, print = FALSE)$name
+  # device-pixel box (y measured from image TOP) of the currently-sought viewport
+  .vp_box <- function() {{
+    .bl <- grid::deviceLoc(grid::unit(0, "npc"), grid::unit(0, "npc"))
+    .tr <- grid::deviceLoc(grid::unit(1, "npc"), grid::unit(1, "npc"))
+    .x0 <- as.numeric(grid::convertX(.bl$x, "in")) * .dpi
+    .x1 <- as.numeric(grid::convertX(.tr$x, "in")) * .dpi
+    .yb <- as.numeric(grid::convertY(.bl$y, "in")) * .dpi
+    .yt <- as.numeric(grid::convertY(.tr$y, "in")) * .dpi
+    list(x0 = .x0, x1 = .x1, y0 = .imgh - .yt, y1 = .imgh - .yb)
+  }}
+  .panel_names <- .lsv[grepl("^panel", .lsv)]
+  # ---- legacy keys (exact shape preserved: first panel only) ----
+  grid::seekViewport(.panel_names[1])
+  .panel <- .vp_box()
+  .bp <- .gb$layout$panel_params[[1]]
   .xr <- .bp$x.range; .yr <- .bp$y.range
   .disc_x <- !is.null(.bp$x$is_discrete) && isTRUE(.bp$x$is_discrete())
   .disc_y <- !is.null(.bp$y$is_discrete) && isTRUE(.bp$y$is_discrete())
   .obj <- list(panel_px = .panel, img_px = list(w = .imgw, h = .imgh),
                x_range = .xr, y_range = .yr, x_discrete = .disc_x, y_discrete = .disc_y)
+  # ---- NEW: all facet panels (additive; first entry == legacy panel_px) ----
+  tryCatch({{
+    .panels <- list()
+    for (.i in seq_along(.panel_names)) {{
+      .pp <- .gb$layout$panel_params[[.i]]
+      if (is.null(.pp)) next
+      grid::seekViewport(.panel_names[.i])
+      .pb <- .vp_box()
+      .pdx <- !is.null(.pp$x$is_discrete) && isTRUE(.pp$x$is_discrete())
+      .pdy <- !is.null(.pp$y$is_discrete) && isTRUE(.pp$y$is_discrete())
+      .panels[[length(.panels) + 1]] <- list(
+        panel_px = .pb, x_range = .pp$x.range, y_range = .pp$y.range,
+        x_discrete = .pdx, y_discrete = .pdy)
+    }}
+    if (length(.panels)) .obj$panels <- .panels
+  }}, error = function(e) {{}})
+  # ---- NEW: series_hex — resolved discrete colour/fill mapping actually rendered ----
+  .disc_scale <- NULL
+  tryCatch({{
+    .sc <- .gb$plot$scales$get_scales("colour")
+    if (is.null(.sc) || !isTRUE(tryCatch(.sc$is_discrete(), error = function(e) FALSE))) {{
+      .sc <- .gb$plot$scales$get_scales("fill")
+    }}
+    if (!is.null(.sc) && isTRUE(tryCatch(.sc$is_discrete(), error = function(e) FALSE))) {{
+      .disc_scale <- .sc
+      .lv <- as.character(.sc$get_limits())
+      .mp <- toupper(substr(as.character(.sc$map(.lv)), 1, 7))
+      .ok <- !is.na(.mp) & grepl("^#[0-9A-F]{{6}}$", .mp)
+      if (any(.ok)) {{
+        .sh <- as.list(.mp[.ok]); names(.sh) <- .lv[.ok]
+        .obj$series_hex <- .sh
+      }}
+    }}
+  }}, error = function(e) {{}})
+  # ---- NEW: legend_keys — per-series legend key-box pixels (Nth key == Nth level) ----
+  tryCatch({{
+    .kv <- .lsv[grepl("key-.*-bg", .lsv)]
+    if (length(.kv)) {{
+      .mm <- regmatches(.kv, regexec("key-(\\\\d+)-(\\\\d+)-bg", .kv))
+      .rr <- sapply(.mm, function(z) if (length(z) >= 3) as.integer(z[2]) else NA_integer_)
+      .cc <- sapply(.mm, function(z) if (length(z) >= 3) as.integer(z[3]) else NA_integer_)
+      .kv <- .kv[order(.rr, .cc)]
+      .lvl <- if (!is.null(.disc_scale)) as.character(.disc_scale$get_limits()) else character()
+      .keys <- list()
+      for (.j in seq_along(.kv)) {{
+        grid::seekViewport(.kv[.j])
+        .series <- if (.j <= length(.lvl)) .lvl[.j] else NA
+        .keys[[length(.keys) + 1]] <- list(series = .series, px = .vp_box())
+      }}
+      if (length(.keys)) .obj$legend_keys <- .keys
+    }}
+  }}, error = function(e) {{}})
+  grDevices::dev.off()
+  # ---- NEW: layer_geom — bounded per-layer data-space geometry for hit-testing ----
+  tryCatch({{
+    .lg <- list()
+    for (.li in seq_along(.gb$data)) {{
+      .d <- .gb$data[[.li]]
+      if (is.null(.d) || !nrow(.d)) next
+      .geom <- tryCatch(tolower(sub("^Geom", "", class(.gb$plot$layers[[.li]]$geom)[1])),
+                        error = function(e) NA_character_)
+      .rng <- function(cols) {{
+        .v <- unlist(lapply(intersect(cols, names(.d)), function(cn) suppressWarnings(as.numeric(.d[[cn]]))))
+        .v <- .v[is.finite(.v)]
+        if (length(.v)) range(.v) else c(NA_real_, NA_real_)
+      }}
+      .xr2 <- .rng(c("x", "xmin", "xmax")); .yr2 <- .rng(c("y", "ymin", "ymax"))
+      .cols <- intersect(c("x", "y", "xmin", "xmax", "ymin", "ymax", "fill", "colour", "group"), names(.d))
+      .samp <- NULL
+      if (length(.cols)) {{
+        .idx <- if (nrow(.d) > 200) sort(sample.int(nrow(.d), 200)) else seq_len(nrow(.d))
+        .samp <- .d[.idx, .cols, drop = FALSE]
+      }}
+      .entry <- list(geom = .geom, n = nrow(.d),
+                     box = list(xmin = .xr2[1], xmax = .xr2[2], ymin = .yr2[1], ymax = .yr2[2]))
+      if (!is.null(.samp)) .entry$pts <- .samp
+      .lg[[length(.lg) + 1]] <- .entry
+    }}
+    if (length(.lg)) .obj$layer_geom <- .lg
+  }}, error = function(e) {{}})
   jsonlite::write_json(.obj, "figure_layout.json", auto_unbox = TRUE, digits = 6)
 }}, error = function(e) message("layout skip: ", conditionMessage(e)))
 """
@@ -337,7 +429,8 @@ if (isTRUE(capabilities("cairo"))) {{
             + theme_r(preset, color_mode, font_scale, opts.get("palette_name"),
                       opts.get("custom_palette_values"), opts.get("font_family"),
                       bool(opts.get("transparent_background")),
-                      legend_key_size=opts.get("legend_key_size"))
+                      legend_key_size=opts.get("legend_key_size"),
+                      base_size=opts.get("base_size"))
             + plot_r
             + theme_append
             + post
