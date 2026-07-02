@@ -2137,6 +2137,31 @@ _BUILDERS.update({
 DEVICE_TYPES = {"annotated_heatmap", "upset", "surface_3d", "scatter_3d", "contour_3d", "chord_diagram", "tri_surface", "wireframe_3d"}
 NO_THEME_TYPES = {"network", "annotated_heatmap", "upset", "surface_3d", "scatter_3d", "contour_3d", "chord_diagram", "tri_surface", "wireframe_3d"}
 
+# plot types that render a continuous/gradient colour or fill scale (no discrete
+# series scale for series_styles/category_colors to target). Combined with
+# DEVICE_TYPES these are excluded from color editing (design §6, decision 10).
+CONTINUOUS_FILL_TYPES = {
+    "heatmap",
+    "correlation_heatmap",
+    "contour",
+    "embedding",
+    "calibration_curve",
+    "roc_pr_curve",
+    "confusion_matrix",
+    "chemical_space",
+    "parallel_coordinates",
+    "radar",
+    "sankey",
+    "network",
+}
+
+
+def is_color_editable(plot_type: str) -> bool:
+    """True iff the plot type exposes a discrete colour/fill scale that
+    series_styles/category_colors can edit. DEVICE_TYPES (non-ggplot device
+    path) and CONTINUOUS_FILL_TYPES (gradient fills) are not editable."""
+    return plot_type not in DEVICE_TYPES and plot_type not in CONTINUOUS_FILL_TYPES
+
 PLOT_TYPES += [
     {"type": "annotated_heatmap", "label": "Annotated heatmap (cohort)",
      "required": [{"key": "columns", "label": "Feature columns", "roles": ["numeric", "log2fc"], "multi": True}],

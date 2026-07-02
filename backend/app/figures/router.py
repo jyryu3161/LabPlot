@@ -47,7 +47,7 @@ from app.figures.schemas import (
 )
 from app.palettes import service as palette_service
 from app.r_engine.presets import PRESET_DESCRIPTIONS, PRESET_LABELS, PRESETS, list_palettes
-from app.r_engine.templates import PLOT_TYPES
+from app.r_engine.templates import PLOT_TYPES, is_color_editable
 
 router = APIRouter(prefix="/api/figures", tags=["figures"])
 meta_router = APIRouter(prefix="/api", tags=["meta"])
@@ -56,7 +56,13 @@ meta_router = APIRouter(prefix="/api", tags=["meta"])
 # -------- meta --------
 @meta_router.get("/plot-types")
 def plot_types(_: User = Depends(get_current_user)):
-    return {"plot_types": PLOT_TYPES}
+    # Augment each entry with the color-edit capability flag (design §6).
+    # Build new dicts so the shared PLOT_TYPES objects are never mutated.
+    return {
+        "plot_types": [
+            {**p, "color_editable": is_color_editable(p["type"])} for p in PLOT_TYPES
+        ]
+    }
 
 
 @meta_router.get("/styles")

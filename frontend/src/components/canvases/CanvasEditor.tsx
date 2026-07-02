@@ -21,6 +21,7 @@ import {
   mmToPx, pxToMm, roundMm, fitPxPerMm, clampCanvasMm, clampPanelMm, PANEL_MM_MIN,
 } from './mm';
 import { FigurePickerDialog } from './FigurePickerDialog';
+import { CanvasColorEditor } from './CanvasColorEditor';
 
 // ── panel figure image cache ────────────────────────────────────────────────
 // Keyed by (figure_id, version_id, round(w_mm), round(h_mm)) per design §3/§4:
@@ -183,6 +184,13 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   const { data: canvas, isLoading, isError } = useQuery({ queryKey, queryFn: () => getCanvas(canvasId) });
 
   const containerRef = useRef<HTMLDivElement>(null);
+  // Mirror the container element into state so the color editor can portal its
+  // instant-preview overlay into it (a plain ref won't re-render the consumer).
+  const [containerEl, setContainerEl] = useState<HTMLDivElement | null>(null);
+  const setContainerRef = useCallback((el: HTMLDivElement | null) => {
+    containerRef.current = el;
+    setContainerEl(el);
+  }, []);
   const [viewport, setViewport] = useState({ w: 0, h: 0 });
   const [view, setView] = useState({ zoom: 1, x: 0, y: 0 });
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -526,6 +534,17 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   const canvasWpx = mmToPx(canvas.width_mm, pxPerMm);
   const canvasHpx = mmToPx(canvas.height_mm, pxPerMm);
 
+  // Screen-space rect of the selected panel (fit-px × zoom + pan) so the color
+  // editor can lay its inline-SVG overlay exactly over the konva panel raster.
+  const overlayRect = selectedPanel
+    ? {
+        left: view.x + mmToPx(selectedPanel.x_mm, pxPerMm) * view.zoom,
+        top: view.y + mmToPx(selectedPanel.y_mm, pxPerMm) * view.zoom,
+        width: mmToPx(selectedPanel.width_mm, pxPerMm) * view.zoom,
+        height: mmToPx(selectedPanel.height_mm, pxPerMm) * view.zoom,
+      }
+    : null;
+
   return (
     <div className="flex flex-1 flex-col">
       {/* top bar */}
@@ -633,8 +652,9 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
         </div>
       )}
 
-      {/* stage */}
-      <div ref={containerRef} className="relative flex-1 overflow-hidden bg-muted/30" style={{ minHeight: 480 }}>
+      {/* stage + color editor sidebar */}
+      <div className="flex flex-1 overflow-hidden" style={{ minHeight: 480 }}>
+      <div ref={setContainerRef} className="relative flex-1 overflow-hidden bg-muted/30">
         {viewport.w > 0 && viewport.h > 0 && (
           <Stage
             width={viewport.w}
@@ -706,6 +726,18 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
               Empty canvas — use “＋ Add figure” to place your first panel.
             </p>
           </div>
+        )}
+        </div>
+
+        {selectedPanel && (
+          <CanvasColorEditor
+            key={selectedPanel.id}
+            panel={selectedPanel}
+            canvasId={canvasId}
+            canvasName={canvas.name}
+            containerEl={containerEl}
+            overlayRect={overlayRect}
+          />
         )}
       </div>
 

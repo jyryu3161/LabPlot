@@ -59,8 +59,38 @@ def _local_cache_path(digest: str) -> str:
     return os.path.join(settings.figures_dir, "canvases", "preview", f"{digest}.svg")
 
 
+def _local_layout_path(digest: str) -> str:
+    return os.path.join(settings.figures_dir, "canvases", "preview", f"{digest}.layout.json")
+
+
 def _object_cache_ref(digest: str) -> str:
     return storage.object_uri(storage.object_key(*_PREVIEW_PARTS, f"{digest}.svg"))
+
+
+def _read_layout_local(digest: str) -> dict | None:
+    """Parse the cached preview sidecar (series_hex / legend_keys / panel_px in
+    the preview SVG's own px coords) — used by the canvas color editor for
+    scoped instant recolor. Best-effort: any failure returns None."""
+    try:
+        path = _local_layout_path(digest)
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+            return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+    return None
+
+
+def _read_layout_object(digest: str) -> dict | None:
+    try:
+        ref = storage.object_uri(storage.object_key(*_PREVIEW_PARTS, f"{digest}.layout.json"))
+        if storage.exists(ref):
+            data = json.loads(storage.read_bytes(ref).decode("utf-8"))
+            return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+    return None
 
 
 def render_preview(db: Session, owner_id: uuid.UUID, req: PreviewRenderRequest) -> dict:
@@ -137,11 +167,11 @@ def render_preview(db: Session, owner_id: uuid.UUID, req: PreviewRenderRequest) 
     if storage.object_storage_enabled():
         cache_ref = _object_cache_ref(digest)
         if storage.exists(cache_ref):
-            return {"svg_url": figures_service._url(cache_ref), "cached": True}
+            return {"svg_url": figures_service._url(cache_ref), "cached": True, "layout": _read_layout_object(digest)}
     else:
         cache_path = _local_cache_path(digest)
         if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
-            return {"svg_url": figures_service._url(cache_path), "cached": True}
+            return {"svg_url": figures_service._url(cache_path), "cached": True, "layout": _read_layout_local(digest)}
 
     # 4. Render (sandbox intact via renderer.render). Copy ONLY the SVG to the
     #    cache path; never persist png/version/etc. On failure raise RENDER_FAILED
@@ -155,15 +185,38 @@ def render_preview(db: Session, owner_id: uuid.UUID, req: PreviewRenderRequest) 
         if not svg_src or not os.path.exists(svg_src):
             raise BadRequestError("Preview render produced no SVG", error_code="RENDER_FAILED")
 
+        # Parse the sidecar produced for THIS preview render (series_hex /
+        # legend_keys / panel_px in the preview SVG's own px), so the color
+        # editor can scope its instant recolor. Best-effort.
+        layout = None
+        layout_src = (res.outputs or {}).get("layout")
+        if layout_src and os.path.exists(layout_src):
+            try:
+                with open(layout_src, encoding="utf-8") as fh:
+                    parsed = json.load(fh)
+                layout = parsed if isinstance(parsed, dict) else None
+            except Exception:
+                layout = None
+
         if storage.object_storage_enabled():
             key = storage.object_key(*_PREVIEW_PARTS, f"{digest}.svg")
             cache_ref = storage.upload_file(svg_src, key, content_type="image/svg+xml")
-            return {"svg_url": figures_service._url(cache_ref), "cached": False}
+            if layout is not None and layout_src:
+                try:
+                    storage.upload_file(layout_src, storage.object_key(*_PREVIEW_PARTS, f"{digest}.layout.json"), content_type="application/json")
+                except Exception:
+                    pass
+            return {"svg_url": figures_service._url(cache_ref), "cached": False, "layout": layout}
 
         cache_path = _local_cache_path(digest)
         os.makedirs(os.path.dirname(cache_path), exist_ok=True)
         shutil.copyfile(svg_src, cache_path)
-        return {"svg_url": figures_service._url(cache_path), "cached": False}
+        if layout is not None and layout_src:
+            try:
+                shutil.copyfile(layout_src, _local_layout_path(digest))
+            except Exception:
+                pass
+        return {"svg_url": figures_service._url(cache_path), "cached": False, "layout": layout}
 
 
 # ============================================================================

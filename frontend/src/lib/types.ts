@@ -220,6 +220,7 @@ export interface PlotTypeDef {
   required: PlotField[];
   optional: PlotField[];
   options: PlotOption[];
+  color_editable?: boolean;
 }
 export interface StyleDef { key: string; label: string; description?: string; }
 export interface PaletteDef {
@@ -594,4 +595,5 @@ export interface CanvasPreset {
 export interface CanvasPreviewResult {
   svg_url: string;
   cached: boolean;
+  layout?: FigureLayout & { series_hex?: Record<string,string>; legend_keys?: { series: string; px: { x0:number;y0:number;x1:number;y1:number } }[]; panels?: unknown[]; layer_geom?: unknown[] } | null;
 }
