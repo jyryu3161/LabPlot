@@ -50,10 +50,18 @@ def _scrubbed_env(work: str) -> dict[str, str]:
         "HOME": work,
         "TMPDIR": work,
     }
-    for name in ("R_HOME", "R_LIBS", "R_LIBS_USER", "R_LIBS_SITE", "LANG", "LC_ALL"):
+    for name in ("R_HOME", "R_LIBS", "R_LIBS_USER", "R_LIBS_SITE"):
         value = os.environ.get(name)
         if value:
             env[name] = value
+    # Force a UTF-8 locale so R reads non-ASCII (e.g. CJK) CSV column names and
+    # labels correctly. Without this the child inherits the container default
+    # (often the "C" locale), and readr parses UTF-8 headers as bytes, so column
+    # names like "개수" fail to match the UTF-8 strings embedded in the script.
+    # Honor an explicitly-set UTF-8 parent locale, otherwise pin C.UTF-8.
+    for name in ("LANG", "LC_ALL"):
+        value = os.environ.get(name)
+        env[name] = value if value and "UTF-8" in value.upper() else "C.UTF-8"
     return env
 
 

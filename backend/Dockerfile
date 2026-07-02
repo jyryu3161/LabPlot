@@ -15,6 +15,15 @@ RUN pixi run python -m ensurepip --upgrade \
 RUN pixi project channel add bioconda \
  && pixi add --feature r-viz r-igraph r-ggraph r-tidygraph r-ggrepel r-ggforce r-circlize bioconductor-complexheatmap
 
+# CJK + broad-coverage fonts so R graphics devices can render non-ASCII
+# labels (e.g. Korean column names) instead of tofu boxes. fontconfig/cairo
+# substitute these automatically for glyphs missing from the default family.
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      fontconfig fonts-noto-cjk fonts-noto-core fonts-dejavu-core \
+ && fc-cache -f \
+ && rm -rf /var/lib/apt/lists/*
+
 # replace AL application code with LabPlot's
 RUN rm -rf backend
 RUN groupadd --gid 1000 labplot \
