@@ -2,6 +2,7 @@
 
 import { use, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
+import dynamic from 'next/dynamic';
 import { useRouter } from 'next/navigation';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { toast } from 'sonner';
@@ -19,6 +20,7 @@ import { AiFigureEditor } from '@/components/figures/AiFigureEditor';
 import { FigureCodeExport } from '@/components/figures/FigureCodeExport';
 import { FigureComments } from '@/components/figures/FigureComments';
 import { FigureAnnotationEditor } from '@/components/figures/FigureAnnotationEditor';
+import { FigureAxisBreakControl } from '@/components/figures/FigureAxisBreakControl';
 import { FigureSeriesStyleEditor } from '@/components/figures/FigureSeriesStyleEditor';
 import { AppHeader } from '@/components/layout/AppHeader';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -199,6 +201,17 @@ function distinctColumnLevels(values: string[] | undefined, profile: ColumnProfi
   return levels;
 }
 
+// Konva-based overlay is client-only (react-konva touches the DOM/canvas).
+const FigureAnnotationOverlay = dynamic(
+  () => import('@/components/figures/FigureAnnotationOverlay').then((m) => m.FigureAnnotationOverlay),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="py-20 text-center text-muted-foreground"><Loader2 className="mx-auto h-5 w-5 animate-spin" /></div>
+    ),
+  },
+);
+
 export default function FigureDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const qc = useQueryClient();
@@ -230,6 +243,8 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
   const [newCategoryColorLevel, setNewCategoryColorLevel] = useState('');
   const [methodsText, setMethodsText] = useState<string | null>(null);
   const [altText, setAltText] = useState<string | null>(null);
+  // Toggle between the static PNG preview and the interactive plotly HTML export.
+  const [interactiveView, setInteractiveView] = useState(false);
 
   // Live preview (debounced auto-rerender) + client-side edit history (undo/redo).
   const [livePreview, setLivePreview] = useState(false);
@@ -833,10 +848,43 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
         <div className="grid gap-6 lg:grid-cols-3">
           {/* left: image + paper-writing */}
           <div className="space-y-4 lg:col-span-2">
-            <Card><CardContent className="p-4">
-              {previewUrl ? <img src={previewUrl} alt={fig.name} decoding="async" className="mx-auto max-h-[58vh] w-auto rounded bg-white object-contain" />
-                : <div className="py-20 text-center text-muted-foreground">No image</div>}
-              {previewIsSvg && <p className="mt-2 text-center text-xs text-muted-foreground">SVG preview</p>}
+            <Card><CardContent className="space-y-3 p-4">
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <Label htmlFor="interactive-view" className="cursor-pointer text-xs text-muted-foreground">Interactive view</Label>
+                <Switch
+                  id="interactive-view"
+                  checked={interactiveView && Boolean(version?.html_url)}
+                  onCheckedChange={setInteractiveView}
+                  disabled={!version?.html_url}
+                  aria-label="Show the interactive HTML figure with hover tooltips"
+                />
+                {!version?.html_url && (
+                  <span className="text-[11px] text-muted-foreground">Enable &lsquo;Interactive HTML&rsquo; and re-render to view.</span>
+                )}
+              </div>
+              {interactiveView && version?.html_url ? (
+                <iframe
+                  src={version.html_url}
+                  title="Interactive figure"
+                  sandbox="allow-scripts allow-same-origin"
+                  className="h-[480px] w-full rounded border bg-white"
+                />
+              ) : previewUrl ? (
+                canEditFigure ? (
+                  <FigureAnnotationOverlay
+                    key={version?.id ?? 'no-version'}
+                    imageUrl={previewUrl}
+                    alt={fig.name}
+                    annotations={annotationList(effectiveOptions.annotations)}
+                    onChange={setAnnotations}
+                  />
+                ) : (
+                  <img src={previewUrl} alt={fig.name} decoding="async" className="mx-auto max-h-[58vh] w-auto rounded bg-white object-contain" />
+                )
+              ) : (
+                <div className="py-20 text-center text-muted-foreground">No image</div>
+              )}
+              {previewIsSvg && !interactiveView && <p className="text-center text-xs text-muted-foreground">SVG preview</p>}
             </CardContent></Card>
 
             <AiFigureEditor
@@ -1126,6 +1174,22 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
                             <Input type="number" step="any" className="text-sm" value={numericOptionValue(effectiveOptions.y_max)} onChange={(e) => setOptions(updateNumericOption(effectiveOptions, 'y_max', e.target.value))} placeholder="auto" />
                           </div>
                         </div>
+                      </div>
+                      <div className="space-y-2 rounded-md border bg-muted/20 p-2">
+                        <div>
+                          <Label className="text-xs">Broken axis</Label>
+                          <p className="text-[11px] text-muted-foreground">A broken axis elides the [from, to] range. Both values are required and from must be less than to.</p>
+                        </div>
+                        <FigureAxisBreakControl
+                          label="Break X axis"
+                          value={effectiveOptions.axis_break_x}
+                          onChange={(next) => setOptions(next ? { ...effectiveOptions, axis_break_x: next } : deleteOption(effectiveOptions, 'axis_break_x'))}
+                        />
+                        <FigureAxisBreakControl
+                          label="Break Y axis"
+                          value={effectiveOptions.axis_break_y}
+                          onChange={(next) => setOptions(next ? { ...effectiveOptions, axis_break_y: next } : deleteOption(effectiveOptions, 'axis_break_y'))}
+                        />
                       </div>
                       <div className="space-y-1"><Label className="text-xs">Legend title</Label><Input className="text-sm" value={String(effectiveOptions.legend_title ?? '')} onChange={(e) => setOptions({ ...effectiveOptions, legend_title: e.target.value })} /></div>
                       <div className="grid grid-cols-2 gap-2">

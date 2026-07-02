@@ -68,6 +68,11 @@ _UNIVERSAL_OPTION_KEYS = {
     # Structured overlays (custom-sanitized to shape-safe dicts/lists below):
     # free-form annotations and per-series style overrides.
     "annotations", "series_styles",
+    # Axis-type / date-formatting / axis-break options (contract with the
+    # templates.py agent + frontend). x_axis_type/date_format are choice-shaped;
+    # axis_break_x/axis_break_y are 2-element [from,to] float lists validated in
+    # _sanitize_option.
+    "x_axis_type", "date_format", "axis_break_x", "axis_break_y",
 }
 _OPTION_CHOICES = {
     "palette_name": {"preset", "journal_muted", "okabe_ito", "tol_bright", "set2", "npg", "tableau10"},
@@ -95,6 +100,15 @@ _OPTION_CHOICES = {
     "fit_model": {"linear", "4pl", "mm", "exponential", "logistic"},
     # Stacked-area stacking mode.
     "stack_mode": {"stack", "fill"},
+    # Axis-scale interpretation for the x axis (unknown values dropped so the
+    # template falls back to auto-detection).
+    "x_axis_type": {"auto", "number", "date", "datetime"},
+    # Allow-listed strftime formats for date/datetime axes. Arbitrary format
+    # strings are rejected so nothing outside this set reaches the R generator.
+    "date_format": {
+        "%Y-%m-%d", "%Y/%m/%d", "%Y-%m", "%b %Y", "%Y",
+        "%m/%d", "%d %b", "%b %d", "%H:%M", "%m-%d", "%b",
+    },
 }
 _BOOL_OPTIONS = {
     "show_points", "show_box", "error_bars", "scale_rows", "add_smooth", "show_density", "show_rug",
@@ -2130,6 +2144,16 @@ def _sanitize_annotations(value: Any) -> list[dict[str, Any]] | None:
         if any(rk not in coords for rk in required):
             continue
         entry: dict[str, Any] = {"kind": kind, **coords}
+        # Optional coordinate space: keep only the two known values. Absence
+        # (or anything else) means data coordinates. When relative, x/y/x2/y2
+        # are fractions of the panel, so clamp them to [0,1].
+        coord = item.get("coord")
+        if isinstance(coord, str) and coord in ("data", "relative"):
+            entry["coord"] = coord
+            if coord == "relative":
+                for coord_key in ("x", "y", "x2", "y2"):
+                    if coord_key in entry:
+                        entry[coord_key] = max(0.0, min(1.0, entry[coord_key]))
         for text_key in ("text", "label"):
             raw_text = item.get(text_key)
             if isinstance(raw_text, str):
@@ -2225,6 +2249,19 @@ def _sanitize_option(key: str, value: Any, valid_columns: set[str] | None = None
         if _HEX_COLOR_RE.fullmatch(color):
             return color
         return None
+    if key in {"axis_break_x", "axis_break_y"}:
+        # A single [from, to] break range: exactly 2 finite floats with from<to.
+        # Any other shape drops the key entirely so the render cannot break.
+        if not isinstance(value, (list, tuple)) or len(value) != 2:
+            return None
+        try:
+            lo = float(value[0])
+            hi = float(value[1])
+        except (TypeError, ValueError):
+            return None
+        if not (math.isfinite(lo) and math.isfinite(hi)) or lo >= hi:
+            return None
+        return [lo, hi]
     if key == "annotations":
         return _sanitize_annotations(value)
     if key == "series_styles":

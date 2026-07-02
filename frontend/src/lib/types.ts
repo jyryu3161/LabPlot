@@ -424,11 +424,12 @@ export interface FigureCodeResponse {
   code: string;
 }
 
+export type AnnotationCoord = 'data' | 'relative';
 export type FigureAnnotation =
-  | { kind: 'text'; x: number; y: number; text: string; size?: number; color?: string }
-  | { kind: 'arrow'; x: number; y: number; x2: number; y2: number; color?: string }
-  | { kind: 'rect'; x: number; y: number; x2: number; y2: number; color?: string }
-  | { kind: 'bracket'; x: number; x2: number; y: number; label?: string; color?: string };
+  | { kind: 'text'; x: number; y: number; text: string; size?: number; color?: string; coord?: AnnotationCoord }
+  | { kind: 'arrow'; x: number; y: number; x2: number; y2: number; color?: string; coord?: AnnotationCoord }
+  | { kind: 'rect'; x: number; y: number; x2: number; y2: number; color?: string; coord?: AnnotationCoord }
+  | { kind: 'bracket'; x: number; x2: number; y: number; label?: string; color?: string; coord?: AnnotationCoord };
 
 export interface SeriesStyle {
   color?: string;

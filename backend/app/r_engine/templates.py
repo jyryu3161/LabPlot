@@ -92,6 +92,61 @@ def _choice(value, allowed: tuple[str, ...], default: str) -> str:
     return value if isinstance(value, str) and value in allowed else default
 
 
+# ---- date/time x-axis (scatter / line / area) --------------------------------
+_TEMPORAL_X_TYPES = {"scatter", "line", "area"}
+_X_AXIS_TYPES = ("auto", "number", "date", "datetime")
+# ggplot2 geom text `size` is in mm; font point size = size * .pt.
+_GGPLOT_PT = 72.27 / 25.4
+
+
+def _clamp01(v):
+    """Finite float clamped to [0, 1], or None when v is missing / non-finite."""
+    f = _finite_num(v)
+    if f is None:
+        return None
+    return max(0.0, min(1.0, f))
+
+
+def _x_axis_type(o) -> str:
+    return _choice(o.get("x_axis_type"), _X_AXIS_TYPES, "auto")
+
+
+def _x_is_temporal(plot_type: str, m, o) -> bool:
+    return (plot_type in _TEMPORAL_X_TYPES and bool(m.get("x"))
+            and _x_axis_type(o) in ("date", "datetime"))
+
+
+def _temporal_x(o, x) -> tuple[str, str]:
+    """``(pre, post)`` R for a date/datetime x axis; ``("", "")`` when off.
+
+    ``pre`` coerces ``df[[x]]`` to Date/POSIXct *before* ``ggplot(df, ...)``
+    captures it, guarded so an all-NA parse leaves x untouched (no crash).
+    ``post`` appends the matching ``scale_x_date`` / ``scale_x_datetime``,
+    itself guarded on ``.xt_ok`` so a fallback never attaches a temporal scale
+    to a non-temporal aesthetic. Empty strings preserve byte-identical output
+    when ``x_axis_type`` is unset / "auto" / "number".
+    """
+    xt = _x_axis_type(o)
+    if xt not in ("date", "datetime") or not x:
+        return "", ""
+    if xt == "date":
+        coerce = f'as.Date(as.character(df[[{rq(x)}]]))'
+        scale_fn = "scale_x_date"
+    else:
+        coerce = f'as.POSIXct(as.character(df[[{rq(x)}]]))'
+        scale_fn = "scale_x_datetime"
+    fmt = o.get("date_format")
+    if isinstance(fmt, str) and fmt.strip():
+        labels_arg = f"date_labels = {rq(fmt.strip())}"
+    else:
+        labels_arg = "labels = scales::label_date_short()"
+    pre = (f"\n.xt_raw <- suppressWarnings({coerce})\n"
+           f".xt_ok <- !all(is.na(.xt_raw))\n"
+           f"if (.xt_ok) {{ df[[{rq(x)}]] <- .xt_raw }}\n")
+    post = f"\nif (.xt_ok) {{ p <- p + {scale_fn}({labels_arg}) }}\n"
+    return pre, post
+
+
 def _labs(options: dict, default_x="", default_y="", default_fill="NULL_DEFAULT") -> str:
     title = options.get("title")
     subtitle = options.get("subtitle")
@@ -339,11 +394,12 @@ def _scatter(m, o):
     pt_a = _alpha_r(o, "point_alpha", "0.8")
     fit_extra = _fit_stats_layer(x, y) if o.get("show_fit_stats") else ""
     y2_pre, y2_post = _y2_axis(o, x, y, "point", grouped=bool(color))
-    return f"""
+    t_pre, t_post = _temporal_x(o, x)
+    return f"""{t_pre}
 {y2_pre}p <- ggplot(df, {aes}) +
 {smooth}  geom_point(size = 2.0, alpha = {pt_a}) +
 {scale}  {_labs(o, x, y)}{guide}
-{y2_post}{fit_extra}"""
+{y2_post}{fit_extra}{t_post}"""
 
 
 def _bar(m, o):
@@ -527,11 +583,12 @@ def _line(m, o):
         point_color_arg = f", colour = {rq(line_color)}" if line_color else ""
     point_layer = "" if point_r_shape is None else f"  geom_point(size = 1.8, shape = {point_r_shape}{point_color_arg}) +\n"
     y2_pre, y2_post = _y2_axis(o, x, y, "line", grouped=bool(group))
-    return f"""
+    t_pre, t_post = _temporal_x(o, x)
+    return f"""{t_pre}
 {y2_pre}p <- ggplot(df, {aes}) +
   geom_line(linewidth = 0.35, linetype = {rq(line_type)}{line_color_arg}) +
 {point_layer}{scale}  {_labs(o, x, y)}{guide}
-{y2_post}"""
+{y2_post}{t_post}"""
 
 
 def _histogram(m, o):
@@ -1120,10 +1177,96 @@ def _hex_color_r(value, default: str) -> str:
     return rq(default)
 
 
-def _annotations_layer(o) -> str:
-    """`+ annotate(...)` layers for ``options['annotations']`` (data coords).
+def _relative_annotation(kind, a) -> list[str]:
+    """``annotation_custom`` grob layer(s) for a PANEL-relative (npc) item.
 
-    Each item is a sanitized dict; unknown/invalid items are skipped. Numbers
+    x/y (and x2/y2) are ``_finite_num`` clamped to [0, 1] npc; text via
+    ``rq()``; colours via the hex validator (falling back to the defaults).
+    Returns [] for invalid items. Grobs are ``grid::`` qualified so no extra
+    ``library(grid)`` line is needed, and ``annotation_custom`` keeps ``p`` a
+    normal ggplot layer (composes with the later theme and even ggplotly).
+    """
+    def _cust(grob):
+        return f'annotation_custom({grob}, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf)'
+
+    if kind == "text":
+        rx = _clamp01(a.get("x")); ry = _clamp01(a.get("y"))
+        text = a.get("text")
+        if rx is None or ry is None or not isinstance(text, str) or text == "":
+            return []
+        size = _finite_num(a.get("size"))
+        size_mm = max(1.0, min(20.0, size)) if size is not None else _GEOM_TEXT_SIZE_7PT
+        fontsize = size_mm * _GGPLOT_PT
+        colour = _hex_color_r(a.get("color"), _ANNOTATION_TEXT_DEFAULT)
+        grob = (f'grid::textGrob({rq(text)}, x = grid::unit({rx:g}, "npc"), '
+                f'y = grid::unit({ry:g}, "npc"), '
+                f'gp = grid::gpar(col = {colour}, fontsize = {fontsize:g}))')
+        return [_cust(grob)]
+
+    if kind == "arrow":
+        rx = _clamp01(a.get("x")); ry = _clamp01(a.get("y"))
+        rx2 = _clamp01(a.get("x2")); ry2 = _clamp01(a.get("y2"))
+        if None in (rx, ry, rx2, ry2):
+            return []
+        colour = _hex_color_r(a.get("color"), _ANNOTATION_MARK_DEFAULT)
+        grob = (f'grid::segmentsGrob(x0 = grid::unit({rx:g}, "npc"), y0 = grid::unit({ry:g}, "npc"), '
+                f'x1 = grid::unit({rx2:g}, "npc"), y1 = grid::unit({ry2:g}, "npc"), '
+                f'arrow = grid::arrow(length = grid::unit(0.02, "npc")), '
+                f'gp = grid::gpar(col = {colour}, lwd = 1.2))')
+        return [_cust(grob)]
+
+    if kind == "rect":
+        rx = _clamp01(a.get("x")); ry = _clamp01(a.get("y"))
+        rx2 = _clamp01(a.get("x2")); ry2 = _clamp01(a.get("y2"))
+        if None in (rx, ry, rx2, ry2):
+            return []
+        colour = _hex_color_r(a.get("color"), _ANNOTATION_MARK_DEFAULT)
+        cx = (rx + rx2) / 2; cy = (ry + ry2) / 2
+        w = abs(rx2 - rx); h = abs(ry2 - ry)
+        grob = (f'grid::rectGrob(x = grid::unit({cx:g}, "npc"), y = grid::unit({cy:g}, "npc"), '
+                f'width = grid::unit({w:g}, "npc"), height = grid::unit({h:g}, "npc"), '
+                f'gp = grid::gpar(fill = {colour}, alpha = 0.12, col = NA))')
+        return [_cust(grob)]
+
+    if kind == "bracket":
+        rx = _clamp01(a.get("x")); rx2 = _clamp01(a.get("x2")); ry = _clamp01(a.get("y"))
+        if None in (rx, rx2, ry):
+            return []
+        colour = _hex_color_r(a.get("color"), _ANNOTATION_TEXT_DEFAULT)
+        y_tick = max(0.0, ry - 0.02)      # small downward end ticks (npc)
+        cx = (rx + rx2) / 2
+        parts = [
+            f'grid::segmentsGrob(x0 = grid::unit({rx:g}, "npc"), y0 = grid::unit({ry:g}, "npc"), '
+            f'x1 = grid::unit({rx2:g}, "npc"), y1 = grid::unit({ry:g}, "npc"), '
+            f'gp = grid::gpar(col = {colour}, lwd = 1))',
+            f'grid::segmentsGrob(x0 = grid::unit({rx:g}, "npc"), y0 = grid::unit({ry:g}, "npc"), '
+            f'x1 = grid::unit({rx:g}, "npc"), y1 = grid::unit({y_tick:g}, "npc"), '
+            f'gp = grid::gpar(col = {colour}, lwd = 1))',
+            f'grid::segmentsGrob(x0 = grid::unit({rx2:g}, "npc"), y0 = grid::unit({ry:g}, "npc"), '
+            f'x1 = grid::unit({rx2:g}, "npc"), y1 = grid::unit({y_tick:g}, "npc"), '
+            f'gp = grid::gpar(col = {colour}, lwd = 1))',
+        ]
+        label = a.get("label")
+        if isinstance(label, str) and label != "":
+            label_y = min(1.0, ry + 0.03)
+            fontsize = _GEOM_TEXT_SIZE_7PT * _GGPLOT_PT
+            parts.append(
+                f'grid::textGrob({rq(label)}, x = grid::unit({cx:g}, "npc"), '
+                f'y = grid::unit({label_y:g}, "npc"), '
+                f'gp = grid::gpar(col = {colour}, fontsize = {fontsize:g}))')
+        grob = "grid::grobTree(" + ", ".join(parts) + ")"
+        return [_cust(grob)]
+
+    return []
+
+
+def _annotations_layer(o) -> str:
+    """`+ annotate(...)` / `annotation_custom(...)` layers for annotations.
+
+    Each item is a sanitized dict; unknown/invalid items are skipped. An
+    optional ``coord`` field selects the coordinate space: ``"data"`` (default)
+    uses ``annotate()`` in data coordinates; ``"relative"`` renders grid grobs
+    in 0..1 PANEL-relative npc coordinates via ``annotation_custom``. Numbers
     go through ``_finite_num``, text through ``rq()``, colours through the hex
     validator. Returns "" when there are no valid annotations.
     """
@@ -1135,6 +1278,9 @@ def _annotations_layer(o) -> str:
         if not isinstance(a, dict):
             continue
         kind = a.get("kind")
+        if a.get("coord") == "relative":
+            layers.extend(_relative_annotation(kind, a))
+            continue
         if kind == "text":
             x = _finite_num(a.get("x"))
             y = _finite_num(a.get("y"))
@@ -1291,6 +1437,29 @@ def _axis_scale_layer(o, axis: str) -> str:
     return f'\np <- p + scale_{axis}_continuous({", ".join(args)})\n'
 
 
+def _axis_break_layer(o) -> str:
+    """Broken-axis gaps for ``options['axis_break_x'|'axis_break_y']``.
+
+    Each is a 2-number ``[from, to]`` list (from < to, both finite) describing a
+    gap to elide via ``ggbreak::scale_{x,y}_break``. Emitted inside a runtime
+    ``requireNamespace("ggbreak")`` guard so it is a no-op where ggbreak is not
+    yet installed and takes effect once the image ships it. Returns "" when no
+    valid break is configured (byte-identical output).
+    """
+    out = ""
+    for axis in ("x", "y"):
+        br = o.get(f"axis_break_{axis}")
+        if not isinstance(br, (list, tuple)) or len(br) != 2:
+            continue
+        frm = _finite_num(br[0])
+        to = _finite_num(br[1])
+        if frm is None or to is None or not (frm < to):
+            continue
+        out += (f'\nif (requireNamespace("ggbreak", quietly = TRUE)) {{ '
+                f'p <- p + ggbreak::scale_{axis}_break(c({frm:g}, {to:g})) }}\n')
+    return out
+
+
 def _series_styles_layer(plot_type: str, m, o) -> str:
     """Per-series overrides for ``options['series_styles']``.
 
@@ -1368,10 +1537,13 @@ def _post_layers(plot_type: str, m, o) -> str:
             continue
         if axis == "y" and o.get("log_y"):
             continue
+        if axis == "x" and _x_is_temporal(plot_type, m, o):
+            continue  # temporal x owns its own scale_x_date/datetime
         if axis == "y" and plot_type in ("scatter", "line") and has_y2:
             continue
         out += _axis_scale_layer(o, axis)
     out += _series_styles_layer(plot_type, m, o)
+    out += _axis_break_layer(o)
     return out
 
 
@@ -2207,6 +2379,41 @@ def _area(m, o):
     stack_mode = _choice(o.get("stack_mode"), ("stack", "fill"), "stack")
     fill_a = _alpha_r(o, "fill_alpha", "0.85")
     ydefault = "Proportion" if stack_mode == "fill" else y
+    xt = _x_axis_type(o)
+    if xt in ("date", "datetime"):
+        # Keep x as a real temporal aesthetic (never as.numeric) so the date
+        # scale attaches; coercion is guarded so an all-NA parse falls back to
+        # the raw column (rendered as-is) rather than crashing.
+        if xt == "date":
+            coerce = f'as.Date(as.character(df[[{rq(x)}]]))'
+            scale_fn = "scale_x_date"
+        else:
+            coerce = f'as.POSIXct(as.character(df[[{rq(x)}]]))'
+            scale_fn = "scale_x_datetime"
+        fmt = o.get("date_format")
+        if isinstance(fmt, str) and fmt.strip():
+            labels_arg = f"date_labels = {rq(fmt.strip())}"
+        else:
+            labels_arg = "labels = scales::label_date_short()"
+        return f"""
+.xt_raw <- suppressWarnings({coerce})
+.xt_ok <- !all(is.na(.xt_raw))
+if (.xt_ok) {{ df[[{rq(x)}]] <- .xt_raw }}
+.plot <- df %>%
+  dplyr::transmute(.x = {_data(x)},
+                   .y = suppressWarnings(as.numeric({_data(y)})),
+                   .grp = factor({_data(group)})) %>%
+  dplyr::filter(!is.na(.x), is.finite(.y), !is.na(.grp)) %>%
+  dplyr::group_by(.x, .grp) %>%
+  dplyr::summarise(.y = sum(.y, na.rm = TRUE), .groups = "drop") %>%
+  dplyr::arrange(.x)
+if (nrow(.plot) < 1) stop("area chart needs numeric x/y and a group")
+p <- ggplot(.plot, aes(x = .x, y = .y, fill = .grp)) +
+  geom_area(position = "{stack_mode}", alpha = {fill_a}, colour = "white", linewidth = 0.15) +
+  scale_fill_manual(values = labplot_palette()) +
+  {_labs(o, x, ydefault)} + guides(fill = guide_legend(title = {rq(group)}))
+if (.xt_ok) {{ p <- p + {scale_fn}({labels_arg}) }}
+"""
     return f"""
 .plot <- df %>%
   dplyr::transmute(.x = suppressWarnings(as.numeric({_data(x)})),
@@ -2514,6 +2721,11 @@ _Y_AXIS_OPTS = [
 ]
 _ANNOTATION_OPT = {"key": "annotations", "label": "Annotations", "type": "annotations", "default": []}
 _SERIES_STYLE_OPT = {"key": "series_styles", "label": "Per-series style", "type": "series_styles", "default": {}}
+_TEMPORAL_OPTS = [
+    {"key": "x_axis_type", "label": "X axis type", "type": "select",
+     "choices": list(_X_AXIS_TYPES), "default": "auto"},
+    {"key": "date_format", "label": "Date label format (strftime)", "type": "text", "default": ""},
+]
 
 _DATA_LABEL_TARGETS = {"bar", "grouped_bar", "error_bar", "lollipop", "scatter", "line"}
 _X_AXIS_TARGETS = {"scatter", "line", "histogram", "area", "dot_plot"}
@@ -2523,6 +2735,8 @@ _Y_AXIS_TARGETS = {"scatter", "line", "histogram", "area", "bar", "grouped_bar",
 # ggplot types so the frontend can surface them.
 _ANNOTATION_TARGETS = set(_UNIVERSAL_TYPES)
 _SERIES_STYLE_TARGETS = set(_UNIVERSAL_TYPES)
+# date/time x axis surfaces only on the continuous-x templates.
+_TEMPORAL_TARGETS = set(_TEMPORAL_X_TYPES)
 
 
 def _extend_options(opts, existing, new_opts):
@@ -2546,6 +2760,8 @@ for _p in PLOT_TYPES:
         _extend_options(_opts, _existing, [_ANNOTATION_OPT])
     if _t in _SERIES_STYLE_TARGETS:
         _extend_options(_opts, _existing, [_SERIES_STYLE_OPT])
+    if _t in _TEMPORAL_TARGETS:
+        _extend_options(_opts, _existing, _TEMPORAL_OPTS)
 
 for _p in PLOT_TYPES:
     _p["domain"] = PLOT_DOMAINS.get(_p["type"], "basic")
