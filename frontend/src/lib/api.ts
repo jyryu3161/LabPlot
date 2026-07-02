@@ -538,3 +538,49 @@ export async function getEmailDeliveryStatus(): Promise<EmailDeliveryStatus> { r
 export async function sendEmailTest(email: string): Promise<{ message: string }> {
   return fetcher('/api/admin/email-test', { method: 'POST', body: JSON.stringify({ email }) });
 }
+
+// ---- Multi-panel Canvas ----
+export async function listCanvases(projectId?: string): Promise<import('./types').CanvasListItem[]> {
+  return fetcher(`/api/canvases${projectId ? `?project_id=${projectId}` : ''}`);
+}
+export async function createCanvas(data: {
+  name: string; description?: string; project_id?: string; preset?: string;
+  width_mm: number; height_mm: number; background?: string;
+}): Promise<import('./types').CanvasDetail> {
+  return fetcher('/api/canvases', { method: 'POST', body: JSON.stringify(data) });
+}
+export async function getCanvas(id: string): Promise<import('./types').CanvasDetail> {
+  return fetcher(`/api/canvases/${id}`);
+}
+export async function updateCanvas(id: string, data: {
+  name?: string; description?: string; preset?: string; width_mm?: number; height_mm?: number; background?: string;
+}): Promise<import('./types').CanvasDetail> {
+  return fetcher(`/api/canvases/${id}`, { method: 'PATCH', body: JSON.stringify(data) });
+}
+export async function deleteCanvas(id: string): Promise<void> {
+  return fetcher(`/api/canvases/${id}`, { method: 'DELETE' });
+}
+export async function getCanvasPresets(): Promise<import('./types').CanvasPreset[]> {
+  return fetcher('/api/canvases/presets');
+}
+export async function addCanvasPanel(canvasId: string, data: {
+  figure_id: string; x_mm: number; y_mm: number; width_mm: number; height_mm: number;
+  z_order?: number; label?: string; pinned_version_id?: string;
+}): Promise<import('./types').CanvasPanel> {
+  return fetcher(`/api/canvases/${canvasId}/panels`, { method: 'POST', body: JSON.stringify(data) });
+}
+export async function updateCanvasPanel(canvasId: string, panelId: string, data: {
+  x_mm?: number; y_mm?: number; width_mm?: number; height_mm?: number;
+  z_order?: number; label?: string | null; label_visible?: boolean; pinned_version_id?: string | null;
+}): Promise<import('./types').CanvasPanel> {
+  return fetcher(`/api/canvases/${canvasId}/panels/${panelId}`, { method: 'PATCH', body: JSON.stringify(data) });
+}
+export async function deleteCanvasPanel(canvasId: string, panelId: string): Promise<void> {
+  return fetcher(`/api/canvases/${canvasId}/panels/${panelId}`, { method: 'DELETE' });
+}
+export async function renderCanvasPreview(req: {
+  figure_id: string; version_id?: string; width_mm: number; height_mm: number;
+  options_overlay?: { series_styles?: Record<string, unknown>; category_colors?: Record<string, string>; base_size?: number };
+}): Promise<import('./types').CanvasPreviewResult> {
+  return fetcher('/api/canvases/preview', { method: 'POST', body: JSON.stringify(req) });
+}

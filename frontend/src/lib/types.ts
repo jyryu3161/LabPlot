@@ -541,3 +541,57 @@ export interface ClientErrorItem {
   user_agent?: string;
   created_at: string;
 }
+
+// ---- Multi-panel Canvas (mm physical units) ----
+export interface CanvasPanel {
+  id: string;
+  canvas_id: string;
+  figure_id: string;
+  pinned_version_id?: string | null;
+  x_mm: number;
+  y_mm: number;
+  width_mm: number;
+  height_mm: number;
+  z_order: number;
+  label?: string | null;
+  label_visible: boolean;
+  effective_version_id?: string | null;
+  render_url?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+export interface Canvas {
+  id: string;
+  name: string;
+  description?: string | null;
+  project_id?: string | null;
+  width_mm: number;
+  height_mm: number;
+  preset?: string | null;
+  background: string;
+  export_snapshot?: Record<string, string> | null;
+  created_at: string;
+  updated_at: string;
+}
+export interface CanvasDetail extends Canvas {
+  panels: CanvasPanel[];
+}
+export interface CanvasListItem {
+  id: string;
+  name: string;
+  project_id?: string | null;
+  width_mm: number;
+  height_mm: number;
+  panel_count: number;
+  updated_at: string;
+}
+export interface CanvasPreset {
+  key: string;
+  label: string;
+  width_mm: number;
+  height_mm: number;
+}
+export interface CanvasPreviewResult {
+  svg_url: string;
+  cached: boolean;
+}

@@ -7,24 +7,32 @@ import shutil
 import tempfile
 import uuid
 
-from sqlalchemy.orm import Session
+from sqlalchemy import or_
+from sqlalchemy.orm import Session, joinedload
 
-from app.canvases.schemas import PreviewRenderRequest
+from app.canvases.models import Canvas, CanvasPanel
+from app.canvases.schemas import CanvasCreate, PanelCreate, PreviewRenderRequest
 from app.common import storage
 from app.common.encryption import decrypt_private_bytes
-from app.common.exceptions import BadRequestError
+from app.common.exceptions import BadRequestError, NotFoundError
 from app.config import settings
 from app.datasets import service as ds_service
 from app.datasets.models import Dataset
 from app.figures import service as figures_service
+from app.figures.models import Figure
 from app.r_engine import renderer
-from app.r_engine.presets import PRESETS
+from app.r_engine.presets import JOURNAL_SPECS, PRESETS
 
-# mm clamps (design §5): panel 10-500 mm/side. Enforced again defensively here
-# even though the request schema already validates the range, so a degenerate
-# value can never reach the R device.
+# mm clamps (design §5): canvas 20-500 mm/side; panel 10-500 mm/side. Enforced
+# again defensively here even though the request schema already validates the
+# range, so a degenerate value can never reach the R device / a stored row.
+_CANVAS_MM_MIN = 20.0
+_CANVAS_MM_MAX = 500.0
 _PANEL_MM_MIN = 10.0
 _PANEL_MM_MAX = 500.0
+
+# Allowed canvas backgrounds (design §2). Anything else falls back to "white".
+_CANVAS_BACKGROUNDS = {"white", "transparent"}
 
 # Ephemeral preview cache namespace (design §4). Mirrors the existing figures
 # storage layout: local under static/figures/canvases/preview, object storage
@@ -156,3 +164,290 @@ def render_preview(db: Session, owner_id: uuid.UUID, req: PreviewRenderRequest) 
         os.makedirs(os.path.dirname(cache_path), exist_ok=True)
         shutil.copyfile(svg_src, cache_path)
         return {"svg_url": figures_service._url(cache_path), "cached": False}
+
+
+# ============================================================================
+# M2 — canvas + panel CRUD (design §3). Plain owner/project-scoped CRUD over the
+# `canvases` / `canvas_panels` tables. NONE of this touches the R engine or
+# creates a FigureVersion: geometry/placement is canvas-owned (§1) and a panel
+# PATCH only mutates a canvas_panels row.
+# ============================================================================
+
+
+# ---------------------------------------------------------------- retrieval
+def get_canvas(db: Session, canvas_id: uuid.UUID, owner_id: uuid.UUID, write: bool = False) -> Canvas:
+    """Owner/project-scoped canvas fetch, mirroring figures.get_figure exactly.
+
+    Visible when the caller owns it OR has project access; a write additionally
+    requires project write access when the canvas is project-scoped. Anything
+    else is a 404 (never leak existence across tenants).
+    """
+    from app.projects import service as project_service
+
+    canvas = (
+        db.query(Canvas)
+        .options(joinedload(Canvas.panels))
+        .filter(Canvas.id == canvas_id)
+        .first()
+    )
+    if not canvas or (
+        canvas.owner_id != owner_id
+        and not project_service.can_access_project(db, canvas.project_id, owner_id)
+    ):
+        raise NotFoundError("Canvas", str(canvas_id))
+    if write and canvas.owner_id != owner_id:
+        project_service.require_project_write(db, canvas.project_id, owner_id)
+    return canvas
+
+
+def _get_panel(canvas: Canvas, panel_id: uuid.UUID) -> CanvasPanel:
+    """A panel is only reachable through its canvas (panel.canvas_id == canvas.id)."""
+    for panel in canvas.panels:
+        if panel.id == panel_id:
+            return panel
+    raise NotFoundError("CanvasPanel", str(panel_id))
+
+
+def _figure_current_versions(db: Session, figure_ids: list[uuid.UUID]) -> dict[uuid.UUID, uuid.UUID | None]:
+    """Map figure_id -> figure.current_version_id for follow-latest resolution."""
+    ids = list({fid for fid in figure_ids if fid is not None})
+    if not ids:
+        return {}
+    rows = db.query(Figure.id, Figure.current_version_id).filter(Figure.id.in_(ids)).all()
+    return {fid: cvid for fid, cvid in rows}
+
+
+# ---------------------------------------------------------------- serialization
+def _panel_response(panel: CanvasPanel, current_map: dict[uuid.UUID, uuid.UUID | None]) -> dict:
+    # effective_version_id (§3): the pin if set, else the figure's current
+    # version (None if the figure has no version yet). Resolved here so the
+    # editor needs no extra round-trip. render_url is the committed derived-cache
+    # artifact (§4), populated by later milestones; None for pure CRUD.
+    effective = panel.pinned_version_id or current_map.get(panel.figure_id)
+    return {
+        "id": panel.id,
+        "canvas_id": panel.canvas_id,
+        "figure_id": panel.figure_id,
+        "pinned_version_id": panel.pinned_version_id,
+        "x_mm": panel.x_mm,
+        "y_mm": panel.y_mm,
+        "width_mm": panel.width_mm,
+        "height_mm": panel.height_mm,
+        "z_order": panel.z_order,
+        "label": panel.label,
+        "label_visible": panel.label_visible,
+        "created_at": panel.created_at,
+        "updated_at": panel.updated_at,
+        "effective_version_id": effective,
+        "render_url": None,
+    }
+
+
+def _canvas_detail(db: Session, canvas: Canvas) -> dict:
+    current_map = _figure_current_versions(db, [p.figure_id for p in canvas.panels])
+    # Ordered by z_order; ties broken by id for stable paint order (§2).
+    panels = sorted(canvas.panels, key=lambda p: (p.z_order, str(p.id)))
+    return {
+        "id": canvas.id,
+        "name": canvas.name,
+        "description": canvas.description,
+        "owner_id": canvas.owner_id,
+        "project_id": canvas.project_id,
+        "width_mm": canvas.width_mm,
+        "height_mm": canvas.height_mm,
+        "preset": canvas.preset,
+        "background": canvas.background,
+        "export_snapshot": canvas.export_snapshot,
+        "created_at": canvas.created_at,
+        "updated_at": canvas.updated_at,
+        "panels": [_panel_response(p, current_map) for p in panels],
+    }
+
+
+def _canvas_list_item(canvas: Canvas) -> dict:
+    return {
+        "id": canvas.id,
+        "name": canvas.name,
+        "project_id": canvas.project_id,
+        "width_mm": canvas.width_mm,
+        "height_mm": canvas.height_mm,
+        "panel_count": len(canvas.panels),
+        "updated_at": canvas.updated_at,
+    }
+
+
+# ---------------------------------------------------------------- canvases
+def list_canvases(db: Session, owner_id: uuid.UUID, project_id: uuid.UUID | None = None) -> list[dict]:
+    """Owner's canvases plus project-accessible ones, newest first (§3)."""
+    from app.projects import service as project_service
+
+    q = db.query(Canvas).options(joinedload(Canvas.panels))
+    if project_id is not None:
+        project_service.get_project_model(db, project_id, owner_id)
+        q = q.filter(Canvas.project_id == project_id)
+    else:
+        ids = project_service.accessible_project_ids(db, owner_id)
+        q = q.filter(or_(Canvas.owner_id == owner_id, Canvas.project_id.in_(ids)))
+    rows = q.order_by(Canvas.updated_at.desc()).all()
+    return [_canvas_list_item(c) for c in rows]
+
+
+def create_canvas(db: Session, owner_id: uuid.UUID, data: CanvasCreate) -> dict:
+    from app.projects import service as project_service
+
+    if data.project_id is not None:
+        project_service.require_project_write(db, data.project_id, owner_id)
+    background = data.background if data.background in _CANVAS_BACKGROUNDS else "white"
+    canvas = Canvas(
+        owner_id=owner_id,
+        project_id=data.project_id,
+        name=data.name,
+        description=data.description,
+        width_mm=_clamp(data.width_mm, _CANVAS_MM_MIN, _CANVAS_MM_MAX),
+        height_mm=_clamp(data.height_mm, _CANVAS_MM_MIN, _CANVAS_MM_MAX),
+        preset=data.preset,
+        background=background,
+    )
+    db.add(canvas)
+    db.commit()
+    return canvas_detail(db, canvas.id, owner_id)
+
+
+def canvas_detail(db: Session, canvas_id: uuid.UUID, owner_id: uuid.UUID) -> dict:
+    canvas = get_canvas(db, canvas_id, owner_id)
+    return _canvas_detail(db, canvas)
+
+
+def update_canvas(db: Session, canvas_id: uuid.UUID, owner_id: uuid.UUID, data: dict) -> dict:
+    canvas = get_canvas(db, canvas_id, owner_id, write=True)
+    if data.get("name") is not None:
+        canvas.name = data["name"]
+    if "description" in data:
+        canvas.description = data["description"]
+    if data.get("width_mm") is not None:
+        canvas.width_mm = _clamp(data["width_mm"], _CANVAS_MM_MIN, _CANVAS_MM_MAX)
+    if data.get("height_mm") is not None:
+        canvas.height_mm = _clamp(data["height_mm"], _CANVAS_MM_MIN, _CANVAS_MM_MAX)
+    if data.get("background") is not None:
+        canvas.background = data["background"] if data["background"] in _CANVAS_BACKGROUNDS else "white"
+    if "preset" in data:
+        canvas.preset = data["preset"]
+    db.commit()
+    return canvas_detail(db, canvas_id, owner_id)
+
+
+def delete_canvas(db: Session, canvas_id: uuid.UUID, owner_id: uuid.UUID) -> None:
+    canvas = get_canvas(db, canvas_id, owner_id, write=True)
+    db.delete(canvas)  # FK ON DELETE CASCADE + orm cascade removes panels
+    db.commit()
+
+
+# ---------------------------------------------------------------- panels
+def _validate_pin(fig: Figure, pinned_version_id: uuid.UUID | None) -> None:
+    if pinned_version_id is None:
+        return
+    if not any(v.id == pinned_version_id for v in fig.versions):
+        raise BadRequestError(
+            "pinned_version_id does not belong to this figure",
+            error_code="BAD_PINNED_VERSION",
+        )
+
+
+def add_panel(db: Session, canvas_id: uuid.UUID, owner_id: uuid.UUID, data: PanelCreate) -> dict:
+    canvas = get_canvas(db, canvas_id, owner_id, write=True)
+    # The figure must be accessible to the caller (owner OR project access);
+    # get_figure raises NotFoundError (404) otherwise.
+    fig = figures_service.get_figure(db, data.figure_id, owner_id)
+    _validate_pin(fig, data.pinned_version_id)
+
+    z_order = data.z_order
+    if z_order is None:
+        z_order = max((p.z_order for p in canvas.panels), default=-1) + 1
+
+    panel = CanvasPanel(
+        canvas_id=canvas.id,
+        figure_id=fig.id,
+        pinned_version_id=data.pinned_version_id,
+        x_mm=data.x_mm,
+        y_mm=data.y_mm,
+        width_mm=_clamp(data.width_mm, _PANEL_MM_MIN, _PANEL_MM_MAX),
+        height_mm=_clamp(data.height_mm, _PANEL_MM_MIN, _PANEL_MM_MAX),
+        z_order=z_order,
+        label=data.label,
+    )
+    db.add(panel)
+    db.commit()
+    db.refresh(panel)
+    current_map = _figure_current_versions(db, [panel.figure_id])
+    return _panel_response(panel, current_map)
+
+
+def update_panel(db: Session, canvas_id: uuid.UUID, panel_id: uuid.UUID,
+                 owner_id: uuid.UUID, data: dict) -> dict:
+    """Mutate placement/size/label/z_order/pin of a panel row ONLY.
+
+    CRITICAL (design §1 "resize = canvas-owned"): this never creates or touches a
+    FigureVersion and never invokes the R engine — it writes only to the
+    canvas_panels row. Panel width/height changes are geometry the canvas owns.
+    """
+    canvas = get_canvas(db, canvas_id, owner_id, write=True)
+    panel = _get_panel(canvas, panel_id)
+
+    if data.get("x_mm") is not None:
+        panel.x_mm = data["x_mm"]
+    if data.get("y_mm") is not None:
+        panel.y_mm = data["y_mm"]
+    if data.get("width_mm") is not None:
+        panel.width_mm = _clamp(data["width_mm"], _PANEL_MM_MIN, _PANEL_MM_MAX)
+    if data.get("height_mm") is not None:
+        panel.height_mm = _clamp(data["height_mm"], _PANEL_MM_MIN, _PANEL_MM_MAX)
+    if data.get("z_order") is not None:
+        panel.z_order = data["z_order"]
+    if "label" in data:
+        panel.label = data["label"]
+    if data.get("label_visible") is not None:
+        panel.label_visible = data["label_visible"]
+    if "pinned_version_id" in data:
+        pin = data["pinned_version_id"]
+        if pin is not None:
+            fig = figures_service.get_figure(db, panel.figure_id, owner_id)
+            _validate_pin(fig, pin)
+        panel.pinned_version_id = pin
+
+    db.commit()
+    db.refresh(panel)
+    current_map = _figure_current_versions(db, [panel.figure_id])
+    return _panel_response(panel, current_map)
+
+
+def remove_panel(db: Session, canvas_id: uuid.UUID, panel_id: uuid.UUID, owner_id: uuid.UUID) -> None:
+    canvas = get_canvas(db, canvas_id, owner_id, write=True)
+    panel = _get_panel(canvas, panel_id)
+    db.delete(panel)
+    db.commit()
+
+
+# ---------------------------------------------------------------- presets
+def list_canvas_presets() -> list[dict]:
+    """Physical canvas-size presets derived from JOURNAL_SPECS (§3, pure lookup).
+
+    For each journal spec, offer a single-column and double-column canvas: width
+    = column inches x 25.4 mm; height = width x 0.72 (landscape-ish default);
+    both clamped to the canvas range [20, 500] mm. No rendering.
+    """
+    out: list[dict] = []
+    for key, spec in JOURNAL_SPECS.items():
+        journal = spec.get("journal", key)
+        for variant, in_key in (("single", "single_col_in"), ("double", "double_col_in")):
+            width_in = spec.get(in_key)
+            if not width_in:
+                continue
+            width_mm = _clamp(width_in * 25.4, _CANVAS_MM_MIN, _CANVAS_MM_MAX)
+            height_mm = _clamp(width_mm * 0.72, _CANVAS_MM_MIN, _CANVAS_MM_MAX)
+            out.append({
+                "key": f"{key}_{variant}",
+                "label": f"{journal} — {variant} column ({round(width_mm)} mm)",
+                "width_mm": round(width_mm, 2),
+                "height_mm": round(height_mm, 2),
+            })
+    return out
