@@ -277,6 +277,9 @@ export interface FigureVersion {
   eps_url?: string;
   html_url?: string;
   r_url?: string;
+  // Panel geometry + data ranges for precise annotation placement (null when
+  // the plot type has no standard ggplot panel, e.g. 3D/heatmap/network).
+  layout?: FigureLayout | null;
   // Populated when a version is produced by applying AI suggestions: dotted
   // paths that were applied vs. dropped as unsupported. Empty for plain edits.
   applied?: string[];
@@ -422,6 +425,15 @@ export interface FigureCodeResponse {
   language: 'python' | 'latex';
   filename: string;
   code: string;
+}
+
+export interface FigureLayout {
+  panel_px: { x0: number; y0: number; x1: number; y1: number };
+  img_px: { w: number; h: number };
+  x_range: [number, number];
+  y_range: [number, number];
+  x_discrete: boolean;
+  y_discrete: boolean;
 }
 
 export type AnnotationCoord = 'data' | 'relative';

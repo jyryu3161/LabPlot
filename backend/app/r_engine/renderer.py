@@ -286,6 +286,40 @@ tryCatch({
 }, error = function(e) message("Interactive HTML export skipped: ", conditionMessage(e)))
 """
 
+    # Panel geometry sidecar: map the plot PANEL to PNG pixel bounds (y from the
+    # image TOP) plus the data ranges, so the frontend can convert pointer
+    # positions to panel-relative / data coordinates for annotation placement.
+    # Computed against a scratch png device at the SAME width/height/dpi as
+    # figure.png. Entirely wrapped in tryCatch so a layout failure never breaks
+    # the render (figure_layout.json is simply absent).
+    layout_export = f"""
+tryCatch({{
+  .w <- {w}; .h <- {h}; .dpi <- {dpi}
+  .gt <- ggplot2::ggplotGrob(p)
+  grDevices::png(tempfile(fileext = ".png"), width = .w, height = .h, units = "in", res = .dpi)
+  grid::grid.newpage(); grid::grid.draw(.gt); grid::grid.force()
+  .pn <- grid::grid.ls(grobs = FALSE, viewports = TRUE, print = FALSE)$name
+  .pnl <- .pn[grepl("^panel", .pn)][1]
+  grid::seekViewport(.pnl)
+  .bl <- grid::deviceLoc(grid::unit(0, "npc"), grid::unit(0, "npc"))
+  .tr <- grid::deviceLoc(grid::unit(1, "npc"), grid::unit(1, "npc"))
+  .x0 <- as.numeric(grid::convertX(.bl$x, "in")) * .dpi
+  .x1 <- as.numeric(grid::convertX(.tr$x, "in")) * .dpi
+  .yb <- as.numeric(grid::convertY(.bl$y, "in")) * .dpi
+  .yt <- as.numeric(grid::convertY(.tr$y, "in")) * .dpi
+  grDevices::dev.off()
+  .imgh <- .h * .dpi; .imgw <- .w * .dpi
+  .panel <- list(x0 = .x0, x1 = .x1, y0 = .imgh - .yt, y1 = .imgh - .yb)
+  .bp <- ggplot2::ggplot_build(p)$layout$panel_params[[1]]
+  .xr <- .bp$x.range; .yr <- .bp$y.range
+  .disc_x <- !is.null(.bp$x$is_discrete) && isTRUE(.bp$x$is_discrete())
+  .disc_y <- !is.null(.bp$y$is_discrete) && isTRUE(.bp$y$is_discrete())
+  .obj <- list(panel_px = .panel, img_px = list(w = .imgw, h = .imgh),
+               x_range = .xr, y_range = .yr, x_discrete = .disc_x, y_discrete = .disc_y)
+  jsonlite::write_json(.obj, "figure_layout.json", auto_unbox = TRUE, digits = 6)
+}}, error = function(e) message("layout skip: ", conditionMessage(e)))
+"""
+
     export = f"""
 .pdf_device <- if (isTRUE(capabilities("cairo"))) grDevices::cairo_pdf else grDevices::pdf
 ggsave("figure.png",  p, width = {w}, height = {h}, dpi = {dpi}, bg = {bg_r}, limitsize = FALSE)
@@ -298,7 +332,7 @@ if (isTRUE(capabilities("cairo"))) {{
     error = function(e) message("EPS export skipped: ", conditionMessage(e))
   )
 }}
-{html_export}"""
+{layout_export}{html_export}"""
     return (head
             + theme_r(preset, color_mode, font_scale, opts.get("palette_name"),
                       opts.get("custom_palette_values"), opts.get("font_family"),
@@ -357,6 +391,15 @@ def render(plot_type: str, mapping: dict, options: dict, preset: str,
         with open(os.path.join(out_dir, "figure.R"), "w") as f:
             f.write(r_code)
         outputs["r"] = os.path.join(out_dir, "figure.R")
+
+        # panel-geometry sidecar (standard ggplot path only; best-effort). Not an
+        # image: the service parses this JSON into the version's `layout` column
+        # rather than serving it as an asset.
+        layout_src = os.path.join(work, "figure_layout.json")
+        if os.path.exists(layout_src):
+            layout_dst = os.path.join(out_dir, "figure_layout.json")
+            shutil.copyfile(layout_src, layout_dst)
+            outputs["layout"] = layout_dst
 
         if "png" not in outputs:
             return RenderResult(False, r_code, outputs, "No PNG produced.\n" + log.strip())

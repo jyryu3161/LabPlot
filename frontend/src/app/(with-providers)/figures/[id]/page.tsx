@@ -877,6 +877,7 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
                     alt={fig.name}
                     annotations={annotationList(effectiveOptions.annotations)}
                     onChange={setAnnotations}
+                    layout={version?.layout}
                   />
                 ) : (
                   <img src={previewUrl} alt={fig.name} decoding="async" className="mx-auto max-h-[58vh] w-auto rounded bg-white object-contain" />

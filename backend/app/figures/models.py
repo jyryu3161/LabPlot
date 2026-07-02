@@ -57,6 +57,11 @@ class FigureVersion(Base):
     eps_path = Column(String(512), nullable=True)
     html_path = Column(String(512), nullable=True)
     r_path = Column(String(512), nullable=True)
+    # Panel geometry sidecar: {panel_px:{x0,x1,y0,y1}, img_px:{w,h}, x_range,
+    # y_range, x_discrete, y_discrete}. Pixel coords are for figure.png with y
+    # measured from the image TOP. Lets the frontend map pointer positions to
+    # panel-relative / data coordinates. Best-effort; None when unavailable.
+    layout = Column(JSONB, nullable=True)
     render_log = Column(Text, nullable=True)
     change_note = Column(String(512), nullable=True)
     created_at = Column(DateTime(timezone=True), default=_now)

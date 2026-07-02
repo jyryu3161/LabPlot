@@ -145,6 +145,10 @@ class VersionResponse(BaseModel):
     eps_url: str | None = None
     html_url: str | None = None
     r_url: str | None = None
+    # Panel geometry captured at render time: {panel_px:{x0,x1,y0,y1}, img_px:
+    # {w,h}, x_range, y_range, x_discrete, y_discrete}. Pixels are for figure.png
+    # with y from the image TOP. None when the sidecar was unavailable.
+    layout: dict[str, Any] | None = None
     # Populated when a version is produced by applying AI suggestions; empty for
     # plain rerenders / manual edits. Lets the UI show "N of M changes applied".
     applied: list[str] = Field(default_factory=list)

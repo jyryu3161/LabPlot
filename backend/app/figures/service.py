@@ -366,6 +366,7 @@ def version_response(v: FigureVersion) -> dict:
         "eps_url": _url(v.eps_path),
         "html_url": _url(v.html_path),
         "r_url": _url(v.r_path),
+        "layout": v.layout,
     }
 
 
@@ -938,12 +939,33 @@ def generate_alt_text(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, 
 
 
 # ---------------------------------------------------------------- rendering
+def _parse_layout_json(path: str | None) -> dict | None:
+    """Read the renderer's panel-geometry sidecar into a dict, defensively.
+
+    The file is machine-generated JSON, but parse it as untrusted input: only a
+    top-level dict is accepted; any error yields None so a malformed/absent
+    sidecar never blocks persisting the version.
+    """
+    if not path:
+        return None
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def _render_into_version(df, plot_type, mapping, options, preset, figure_id, version_id):
     out_dir = os.path.join(settings.figures_dir, str(figure_id), str(version_id))
     res = renderer.render(plot_type, mapping, options or {}, preset, df, out_dir)
     if not res.success:
         shutil.rmtree(out_dir, ignore_errors=True)
         raise BadRequestError(_friendly_error(res.log), error_code="RENDER_FAILED")
+    # Parse the panel-geometry sidecar into a dict now, while the local file is
+    # still on disk -- object-storage mode deletes out_dir below. Stored on the
+    # version's `layout` column, NOT uploaded as an asset.
+    res.layout = _parse_layout_json((res.outputs or {}).get("layout"))
     if storage.object_storage_enabled():
         stored_outputs = {}
         content_types = {
@@ -956,6 +978,9 @@ def _render_into_version(df, plot_type, mapping, options, preset, figure_id, ver
             "r": "text/plain",
         }
         for kind, path in (res.outputs or {}).items():
+            # layout is persisted as JSON in the DB, not as an object-store asset
+            if kind == "layout":
+                continue
             key = storage.object_key("figures", figure_id, version_id, os.path.basename(path))
             stored_outputs[kind] = storage.upload_file(path, key, content_type=content_types.get(kind))
         res.outputs = stored_outputs
@@ -1083,6 +1108,7 @@ def create_figure(db: Session, owner_id: uuid.UUID, data) -> dict:
         tiff_path=res.outputs.get("tiff"), pdf_path=res.outputs.get("pdf"),
         eps_path=res.outputs.get("eps"),
         html_path=res.outputs.get("html"),
+        layout=res.layout,
         r_path=res.outputs.get("r"), render_log=res.log,
     )
     db.add(version)
@@ -1178,6 +1204,7 @@ def _auto_quality_correct_initial_figure(db: Session, owner_id: uuid.UUID, ds: D
             pdf_path=res.outputs.get("pdf"),
             eps_path=res.outputs.get("eps"),
             html_path=res.outputs.get("html"),
+            layout=res.layout,
             r_path=res.outputs.get("r"),
             render_log=res.log,
         )
@@ -1591,6 +1618,7 @@ def rerender(db: Session, figure_id: uuid.UUID, owner_id: uuid.UUID, req) -> dic
         tiff_path=res.outputs.get("tiff"), pdf_path=res.outputs.get("pdf"),
         eps_path=res.outputs.get("eps"),
         html_path=res.outputs.get("html"),
+        layout=res.layout,
         r_path=res.outputs.get("r"), render_log=res.log,
     )
     db.add(version)
@@ -1665,6 +1693,7 @@ def duplicate_figure(db: Session, figure_id: uuid.UUID, owner_id: uuid.UUID) -> 
         tiff_path=res.outputs.get("tiff"), pdf_path=res.outputs.get("pdf"),
         eps_path=res.outputs.get("eps"),
         html_path=res.outputs.get("html"),
+        layout=res.layout,
         r_path=res.outputs.get("r"), render_log=res.log,
     )
     db.add(version)
@@ -1735,6 +1764,7 @@ def bulk_apply_style(db: Session, source_figure_id: uuid.UUID,
                 tiff_path=res.outputs.get("tiff"), pdf_path=res.outputs.get("pdf"),
                 eps_path=res.outputs.get("eps"),
                 html_path=res.outputs.get("html"),
+                layout=res.layout,
                 r_path=res.outputs.get("r"), render_log=res.log,
             )
             db.add(version)
