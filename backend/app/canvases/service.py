@@ -567,7 +567,8 @@ def _svg_native_size(attrs: str) -> tuple[float, float]:
     """Native (px) width/height of a panel SVG from its viewBox (preferred) or
     width/height attributes. Used as the nested <svg> viewBox so the panel scales
     cleanly into its mm box."""
-    vb = re.search(r'viewBox\s*=\s*"([^"]+)"', attrs)
+    # svglite emits attributes with SINGLE quotes; accept either quote style.
+    vb = re.search(r"""viewBox\s*=\s*["']([^"']+)["']""", attrs)
     if vb:
         parts = re.split(r"[\s,]+", vb.group(1).strip())
         if len(parts) == 4:
@@ -579,7 +580,7 @@ def _svg_native_size(attrs: str) -> tuple[float, float]:
                 pass
 
     def _dim(name: str) -> float | None:
-        mm = re.search(rf'\b{name}\s*=\s*"([0-9.]+)', attrs)
+        mm = re.search(rf"""\b{name}\s*=\s*["']([0-9.]+)""", attrs)
         return float(mm.group(1)) if mm else None
 
     return (_dim("width") or 100.0, _dim("height") or 100.0)
@@ -593,10 +594,11 @@ def _prefix_svg_ids(inner: str, prefix: str) -> str:
     Prefixing definitions AND their references (`url(#id)`, `href="#id"`) with a
     per-panel token keeps each panel's clip-paths/defs self-consistent.
     """
-    inner = re.sub(r'\bid="([^"]+)"', lambda m: f'id="{prefix}{m.group(1)}"', inner)
+    # svglite uses single-quoted attributes; match either quote style.
+    inner = re.sub(r"""\bid=["']([^"']+)["']""", lambda m: f'id="{prefix}{m.group(1)}"', inner)
     inner = re.sub(r"url\(#([^)]+)\)", lambda m: f"url(#{prefix}{m.group(1)})", inner)
     inner = re.sub(
-        r'\b(xlink:href|href)="#([^"]+)"',
+        r"""\b(xlink:href|href)=["']#([^"']+)["']""",
         lambda m: f'{m.group(1)}="#{prefix}{m.group(2)}"',
         inner,
     )
