@@ -19,7 +19,11 @@ jobs:
       - name: Validate Compose config
         env:
           POSTGRES_PASSWORD: ci-postgres-password
-        run: docker compose config --quiet
+        run: |
+          # Compose declares env_file: .env, which isn't committed; seed it
+          # from the tracked example so `config` can resolve interpolations.
+          cp .env.example .env
+          docker compose config --quiet
 
   frontend:
     runs-on: ubuntu-latest
