@@ -332,6 +332,12 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
     onError: (e) => {
       if (e instanceof ApiError && e.status === 409) {
         toast.error('This figure changed elsewhere — review the latest version, then apply again.');
+        // Re-guard the retry: clear the version pin so after the refetch the
+        // page resolves to the NEW current version (and shows it). Without
+        // this the guard was one-shot — the stale pin made the next Apply
+        // omit base_version_id and silently supersede the other tab's work.
+        setSelectedVid(null);
+        setReview(null); setImprovements(null);
         qc.invalidateQueries({ queryKey: ['figure', id] });
         return;
       }
