@@ -48,8 +48,10 @@ export default function CanvasesPage() {
   const [name, setName] = useState('');
   const [desc, setDesc] = useState('');
   const [presetKey, setPresetKey] = useState<string>(CUSTOM);
-  const [widthMm, setWidthMm] = useState<number>(180);
-  const [heightMm, setHeightMm] = useState<number>(120);
+  // A4 portrait — matches the first backend preset, so the form shows A4 even
+  // before the presets query resolves (or if it fails).
+  const [widthMm, setWidthMm] = useState<number>(210);
+  const [heightMm, setHeightMm] = useState<number>(297);
 
   const { data: canvases, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['canvases'],

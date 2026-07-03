@@ -20,7 +20,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import {
   Loader2, Plus, Trash2, ArrowUp, ArrowDown, Maximize2, ZoomIn, ZoomOut, Lock, Unlock, Tag, Pencil, Check,
-  Download, Undo2, Redo2,
+  Download, Undo2, Redo2, ExternalLink,
 } from 'lucide-react';
 import {
   mmToPx, pxToMm, roundMm, fitPxPerMm, clampCanvasMm, clampPanelMm, PANEL_MM_MIN,
@@ -112,6 +112,7 @@ function CanvasPanelNode({
 }) {
   const groupRef = useRef<Konva.Group>(null);
   const { img, loading } = usePanelImage(panel);
+  const [hovered, setHovered] = useState(false);
 
   useEffect(() => {
     registerNode(panel.id, groupRef.current);
@@ -122,6 +123,19 @@ function CanvasPanelNode({
   const w = mmToPx(panel.width_mm, pxPerMm);
   const h = mmToPx(panel.height_mm, pxPerMm);
 
+  // Letterbox the image to its own aspect ratio. In steady state the render
+  // matches the panel box exactly (it was rendered at these mm), so this is a
+  // no-op; while a resize re-render is in flight it stops the stale image from
+  // being drawn stretched into the new box.
+  let imgX = 0, imgY = 0, imgW = w, imgH = h;
+  if (img && img.width > 0 && img.height > 0) {
+    const s = Math.min(w / img.width, h / img.height);
+    imgW = img.width * s;
+    imgH = img.height * s;
+    imgX = (w - imgW) / 2;
+    imgY = (h - imgH) / 2;
+  }
+
   return (
     <Group
       ref={groupRef}
@@ -130,6 +144,7 @@ function CanvasPanelNode({
       width={w}
       height={h}
       draggable
+      dragDistance={3}
       onMouseDown={() => onSelect(panel.id)}
       onClick={() => onSelect(panel.id)}
       onTap={() => onSelect(panel.id)}
@@ -137,15 +152,36 @@ function CanvasPanelNode({
       onDragMove={(e) => onDragMove(panel, e)}
       onDragEnd={(e) => onDragEnd(panel, e)}
       onTransformEnd={(e) => onTransformEnd(panel, e)}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
     >
       <Rect
         width={w}
         height={h}
-        fill={transparent ? undefined : 'white'}
-        stroke={selected ? '#2563EB' : '#cbd5e1'}
-        strokeWidth={selected ? 2 : 1}
+        // A fully-transparent fill (not undefined) keeps Konva hit-detection
+        // alive in transparent mode — the image below is listening={false}.
+        fill={transparent ? 'rgba(0,0,0,0)' : 'white'}
+        stroke="#94a3b8"
+        strokeWidth={1}
+        // Border only on hover; selection is indicated by the Transformer.
+        // Exception: a failed render (no image, not loading) keeps a dashed
+        // border so the panel stays discoverable instead of invisible.
+        strokeEnabled={(hovered && !selected) || (!img && !loading)}
+        dash={!img && !loading ? [4, 4] : undefined}
       />
-      {img && <KonvaImage image={img} width={w} height={h} listening={false} />}
+      {img && <KonvaImage image={img} x={imgX} y={imgY} width={imgW} height={imgH} listening={false} />}
+      {!img && !loading && (
+        <Text
+          text="render failed"
+          x={0}
+          y={h / 2 - 6}
+          width={w}
+          align="center"
+          fontSize={11}
+          fill="#dc2626"
+          listening={false}
+        />
+      )}
       {loading && (
         <Text
           text="rendering…"
@@ -206,6 +242,19 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   const queryKey = useMemo(() => ['canvas', canvasId], [canvasId]);
   const { data: canvas, isLoading, isError } = useQuery({ queryKey, queryFn: () => getCanvas(canvasId) });
 
+  // Figures can gain versions in another tab (the "Edit figure" button opens
+  // one). Window-focus refetch is globally disabled (app-providers), so refetch
+  // on tab return here — the new effective_version_id rotates each panelKey and
+  // usePanelImage swaps in the fresh render. Without this, the editor would
+  // keep showing the old figure while export uses the new version.
+  useEffect(() => {
+    const onVis = () => {
+      if (document.visibilityState === 'visible') qc.invalidateQueries({ queryKey });
+    };
+    document.addEventListener('visibilitychange', onVis);
+    return () => document.removeEventListener('visibilitychange', onVis);
+  }, [qc, queryKey]);
+
   const containerRef = useRef<HTMLDivElement>(null);
   // Mirror the container element into state so the color editor can portal its
   // instant-preview overlay into it (a plain ref won't re-render the consumer).
@@ -217,7 +266,45 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   const [viewport, setViewport] = useState({ w: 0, h: 0 });
   const [view, setView] = useState({ zoom: 1, x: 0, y: 0 });
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [lockAspect, setLockAspect] = useState(false);
+
+  // Safari desktop reports trackpad pinch as proprietary GestureEvents (never
+  // ctrlKey wheel), and without preventDefault it zooms the whole PAGE. Drive
+  // the same damped pointer-anchored zoom from them; other browsers lack
+  // GestureEvent and skip this entirely.
+  useEffect(() => {
+    if (!containerEl || typeof window === 'undefined' || !('GestureEvent' in window)) return;
+    let prevScale = 1;
+    const onStart = (e: Event) => {
+      e.preventDefault();
+      prevScale = (e as unknown as { scale?: number }).scale ?? 1;
+    };
+    const onChange = (e: Event) => {
+      e.preventDefault();
+      const ge = e as unknown as { scale?: number; clientX: number; clientY: number };
+      const scale = ge.scale ?? 1;
+      const factor = Math.min(1.25, Math.max(0.8, scale / (prevScale || 1)));
+      prevScale = scale;
+      const r = containerEl.getBoundingClientRect();
+      const pointer = { x: ge.clientX - r.left, y: ge.clientY - r.top };
+      setView((v) => {
+        const newScale = Math.min(8, Math.max(0.15, v.zoom * factor));
+        const pointTo = { x: (pointer.x - v.x) / v.zoom, y: (pointer.y - v.y) / v.zoom };
+        return { zoom: newScale, x: pointer.x - pointTo.x * newScale, y: pointer.y - pointTo.y * newScale };
+      });
+    };
+    const onEnd = (e: Event) => e.preventDefault();
+    containerEl.addEventListener('gesturestart', onStart);
+    containerEl.addEventListener('gesturechange', onChange);
+    containerEl.addEventListener('gestureend', onEnd);
+    return () => {
+      containerEl.removeEventListener('gesturestart', onStart);
+      containerEl.removeEventListener('gesturechange', onChange);
+      containerEl.removeEventListener('gestureend', onEnd);
+    };
+  }, [containerEl]);
+  // Aspect-locked resize by default: a free-form resize re-layouts the figure
+  // at a different aspect than its native render, which reads as "distorted".
+  const [lockAspect, setLockAspect] = useState(true);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [guides, setGuides] = useState<{ x: number | null; y: number | null }>({ x: null, y: null });
   const [renamingCanvas, setRenamingCanvas] = useState(false);
@@ -514,6 +601,11 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   // ── move: convert node px → mm; position only (NO re-render) ──
   function handleDragMove(panel: CanvasPanel, e: Konva.KonvaEventObject<DragEvent>) {
     if (!canvas) return;
+    // Alt/Option temporarily disables snapping for pixel-precise placement.
+    if (e.evt.altKey) {
+      setGuides({ x: null, y: null });
+      return;
+    }
     const node = e.target as Konva.Group;
     const thr = SNAP_PX / view.zoom;
     const w = mmToPx(panel.width_mm, pxPerMm);
@@ -537,15 +629,26 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
 
     let guideX: number | null = null;
     let guideY: number | null = null;
-    // snap the dragged panel's left / right / center edge to any target line
+    // Snap each axis to the NEAREST target line within the threshold. Scanning
+    // all (edge, target) pairs for the global minimum — a first-match pick can
+    // warp toward a farther line when several 6px bands overlap, which users
+    // perceive as the panel "jumping" at certain spots.
+    let bestX: { d: number; delta: number; t: number } | null = null;
     for (const edge of [x, x + w, x + w / 2]) {
-      const hit = xTargets.find((t) => Math.abs(edge - t) <= thr);
-      if (hit !== undefined) { x += hit - edge; guideX = hit; break; }
+      for (const t of xTargets) {
+        const d = Math.abs(edge - t);
+        if (d <= thr && (!bestX || d < bestX.d)) bestX = { d, delta: t - edge, t };
+      }
     }
+    let bestY: { d: number; delta: number; t: number } | null = null;
     for (const edge of [y, y + h, y + h / 2]) {
-      const hit = yTargets.find((t) => Math.abs(edge - t) <= thr);
-      if (hit !== undefined) { y += hit - edge; guideY = hit; break; }
+      for (const t of yTargets) {
+        const d = Math.abs(edge - t);
+        if (d <= thr && (!bestY || d < bestY.d)) bestY = { d, delta: t - edge, t };
+      }
     }
+    if (bestX) { x += bestX.delta; guideX = bestX.t; }
+    if (bestY) { y += bestY.delta; guideY = bestY.t; }
     node.x(x);
     node.y(y);
     setGuides({ x: guideX, y: guideY });
@@ -648,23 +751,36 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     });
   }
 
-  // ── zoom (wheel + buttons, uniform, toward pointer) ──
+  // ── wheel: scroll pans, pinch / Ctrl(Cmd)+wheel zooms (Figma convention) ──
+  // Browsers emit trackpad pinch as wheel events with ctrlKey=true and
+  // two-finger scroll as plain wheel — that's the only reliable way to tell
+  // them apart. Mouse users zoom with Ctrl+wheel or the ± toolbar buttons.
   function handleWheel(e: Konva.KonvaEventObject<WheelEvent>) {
-    e.evt.preventDefault();
+    e.evt.preventDefault(); // also stops browser page-zoom on ctrl+wheel
     const stage = e.target.getStage();
     if (!stage) return;
-    const oldScale = view.zoom;
-    const pointer = stage.getPointerPosition();
-    if (!pointer) return;
-    const mousePointTo = { x: (pointer.x - view.x) / oldScale, y: (pointer.y - view.y) / oldScale };
-    const direction = e.evt.deltaY > 0 ? -1 : 1;
-    const factor = 1.08;
-    const newScale = Math.min(8, Math.max(0.15, direction > 0 ? oldScale * factor : oldScale / factor));
-    setView({
-      zoom: newScale,
-      x: pointer.x - mousePointTo.x * newScale,
-      y: pointer.y - mousePointTo.y * newScale,
-    });
+    // Normalize delta: deltaMode 1 = lines (Firefox), 2 = pages.
+    const unit = e.evt.deltaMode === 1 ? 16 : e.evt.deltaMode === 2 ? viewport.h : 1;
+    const dx = e.evt.deltaX * unit;
+    const dy = e.evt.deltaY * unit;
+    if (e.evt.ctrlKey || e.evt.metaKey) {
+      // Zoom toward the pointer. exp() makes speed proportional to gesture
+      // magnitude (a fixed per-event factor compounds runaway fast at pinch's
+      // 30-60 events/sec); the per-event clamp guards inertial spikes.
+      // Functional update: pinch streams outpace re-renders, so consecutive
+      // events must accumulate on the latest view, not a stale closure.
+      const pointer = stage.getPointerPosition();
+      if (!pointer) return;
+      const factor = Math.min(1.25, Math.max(0.8, Math.exp(-dy * 0.002)));
+      setView((v) => {
+        const newScale = Math.min(8, Math.max(0.15, v.zoom * factor));
+        const pointTo = { x: (pointer.x - v.x) / v.zoom, y: (pointer.y - v.y) / v.zoom };
+        return { zoom: newScale, x: pointer.x - pointTo.x * newScale, y: pointer.y - pointTo.y * newScale };
+      });
+    } else {
+      // Plain wheel = two-finger trackpad scroll (or mouse wheel) → pan.
+      setView((v) => ({ ...v, x: v.x - dx, y: v.y - dy }));
+    }
   }
   function zoomBy(factor: number) {
     const oldScale = view.zoom;
@@ -914,6 +1030,15 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
           <Button type="button" size="xs" variant={lockAspect ? 'default' : 'outline'} onClick={() => setLockAspect((v) => !v)} title="Keep the aspect ratio while resizing from a corner">
             {lockAspect ? <Lock className="h-3.5 w-3.5" /> : <Unlock className="h-3.5 w-3.5" />} Aspect
           </Button>
+          <Button
+            type="button"
+            size="xs"
+            variant="outline"
+            title="Open this figure in the figure editor (new tab)"
+            onClick={() => window.open(`/figures/${selectedPanel.figure_id}`, '_blank', 'noopener')}
+          >
+            <ExternalLink className="h-3.5 w-3.5" /> Edit figure
+          </Button>
           <Button type="button" size="xs" variant="ghost" className="text-destructive" title="Remove this panel from the canvas" onClick={() => { if (window.confirm('Remove this panel from the canvas?')) removePanel.mutate({ panelId: selectedPanel.id, record: true }); }}>
             <Trash2 className="h-3.5 w-3.5" /> Delete
           </Button>
@@ -935,6 +1060,7 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
             x={view.x}
             y={view.y}
             draggable
+            dragDistance={3}
             onWheel={handleWheel}
             onMouseDown={handleStageMouseDown}
             onDragEnd={handleStageDragEnd}

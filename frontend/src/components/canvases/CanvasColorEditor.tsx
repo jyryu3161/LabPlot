@@ -138,18 +138,24 @@ export function CanvasColorEditor({
     if (!svg) return;
     svg.setAttribute('width', '100%');
     svg.setAttribute('height', '100%');
-    svg.setAttribute('preserveAspectRatio', 'none');
+    // While a resize re-render is in flight the wrap already has the NEW panel
+    // aspect but svgText is still the OLD render — letterbox ('meet') instead
+    // of stretching it; snap back to exact fill once the fresh SVG arrives.
+    svg.setAttribute('preserveAspectRatio', preview.loading ? 'xMidYMid meet' : 'none');
     (svg as unknown as HTMLElement).style.display = 'block';
     if (seriesHex && scopeBoxes.length && Object.keys(edits).length) {
       recolorSvg(svg, edits, seriesHex, scopeBoxes);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [preview.svgText, canEdit, editsJson, scopeBoxes]);
+  }, [preview.svgText, canEdit, editsJson, scopeBoxes, preview.loading]);
 
   // ── click-to-select a series on the panel ──
   function handleOverlayClick(e: React.MouseEvent) {
     const wrap = svgWrapRef.current;
     if (!wrap || !imgPx) return;
+    // The rect→imgPx mapping assumes the SVG fills the wrap exactly; while a
+    // re-render is letterboxed ('meet') the math is off — ignore clicks.
+    if (preview.loading) return;
     const rect = wrap.getBoundingClientRect();
     if (!rect.width || !rect.height) return;
     const sx = ((e.clientX - rect.left) / rect.width) * imgPx.w;

@@ -500,13 +500,18 @@ def remove_panel(db: Session, canvas_id: uuid.UUID, panel_id: uuid.UUID, owner_i
 
 # ---------------------------------------------------------------- presets
 def list_canvas_presets() -> list[dict]:
-    """Physical canvas-size presets derived from JOURNAL_SPECS (§3, pure lookup).
+    """Physical canvas-size presets: ISO paper first, then JOURNAL_SPECS sizes.
 
-    For each journal spec, offer a single-column and double-column canvas: width
-    = column inches x 25.4 mm; height = width x 0.72 (landscape-ish default);
-    both clamped to the canvas range [20, 500] mm. No rendering.
+    The create dialog seeds its form from the FIRST entry, so list order is the
+    default-canvas-size policy: A4 portrait leads. Journal presets follow: for
+    each spec, a single-column and double-column canvas (width = column inches
+    x 25.4 mm; height = width x 0.72), clamped to [20, 500] mm. No rendering.
     """
-    out: list[dict] = []
+    out: list[dict] = [
+        # No dimensions in the label — the create dialog appends "(W × H mm)".
+        {"key": "a4_portrait", "label": "A4 portrait", "width_mm": 210.0, "height_mm": 297.0},
+        {"key": "a4_landscape", "label": "A4 landscape", "width_mm": 297.0, "height_mm": 210.0},
+    ]
     for key, spec in JOURNAL_SPECS.items():
         journal = spec.get("journal", key)
         for variant, in_key in (("single", "single_col_in"), ("double", "double_col_in")):
