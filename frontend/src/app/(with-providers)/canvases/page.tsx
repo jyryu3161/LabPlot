@@ -243,7 +243,13 @@ export default function CanvasesPage() {
               <Label htmlFor="canvas-preset">Preset</Label>
               <Select value={presetKey} onValueChange={onPresetChange}>
                 <SelectTrigger id="canvas-preset" aria-label="Canvas size preset" className="w-full">
-                  <SelectValue placeholder="Choose a preset" />
+                  <SelectValue placeholder="Choose a preset">
+                    {(value) =>
+                      value === CUSTOM
+                        ? 'Custom size'
+                        : presets?.find((p) => p.key === value)?.label ?? 'Choose a preset'
+                    }
+                  </SelectValue>
                 </SelectTrigger>
                 <SelectContent>
                   {presets?.map((p) => (

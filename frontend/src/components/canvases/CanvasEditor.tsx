@@ -274,7 +274,9 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el?.isContentEditable) return;
       if (e.key === 'Delete' || e.key === 'Backspace') {
         e.preventDefault();
-        removePanel.mutate(selectedId);
+        // Guard the keyboard shortcut — a stray Delete/Backspace shouldn't
+        // silently drop a panel (there is no undo in the canvas editor).
+        if (window.confirm('Remove this panel from the canvas?')) removePanel.mutate(selectedId);
       } else if (e.key === 'Escape') {
         setSelectedId(null);
       }
@@ -687,7 +689,7 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
           <Button type="button" size="xs" variant={lockAspect ? 'default' : 'outline'} onClick={() => setLockAspect((v) => !v)}>
             {lockAspect ? <Lock className="h-3.5 w-3.5" /> : <Unlock className="h-3.5 w-3.5" />} Aspect
           </Button>
-          <Button type="button" size="xs" variant="ghost" className="text-destructive" onClick={() => removePanel.mutate(selectedPanel.id)}>
+          <Button type="button" size="xs" variant="ghost" className="text-destructive" onClick={() => { if (window.confirm('Remove this panel from the canvas?')) removePanel.mutate(selectedPanel.id); }}>
             <Trash2 className="h-3.5 w-3.5" /> Delete
           </Button>
         </div>
