@@ -16,7 +16,8 @@ import { roundMm } from './mm';
 import {
   computeScopeBoxes, recolorSvg, seriesAtElement, seriesAtPoint, type Box, type LegendKey,
 } from './recolor';
-import { textRegionBoxes, regionCssRect, REGION_OPTION_KEY, REGION_LABEL, type TextRegion } from './regions';
+import { textRegionBoxes, regionCssRect, axisRegionBoxes, REGION_OPTION_KEY, REGION_LABEL, type TextRegion, type AxisRegion } from './regions';
+import { CanvasAxisPopover } from './CanvasAxisPopover';
 
 const HEX_RE = /^#[0-9A-Fa-f]{6}$/;
 
@@ -154,6 +155,16 @@ export function CanvasColorEditor({
     flipped && r === 'xlab' ? 'y_label' : flipped && r === 'ylab' ? 'x_label' : REGION_OPTION_KEY[r];
   const labelFor = (r: TextRegion) =>
     flipped && r === 'xlab' ? REGION_LABEL.ylab : flipped && r === 'ylab' ? REGION_LABEL.xlab : REGION_LABEL[r];
+  // ── axis strips (U5): tick-strip click → anchored popover ──
+  const axisBoxes = useMemo(() => axisRegionBoxes(layout as Record<string, unknown> | null), [layout]);
+  const [axisEdit, setAxisEdit] = useState<AxisRegion | null>(null);
+  // The clicked strip is POSITIONAL; the options it edits follow the aesthetic
+  // that renders there (coord_flip swaps them). Discreteness is panel-space
+  // (sidecar x_discrete describes the horizontal axis), so it stays positional.
+  const axisAestheticFor = (r: AxisRegion): 'x' | 'y' =>
+    r === 'xaxis' ? (flipped ? 'y' : 'x') : (flipped ? 'x' : 'y');
+  const axisDiscreteFor = (r: AxisRegion): boolean =>
+    Boolean(r === 'xaxis' ? (layout as Record<string, unknown> | null)?.x_discrete : (layout as Record<string, unknown> | null)?.y_discrete);
   // Inline editor state: region being edited, live value, pre-edit value, and
   // whether the option was SET before (unset restores the rendered default —
   // distinct from '', which explicitly blanks a label backend-side).
@@ -181,7 +192,7 @@ export function CanvasColorEditor({
   const commitText = useMutation({
     // patch values: string sets the option; null UNSETS it (restores the
     // rendered default — '' would explicitly blank a label backend-side).
-    mutationFn: async (vars: { patch: Record<string, string | null>; note: string; revert?: Record<string, string | null> }) => {
+    mutationFn: async (vars: { patch: Record<string, string | number | boolean | null>; note: string; revert?: Record<string, string | number | boolean | null>; kind?: 'text' | 'axis' }) => {
       const fig = await getFigure(panel.figure_id);
       // Merge base = the version our edits are relative to (the conflict-guard
       // ref, which advances after every commit here). Using the panel prop's
@@ -206,21 +217,23 @@ export function CanvasColorEditor({
       // NEXT commit from this editor would 409 against our own edit.
       baseVersionIdRef.current = version.id;
       setTextEdit(null);
+      setAxisEdit(null);
       qc.invalidateQueries({ queryKey: ['canvas', canvasId] });
       qc.invalidateQueries({ queryKey: ['figure', panel.figure_id] });
+      const kindLabel = vars.kind === 'axis' ? 'Axis' : 'Text';
       if (vars.revert) {
         const revert = vars.revert;
-        toast.success('Text updated', {
+        toast.success(`${kindLabel} updated`, {
           action: {
             label: 'Undo',
             onClick: () => commitText.mutate({
               patch: revert,
-              note: `Canvas '${canvasName}': revert text edit`,
+              note: `Canvas '${canvasName}': revert ${vars.kind ?? 'text'} edit`,
             }),
           },
         });
       } else {
-        toast.success('Text updated');
+        toast.success(`${kindLabel} updated`);
       }
     },
     onError: (err) => {
@@ -374,6 +387,7 @@ export function CanvasColorEditor({
   const overlay =
     (canEdit || hasRegions) && preview.svgText && containerEl && overlayRect
       ? createPortal(
+          <>
           <div
             className={`absolute z-20 overflow-hidden ${canEdit ? 'bg-white shadow-sm ring-1 ring-primary' : 'pointer-events-none'}`}
             style={{
@@ -407,7 +421,29 @@ export function CanvasColorEditor({
                         const raw = effOptions[optionKeyFor(region)];
                         const prevSet = typeof raw === 'string';
                         const prev = prevSet ? (raw as string) : '';
+                        setAxisEdit(null);
                         setTextEdit({ region, value: prev, prev, prevSet });
+                      }}
+                    />
+                  );
+                })
+              : null}
+            {/* axis strip click targets (U5) */}
+            {imgPx && !textEdit && !axisEdit && !preview.loading
+              ? (Object.entries(axisBoxes) as [AxisRegion, Box][]).map(([region, box]) => {
+                  const rect = regionCssRect(box, imgPx);
+                  return (
+                    <button
+                      key={region}
+                      type="button"
+                      aria-label={`Edit ${axisAestheticFor(region)} axis`}
+                      title={`Edit ${axisAestheticFor(region)} axis (range, ticks, scale)`}
+                      className="pointer-events-auto absolute cursor-pointer rounded-sm bg-transparent hover:bg-primary/10 hover:ring-1 hover:ring-primary/60"
+                      style={{ ...rect, border: 'none', padding: 0 }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setTextEdit(null);
+                        setAxisEdit(region);
                       }}
                     />
                   );
@@ -445,7 +481,68 @@ export function CanvasColorEditor({
                 </div>
               );
             })() : null}
-          </div>,
+          </div>
+          {/* axis popover (U5): sibling of the overlay so the overlay's
+              overflow-hidden can't clip it; flips above/below the strip. */}
+          {imgPx && axisEdit && axisBoxes[axisEdit] ? (() => {
+            const box = axisBoxes[axisEdit]!;
+            const POP_H = 300; // approximate popover height for placement
+            if (axisEdit === 'xaxis') {
+              const stripTop = overlayRect.top + overlayRect.height * (box.y0 / imgPx.h);
+              const stripBottom = overlayRect.top + overlayRect.height * (box.y1 / imgPx.h);
+              const placeAbove = stripTop > POP_H + 8;
+              return (
+                <div
+                  className="pointer-events-auto absolute z-30"
+                  style={{
+                    left: overlayRect.left + overlayRect.width * 0.3,
+                    top: placeAbove ? stripTop - 4 : stripBottom + 6,
+                    transform: placeAbove ? 'translateY(-100%)' : undefined,
+                  }}
+                >
+                  <CanvasAxisPopover
+                    key={`${axisEdit}-${effVersionId ?? 'v'}`}
+                    aesthetic={axisAestheticFor(axisEdit)}
+                    discrete={axisDiscreteFor(axisEdit)}
+                    showAngle={axisAestheticFor(axisEdit) === 'x' && !flipped}
+                    options={effOptions}
+                    pending={commitText.isPending}
+                    onApply={(patch, revert) => commitText.mutate({
+                      patch,
+                      note: `Canvas '${canvasName}': edit ${axisAestheticFor(axisEdit)} axis`,
+                      revert,
+                      kind: 'axis',
+                    })}
+                    onClose={() => setAxisEdit(null)}
+                  />
+                </div>
+              );
+            }
+            const stripRight = overlayRect.left + overlayRect.width * (box.x1 / imgPx.w);
+            return (
+              <div
+                className="pointer-events-auto absolute z-30"
+                style={{ left: stripRight + 8, top: Math.max(8, overlayRect.top + overlayRect.height * 0.08) }}
+              >
+                <CanvasAxisPopover
+                  key={`${axisEdit}-${effVersionId ?? 'v'}`}
+                  aesthetic={axisAestheticFor(axisEdit)}
+                  discrete={axisDiscreteFor(axisEdit)}
+                  showAngle={false}
+                  options={effOptions}
+                  pending={commitText.isPending}
+                  onApply={(patch, revert) => commitText.mutate({
+                    patch,
+                    note: `Canvas '${canvasName}': edit ${axisAestheticFor(axisEdit)} axis`,
+                    revert,
+                    kind: 'axis',
+                  })}
+                  onClose={() => setAxisEdit(null)}
+                />
+              </div>
+            );
+          })() : null}
+          </>,
           containerEl,
         )
       : null;

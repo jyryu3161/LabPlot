@@ -29,6 +29,29 @@ export const REGION_LABEL: Record<TextRegion, string> = {
   ylab: 'y axis label',
 };
 
+// ── axis strips (U5): tick-strip click targets for the axis popover ──
+export type AxisRegion = 'xaxis' | 'yaxis';
+
+const AXIS_LAYOUT_KEY: Record<AxisRegion, string> = {
+  xaxis: 'x_axis_px',
+  yaxis: 'y_axis_px',
+};
+
+export const AXIS_LABEL: Record<AxisRegion, string> = {
+  xaxis: 'x axis',
+  yaxis: 'y axis',
+};
+
+export function axisRegionBoxes(layout: Record<string, unknown> | null | undefined): Partial<Record<AxisRegion, Box>> {
+  const out: Partial<Record<AxisRegion, Box>> = {};
+  if (!layout) return out;
+  for (const region of Object.keys(AXIS_LAYOUT_KEY) as AxisRegion[]) {
+    const box = asBox(layout[AXIS_LAYOUT_KEY[region]]);
+    if (box) out[region] = box;
+  }
+  return out;
+}
+
 function asBox(v: unknown): Box | null {
   if (!v || typeof v !== 'object') return null;
   const b = v as Record<string, unknown>;
