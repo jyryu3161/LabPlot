@@ -57,7 +57,7 @@ export function CanvasHelpPopover() {
             <li>Drag its corners to resize</li>
             <li>Scroll to pan · pinch or Ctrl/Cmd+scroll to zoom</li>
             <li>Drag empty space to pan</li>
-            <li>Click a panel to edit series colors</li>
+            <li>Click a panel to edit colors · click its title/axis labels to edit text</li>
             <li>Delete removes the selected panel</li>
             <li>Ctrl/Cmd+Z undo · Ctrl/Cmd+Shift+Z redo</li>
           </ul>
@@ -96,7 +96,7 @@ export function CanvasHintsBar({ show }: { show: boolean }) {
 
   return (
     <div className="flex items-center gap-2 border-b bg-muted/40 px-4 py-1 text-xs text-muted-foreground">
-      <span>Drag to move · corners to resize · scroll to pan · Ctrl/Cmd+scroll to zoom · click a panel for colors</span>
+      <span>Drag to move · corners to resize · scroll to pan · Ctrl/Cmd+scroll to zoom · click a panel to edit</span>
       <button
         type="button"
         className="ml-auto rounded p-0.5 hover:bg-muted hover:text-foreground"

@@ -10,10 +10,13 @@ import {
 } from '@/lib/api';
 import type { CanvasPanel, CanvasPreviewResult, SeriesStyle } from '@/lib/types';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
 import { roundMm } from './mm';
 import {
   computeScopeBoxes, recolorSvg, seriesAtElement, seriesAtPoint, type Box, type LegendKey,
 } from './recolor';
+import { textRegionBoxes, regionCssRect, REGION_OPTION_KEY, REGION_LABEL, type TextRegion } from './regions';
 
 const HEX_RE = /^#[0-9A-Fa-f]{6}$/;
 
@@ -126,12 +129,134 @@ export function CanvasColorEditor({
   const loading = figLoading || preview.loading || !plotTypesData;
   const canEdit = editableByType === true && seriesNames.length > 0;
 
+  // ── text elements (U4 P1): title / x label / y label ──
+  // Effective version's stored options — prefill source for text edits.
+  const effOptions = useMemo(() => {
+    if (!figure) return {} as Record<string, unknown>;
+    const effId = panel.effective_version_id ?? figure.current_version_id;
+    const version = figure.versions.find((v) => v.id === effId) ?? figure.versions[0];
+    return (version?.options as Record<string, unknown>) ?? {};
+  }, [figure, panel.effective_version_id]);
+  const optionText = (key: string): string => {
+    const v = effOptions[key];
+    return typeof v === 'string' ? v : '';
+  };
+  // Click-target boxes from the sidecar (absent for DEVICE_TYPES/old renders →
+  // the sidebar inputs below remain the only path — graceful degradation).
+  const regionBoxes = useMemo(() => textRegionBoxes(layout as Record<string, unknown> | null), [layout]);
+  const hasRegions = Object.keys(regionBoxes).length > 0;
+  // coord_flip (options.flip_coords) swaps which AESTHETIC each gtable cell
+  // shows: the bottom label cell renders the y-label and vice versa. Verified
+  // in-container: with coord_flip the xlab-b grob carries labs(y=...). Map the
+  // clicked CELL to the option that actually renders there.
+  const flipped = Boolean(effOptions.flip_coords);
+  const optionKeyFor = (r: TextRegion) =>
+    flipped && r === 'xlab' ? 'y_label' : flipped && r === 'ylab' ? 'x_label' : REGION_OPTION_KEY[r];
+  const labelFor = (r: TextRegion) =>
+    flipped && r === 'xlab' ? REGION_LABEL.ylab : flipped && r === 'ylab' ? REGION_LABEL.xlab : REGION_LABEL[r];
+  // Inline editor state: region being edited, live value, pre-edit value, and
+  // whether the option was SET before (unset restores the rendered default —
+  // distinct from '', which explicitly blanks a label backend-side).
+  const [textEdit, setTextEdit] = useState<{ region: TextRegion; value: string; prev: string; prevSet: boolean } | null>(null);
+  // Sidebar drafts (batch-applied). Reseed ONLY when the effective version
+  // changes — reseeding on every figure refetch (color apply, canvas
+  // invalidation) would wipe half-typed drafts.
+  const effVersionId = panel.effective_version_id ?? figure?.current_version_id ?? null;
+  const [textDrafts, setTextDrafts] = useState<{ title: string; x_label: string; y_label: string } | null>(null);
+  useEffect(() => {
+    if (figure) {
+      setTextDrafts({
+        title: optionText('title'),
+        x_label: optionText('x_label'),
+        y_label: optionText('y_label'),
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [figure?.id, effVersionId]);
+
+  // Commit a text-option patch through the same rerender path as colors. One
+  // FigureVersion per commit; base_version_id guards cross-tab conflicts; the
+  // success toast offers a one-shot Undo (grilling Q5-c) that re-commits the
+  // previous values — canvas Ctrl+Z stays placement-only by design.
+  const commitText = useMutation({
+    // patch values: string sets the option; null UNSETS it (restores the
+    // rendered default — '' would explicitly blank a label backend-side).
+    mutationFn: async (vars: { patch: Record<string, string | null>; note: string; revert?: Record<string, string | null> }) => {
+      const fig = await getFigure(panel.figure_id);
+      // Merge base = the version our edits are relative to (the conflict-guard
+      // ref, which advances after every commit here). Using the panel prop's
+      // effective_version_id instead would race the canvas refetch: a quick
+      // second commit would merge onto the PRE-first-commit options and
+      // silently revert the first edit.
+      const baseId = baseVersionIdRef.current ?? panel.pinned_version_id ?? fig.current_version_id;
+      const version = fig.versions.find((v) => v.id === baseId) ?? fig.versions[0];
+      const options = { ...((version?.options as Record<string, unknown>) ?? {}) };
+      for (const [key, value] of Object.entries(vars.patch)) {
+        if (value === null) delete options[key];
+        else options[key] = value;
+      }
+      return rerenderFigure(panel.figure_id, {
+        options,
+        change_note: vars.note,
+        base_version_id: baseVersionIdRef.current ?? undefined,
+      });
+    },
+    onSuccess: (version, vars) => {
+      // Advance the conflict guard to the version we just created, else the
+      // NEXT commit from this editor would 409 against our own edit.
+      baseVersionIdRef.current = version.id;
+      setTextEdit(null);
+      qc.invalidateQueries({ queryKey: ['canvas', canvasId] });
+      qc.invalidateQueries({ queryKey: ['figure', panel.figure_id] });
+      if (vars.revert) {
+        const revert = vars.revert;
+        toast.success('Text updated', {
+          action: {
+            label: 'Undo',
+            onClick: () => commitText.mutate({
+              patch: revert,
+              note: `Canvas '${canvasName}': revert text edit`,
+            }),
+          },
+        });
+      } else {
+        toast.success('Text updated');
+      }
+    },
+    onError: (err) => {
+      if (err instanceof ApiError && err.status === 409) {
+        toast.error('This figure changed elsewhere — reload the canvas and retry.');
+        qc.invalidateQueries({ queryKey: ['canvas', canvasId] });
+        qc.invalidateQueries({ queryKey: ['figure', panel.figure_id] });
+        return;
+      }
+      toast.error(err instanceof ApiError ? err.message : 'Could not update text');
+    },
+  });
+
+  function commitRegionEdit() {
+    if (!textEdit) return;
+    const key = optionKeyFor(textEdit.region); // flip-aware
+    const value = textEdit.value.trim();
+    if (value === textEdit.prev.trim()) { setTextEdit(null); return; } // no-op
+    commitText.mutate({
+      patch: { [key]: value },
+      note: `Canvas '${canvasName}': edit ${labelFor(textEdit.region)}`,
+      // Undo restores the pre-edit state exactly: the old string if the option
+      // was set, else UNSET (null) — not '' (which would blank the label).
+      revert: { [key]: textEdit.prevSet ? textEdit.prev : null },
+    });
+  }
+
   // ── instant preview recolor: re-parse pristine SVG, then apply the full edits map
   // spatially scoped to panel_px(inset)+legend boxes. Re-parsing each change keeps the
   // recolor correct (matching is against the series' CURRENT hex, not a prior edit). ──
   const editsJson = JSON.stringify(edits);
   useEffect(() => {
     const wrap = svgWrapRef.current;
+    // Inline only for color editing (recolor needs a DOM SVG). Text-only mode
+    // renders NO svg — the konva raster below is the same render, and skipping
+    // the white-background overlay keeps the panel draggable + flash-free.
     if (!wrap || !preview.svgText || !canEdit) return;
     wrap.innerHTML = preview.svgText;
     const svg = wrap.querySelector('svg');
@@ -147,7 +272,7 @@ export function CanvasColorEditor({
       recolorSvg(svg, edits, seriesHex, scopeBoxes);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [preview.svgText, canEdit, editsJson, scopeBoxes, preview.loading]);
+  }, [preview.svgText, canEdit, hasRegions, editsJson, scopeBoxes, preview.loading]);
 
   // ── click-to-select a series on the panel ──
   function handleOverlayClick(e: React.MouseEvent) {
@@ -188,8 +313,11 @@ export function CanvasColorEditor({
   const apply = useMutation({
     mutationFn: async () => {
       const fig = await getFigure(panel.figure_id);
-      const effId = panel.effective_version_id ?? fig.current_version_id;
-      const version = fig.versions.find((v) => v.id === effId) ?? fig.versions[0];
+      // Same merge-base rule as commitText: our conflict-guard ref, not the
+      // possibly-stale panel prop (a quick second commit would otherwise merge
+      // onto pre-first-commit options and revert it).
+      const baseId = baseVersionIdRef.current ?? panel.pinned_version_id ?? fig.current_version_id;
+      const version = fig.versions.find((v) => v.id === baseId) ?? fig.versions[0];
       const options = (version?.options as Record<string, unknown>) ?? {};
       const prevStyles = (options.series_styles as Record<string, SeriesStyle> | undefined) ?? {};
       const mergedStyles: Record<string, SeriesStyle> = { ...prevStyles };
@@ -204,7 +332,10 @@ export function CanvasColorEditor({
         base_version_id: baseVersionIdRef.current ?? undefined,
       });
     },
-    onSuccess: () => {
+    onSuccess: (version) => {
+      // Advance the conflict guard so a second commit from this same editor
+      // doesn't 409 against the version we just created.
+      baseVersionIdRef.current = version.id;
       toast.success('Colors applied');
       setEdits({});
       // New version → follow-latest panels pick up the new current_version_id and the
@@ -235,32 +366,166 @@ export function CanvasColorEditor({
   const editCount = Object.keys(edits).length;
 
   // ── overlay (portal into the stage container, positioned over the konva panel) ──
+  // Two modes: COLOR mode (canEdit) inlines the SVG for scoped recolor — the
+  // overlay intercepts clicks (M3 behavior). TEXT-ONLY mode (color-locked
+  // types) renders NO svg and is pointer-events-none except the small label
+  // hit targets, so the selected panel stays draggable and wheel-pannable and
+  // transparent canvases never flash white.
   const overlay =
-    canEdit && preview.svgText && containerEl && overlayRect
+    (canEdit || hasRegions) && preview.svgText && containerEl && overlayRect
       ? createPortal(
           <div
-            className="absolute z-20 overflow-hidden bg-white shadow-sm ring-1 ring-primary"
+            className={`absolute z-20 overflow-hidden ${canEdit ? 'bg-white shadow-sm ring-1 ring-primary' : 'pointer-events-none'}`}
             style={{
               left: overlayRect.left,
               top: overlayRect.top,
               width: overlayRect.width,
               height: overlayRect.height,
-              cursor: 'crosshair',
+              cursor: canEdit ? 'crosshair' : undefined,
             }}
-            onClick={handleOverlayClick}
+            onClick={canEdit ? handleOverlayClick : undefined}
             role="presentation"
           >
-            <div ref={svgWrapRef} className="h-full w-full" />
+            {canEdit && <div ref={svgWrapRef} className="h-full w-full" />}
+            {/* text-element click targets (sidecar boxes as real DOM targets) */}
+            {imgPx && !textEdit && !preview.loading
+              ? (Object.entries(regionBoxes) as [TextRegion, Box][]).map(([region, box]) => {
+                  const rect = regionCssRect(box, imgPx);
+                  return (
+                    <button
+                      key={region}
+                      type="button"
+                      aria-label={`Edit ${labelFor(region)}`}
+                      title={`Edit ${labelFor(region)}`}
+                      // pointer-events-auto re-enables clicks inside the
+                      // pointer-events-none text-only container. No inline
+                      // background — it would override the hover:bg class.
+                      className="pointer-events-auto absolute cursor-text rounded-sm bg-transparent hover:bg-primary/10 hover:ring-1 hover:ring-primary/60"
+                      style={{ ...rect, border: 'none', padding: 0 }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        const raw = effOptions[optionKeyFor(region)];
+                        const prevSet = typeof raw === 'string';
+                        const prev = prevSet ? (raw as string) : '';
+                        setTextEdit({ region, value: prev, prev, prevSet });
+                      }}
+                    />
+                  );
+                })
+              : null}
+            {/* inline text editor over the clicked region */}
+            {imgPx && textEdit && regionBoxes[textEdit.region] ? (() => {
+              const rect = regionCssRect(regionBoxes[textEdit.region]!, imgPx);
+              return (
+                <div
+                  className="pointer-events-auto absolute z-30"
+                  // ylab is a thin vertical strip — a rotated input is unusable,
+                  // so the editor floats horizontally from the strip's position.
+                  style={{ left: rect.left, top: rect.top, minWidth: 200, maxWidth: '85%' }}
+                >
+                  <input
+                    autoFocus
+                    aria-label={`${labelFor(textEdit.region)} text`}
+                    className="w-full rounded border border-primary bg-white px-1.5 py-0.5 text-xs shadow-md outline-none"
+                    value={textEdit.value}
+                    placeholder={`${labelFor(textEdit.region)} (empty hides it)`}
+                    maxLength={200}
+                    disabled={commitText.isPending}
+                    onChange={(e) => setTextEdit((s) => (s ? { ...s, value: e.target.value } : s))}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') commitRegionEdit();
+                      else if (e.key === 'Escape') setTextEdit(null); // cancel = free (pre-commit)
+                      e.stopPropagation();
+                    }}
+                    onBlur={() => { if (!commitText.isPending) commitRegionEdit(); }}
+                  />
+                  {commitText.isPending && (
+                    <Loader2 className="absolute -right-5 top-1 h-3.5 w-3.5 animate-spin text-primary" />
+                  )}
+                </div>
+              );
+            })() : null}
           </div>,
           containerEl,
         )
       : null;
 
+  // Trimmed comparison — whitespace-only edits must not enable Apply (a
+  // trimmed patch would commit a full no-op re-render against render quota).
+  const draftsDirty = textDrafts !== null && (
+    textDrafts.title.trim() !== optionText('title').trim()
+    || textDrafts.x_label.trim() !== optionText('x_label').trim()
+    || textDrafts.y_label.trim() !== optionText('y_label').trim()
+  );
+
   return (
-    <div className="flex w-64 shrink-0 flex-col gap-3 border-l bg-background p-3 text-sm">
+    <div className="flex w-64 shrink-0 flex-col gap-3 overflow-y-auto border-l bg-background p-3 text-sm">
       <div className="flex items-center justify-between">
-        <span className="font-semibold">Colors</span>
+        <span className="font-semibold">Edit panel</span>
         {loading && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />}
+      </div>
+
+      {/* ── text: title + axis labels (all plot types; commits a new version) ── */}
+      {textDrafts && (
+        <div className="flex flex-col gap-1.5">
+          <span className="text-xs font-medium text-muted-foreground">Text</span>
+          {hasRegions && (
+            <p className="text-[11px] text-muted-foreground">
+              Tip: click the title or an axis label directly on the figure.
+            </p>
+          )}
+          {([
+            ['title', 'Title'],
+            ['x_label', 'X label'],
+            ['y_label', 'Y label'],
+          ] as const).map(([key, label]) => (
+            <span key={key} className="flex items-center gap-1.5">
+              <Label htmlFor={`panel-text-${key}`} className="w-12 shrink-0 text-[11px] text-muted-foreground">{label}</Label>
+              <Input
+                id={`panel-text-${key}`}
+                className="h-7 text-xs"
+                maxLength={200}
+                value={textDrafts[key]}
+                placeholder={key === 'title' ? 'No title' : 'Default (empty hides)'}
+                onChange={(e) => setTextDrafts((d) => (d ? { ...d, [key]: e.target.value } : d))}
+              />
+            </span>
+          ))}
+          {draftsDirty && (
+            <Button
+              type="button"
+              size="sm"
+              disabled={commitText.isPending}
+              onClick={() => {
+                if (!textDrafts) return;
+                const patch: Record<string, string | null> = {};
+                const revert: Record<string, string | null> = {};
+                for (const key of ['title', 'x_label', 'y_label'] as const) {
+                  if (textDrafts[key].trim() !== optionText(key).trim()) {
+                    patch[key] = textDrafts[key].trim();
+                    const raw = effOptions[key];
+                    // Undo restores set values verbatim; unset stays unset
+                    // (null deletes the key — '' would blank the label).
+                    revert[key] = typeof raw === 'string' ? raw : null;
+                  }
+                }
+                if (!Object.keys(patch).length) return;
+                commitText.mutate({
+                  patch,
+                  note: `Canvas '${canvasName}': edit ${Object.keys(patch).join(', ')}`,
+                  revert,
+                });
+              }}
+            >
+              {commitText.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+              Apply text
+            </Button>
+          )}
+        </div>
+      )}
+
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-medium text-muted-foreground">Colors</span>
       </div>
 
       {!loading && !canEdit && (

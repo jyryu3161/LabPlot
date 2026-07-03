@@ -380,6 +380,39 @@ tryCatch({{
       if (length(.keys)) .obj$legend_keys <- .keys
     }}
   }}, error = function(e) {{}})
+  # ---- NEW: element hit boxes — title/labels/axis strips for click-to-edit ----
+  # Viewport names are built from the MAIN gtable's layout cells (name + t-l-b-r)
+  # so a legend's internal "title" cell can never be confused with the plot
+  # title. Facet axis strips (axis-b-1-1, ...) union into one bbox per side.
+  # Zero-height boxes (e.g. no title set) are still emitted: y marks where the
+  # element WOULD render, which the editor uses for its "add title" band.
+  tryCatch({{
+    .cells <- .gt$layout
+    .cell_box <- function(pat) {{
+      .rows <- .cells[grepl(pat, .cells$name), , drop = FALSE]
+      if (!nrow(.rows)) return(NULL)
+      .b <- NULL
+      for (.k in seq_len(nrow(.rows))) {{
+        # gtable viewport names are name.t-r-b-l (NOT t-l-b-r) — verified
+        # empirically: layout t=3,l=7,b=3,r=15 -> viewport "title.3-15-3-7".
+        # Order only matters for column-spanning cells (facet titles/xlab).
+        .vn <- paste0(.rows$name[.k], ".", .rows$t[.k], "-", .rows$r[.k], "-", .rows$b[.k], "-", .rows$l[.k])
+        .bb <- tryCatch({{ grid::seekViewport(.vn); .vp_box() }}, error = function(e) NULL)
+        if (is.null(.bb)) next
+        if (is.null(.b)) .b <- .bb else {{
+          .b$x0 <- min(.b$x0, .bb$x0); .b$x1 <- max(.b$x1, .bb$x1)
+          .b$y0 <- min(.b$y0, .bb$y0); .b$y1 <- max(.b$y1, .bb$y1)
+        }}
+      }}
+      .b
+    }}
+    .bx <- .cell_box("^title$");    if (!is.null(.bx)) .obj$title_px <- .bx
+    .bx <- .cell_box("^subtitle$"); if (!is.null(.bx)) .obj$subtitle_px <- .bx
+    .bx <- .cell_box("^xlab-b");    if (!is.null(.bx)) .obj$xlab_px <- .bx
+    .bx <- .cell_box("^ylab-l");    if (!is.null(.bx)) .obj$ylab_px <- .bx
+    .bx <- .cell_box("^axis-b");    if (!is.null(.bx)) .obj$x_axis_px <- .bx
+    .bx <- .cell_box("^axis-l");    if (!is.null(.bx)) .obj$y_axis_px <- .bx
+  }}, error = function(e) {{}})
   grDevices::dev.off()
   # ---- NEW: layer_geom — bounded per-layer data-space geometry for hit-testing ----
   tryCatch({{

@@ -8,7 +8,7 @@ import Konva from 'konva';
 import { Stage, Layer, Rect, Group, Image as KonvaImage, Text, Transformer, Line } from 'react-konva';
 import {
   getCanvas, updateCanvas, addCanvasPanel, updateCanvasPanel, deleteCanvasPanel, renderCanvasPreview,
-  downloadCanvasExport,
+  downloadCanvasExport, duplicateFigure,
 } from '@/lib/api';
 import type { CanvasDetail, CanvasPanel, FigureListItem } from '@/lib/types';
 import { Button } from '@/components/ui/button';
@@ -751,9 +751,25 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   function clampPosMm(pos: number, panelMm: number, canvasMm: number): number {
     return roundMm(Math.max(0, Math.min(pos, canvasMm - panelMm)));
   }
-  function handlePick(fig: FigureListItem) {
+  async function handlePick(fig: FigureListItem, opts: { copy: boolean }) {
     setPickerOpen(false);
     if (!canvas) return;
+    let figureId = fig.id;
+    if (opts.copy) {
+      // Canvas-only copy (grilling Q1-b): duplicate the figure and place the
+      // copy — edits inside this canvas never touch the original figure or
+      // other canvases that reference it.
+      const copying = toast.loading('Copying figure…');
+      try {
+        const dup = await duplicateFigure(fig.id);
+        figureId = dup.id;
+        toast.dismiss(copying);
+      } catch {
+        toast.dismiss(copying);
+        toast.error('Could not copy the figure');
+        return;
+      }
+    }
     const { width_mm, height_mm } = fig.native_width_mm && fig.native_height_mm
       ? fitToCanvasMm(fig.native_width_mm, fig.native_height_mm)
       : { width_mm: 60, height_mm: 45 };
@@ -763,7 +779,7 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     const y_mm = clampPosMm(10 + (n % 4) * 8, height_mm, canvas.height_mm);
     addPanel.mutate({
       data: {
-        figure_id: fig.id,
+        figure_id: figureId,
         x_mm: roundMm(x_mm),
         y_mm: roundMm(y_mm),
         width_mm,

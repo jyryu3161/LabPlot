@@ -175,6 +175,11 @@ def _render_preview_ref(db: Session, owner_id: uuid.UUID, req: PreviewRenderRequ
             "style_preset": preset,
             "w_mm": round(w_mm, 2),
             "h_mm": round(h_mm, 2),
+            # Sidecar schema version: bump when layout_export gains keys, so
+            # cached previews from older renderer builds (whose .layout.json
+            # lacks the new hit boxes) stop being served. v3 = U4 element
+            # boxes with the corrected t-r-b-l viewport-name order.
+            "sidecar_v": 3,
         },
         sort_keys=True,
         default=str,

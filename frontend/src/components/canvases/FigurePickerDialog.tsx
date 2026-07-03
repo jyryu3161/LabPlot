@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { listFigures } from '@/lib/api';
 import type { FigureListItem } from '@/lib/types';
@@ -20,9 +20,16 @@ export function FigurePickerDialog({
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onPick: (figure: FigureListItem) => void;
+  onPick: (figure: FigureListItem, opts: { copy: boolean }) => void;
 }) {
   const [query, setQuery] = useState('');
+  // "Canvas-only copy": duplicate the figure and place the copy, so edits made
+  // inside this canvas never propagate to the original (or other canvases).
+  // Reset when the dialog closes — a sticky checkbox would surprise on reopen.
+  const [copy, setCopy] = useState(false);
+  useEffect(() => {
+    if (!open) setCopy(false);
+  }, [open]);
   const { data: figures, isLoading } = useQuery({
     queryKey: ['figures', 'all'],
     queryFn: () => listFigures(),
@@ -49,6 +56,15 @@ export function FigurePickerDialog({
           onChange={(e) => setQuery(e.target.value)}
           aria-label="Search figures"
         />
+        <label className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+          {/* Accessible name comes from the wrapping label text (WCAG 2.5.3). */}
+          <input
+            type="checkbox"
+            checked={copy}
+            onChange={(e) => setCopy(e.target.checked)}
+          />
+          Add as a canvas-only copy — edits in this canvas won’t change the original figure
+        </label>
         <div className="max-h-[55vh] overflow-y-auto">
           {isLoading ? (
             <div className="py-12 text-center text-muted-foreground">
@@ -64,7 +80,7 @@ export function FigurePickerDialog({
                 <button
                   key={fig.id}
                   type="button"
-                  onClick={() => onPick(fig)}
+                  onClick={() => onPick(fig, { copy })}
                   className="group flex flex-col overflow-hidden rounded-lg border bg-card text-left transition hover:border-primary hover:shadow-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 >
                   <div className="flex aspect-[4/3] items-center justify-center bg-white">
