@@ -391,7 +391,18 @@ tryCatch({{
     .cell_box <- function(pat) {{
       .rows <- .cells[grepl(pat, .cells$name), , drop = FALSE]
       if (!nrow(.rows)) return(NULL)
-      .b <- NULL
+      # Two accumulators: prefer the union of NON-degenerate cells. Faceted
+      # gtables contain zero-size interior axis cells (axis-b-1-1 at panel
+      # boundaries) whose naive union engulfs whole panel rows/columns; the
+      # zero-size union is kept only as a fallback so absent title/subtitle
+      # still yield their "add here" band position.
+      .merge <- function(.a, .bb) {{
+        if (is.null(.a)) return(.bb)
+        .a$x0 <- min(.a$x0, .bb$x0); .a$x1 <- max(.a$x1, .bb$x1)
+        .a$y0 <- min(.a$y0, .bb$y0); .a$y1 <- max(.a$y1, .bb$y1)
+        .a
+      }}
+      .b <- NULL; .bz <- NULL
       for (.k in seq_len(nrow(.rows))) {{
         # gtable viewport names are name.t-r-b-l (NOT t-l-b-r) — verified
         # empirically: layout t=3,l=7,b=3,r=15 -> viewport "title.3-15-3-7".
@@ -399,12 +410,10 @@ tryCatch({{
         .vn <- paste0(.rows$name[.k], ".", .rows$t[.k], "-", .rows$r[.k], "-", .rows$b[.k], "-", .rows$l[.k])
         .bb <- tryCatch({{ grid::seekViewport(.vn); .vp_box() }}, error = function(e) NULL)
         if (is.null(.bb)) next
-        if (is.null(.b)) .b <- .bb else {{
-          .b$x0 <- min(.b$x0, .bb$x0); .b$x1 <- max(.b$x1, .bb$x1)
-          .b$y0 <- min(.b$y0, .bb$y0); .b$y1 <- max(.b$y1, .bb$y1)
-        }}
+        if ((.bb$x1 - .bb$x0) > 0 && (.bb$y1 - .bb$y0) > 0) .b <- .merge(.b, .bb)
+        .bz <- .merge(.bz, .bb)
       }}
-      .b
+      if (!is.null(.b)) .b else .bz
     }}
     .bx <- .cell_box("^title$");    if (!is.null(.bx)) .obj$title_px <- .bx
     .bx <- .cell_box("^subtitle$"); if (!is.null(.bx)) .obj$subtitle_px <- .bx

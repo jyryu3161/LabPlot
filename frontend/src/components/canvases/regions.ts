@@ -54,7 +54,13 @@ export function textRegionBoxes(layout: Record<string, unknown> | null | undefin
  */
 export function regionCssRect(box: Box, imgPx: { w: number; h: number }): {
   left: string; top: string; width: string; height: string; minHeight: number; minWidth: number;
+  transform?: string;
 } {
+  // A zero-height box (unset title) marks the boundary where the element WOULD
+  // render — the element itself would occupy space ABOVE it (the margin), so
+  // anchor the inflated click band upward. Anchoring downward would cover the
+  // top strip of the plot panel and swallow series/legend clicks there.
+  const degenerateH = box.y1 - box.y0 < 2;
   return {
     left: `${(box.x0 / imgPx.w) * 100}%`,
     top: `${(box.y0 / imgPx.h) * 100}%`,
@@ -63,5 +69,6 @@ export function regionCssRect(box: Box, imgPx: { w: number; h: number }): {
     // Degenerate boxes stay clickable: zero-height title band / thin ylab strip.
     minHeight: 14,
     minWidth: 14,
+    ...(degenerateH ? { transform: 'translateY(-100%)' } : {}),
   };
 }
