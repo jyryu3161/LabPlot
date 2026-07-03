@@ -20,14 +20,16 @@ import {
 } from '@/components/ui/dropdown-menu';
 import {
   Loader2, Plus, Trash2, ArrowUp, ArrowDown, Maximize2, ZoomIn, ZoomOut, Lock, Unlock, Tag, Pencil, Check,
-  Download,
+  Download, Undo2, Redo2,
 } from 'lucide-react';
 import {
   mmToPx, pxToMm, roundMm, fitPxPerMm, clampCanvasMm, clampPanelMm, PANEL_MM_MIN,
 } from './mm';
+import { CanvasHistory, type PanelFields, type PanelSnapshot, type CanvasSize } from './canvasHistory';
 import { FigurePickerDialog } from './FigurePickerDialog';
 import { CanvasColorEditor } from './CanvasColorEditor';
 import { CanvasApplyStyle } from './CanvasApplyStyle';
+import { CanvasHelpPopover, CanvasHintsBar } from './CanvasHints';
 
 // ── panel figure image cache ────────────────────────────────────────────────
 // Keyed by (figure_id, version_id, round(w_mm), round(h_mm)) per design §3/§4:
@@ -175,6 +177,21 @@ function CanvasPanelNode({
 const SNAP_PX = 6; // screen-space snap threshold
 const EPS_MM = 0.05; // ignore sub-tenth-mm drift (pure-click dragend, no-op transforms)
 
+function snapshotOf(panel: CanvasPanel): PanelSnapshot {
+  return {
+    panelId: panel.id,
+    figure_id: panel.figure_id,
+    x_mm: panel.x_mm,
+    y_mm: panel.y_mm,
+    width_mm: panel.width_mm,
+    height_mm: panel.height_mm,
+    z_order: panel.z_order,
+    label: panel.label ?? null,
+    label_visible: panel.label_visible,
+    pinned_version_id: panel.pinned_version_id ?? null,
+  };
+}
+
 function nextLabel(panels: CanvasPanel[]): string {
   const used = new Set(panels.map((p) => (p.label ?? '').toUpperCase()).filter(Boolean));
   for (let i = 0; i < 26; i++) {
@@ -206,6 +223,18 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   const [renamingCanvas, setRenamingCanvas] = useState(false);
   const [nameDraft, setNameDraft] = useState('');
   const [sizeDraft, setSizeDraft] = useState<{ w: string; h: string }>({ w: '', h: '' });
+
+  // ── undo/redo history (inverse ops; edits are already persisted server-side) ──
+  const [, bumpHistory] = useState(0); // re-render when canUndo/canRedo change
+  const historyRef = useRef<CanvasHistory | null>(null);
+  if (historyRef.current === null) historyRef.current = new CanvasHistory(() => bumpHistory((v) => v + 1));
+  const history = historyRef.current;
+  const [applyingHistory, setApplyingHistory] = useState(false);
+  // Original label captured on focus: keystrokes patch the local cache, so by
+  // blur time the cache already holds the draft — the true "before" lives here.
+  const labelEditStart = useRef<string | null>(null);
+  // Stable indirection so the keydown effect doesn't need applyHistory in deps.
+  const applyHistoryRef = useRef<(direction: 'undo' | 'redo') => void>(() => {});
 
   const trRef = useRef<Konva.Transformer>(null);
   const nodeRefs = useRef<Map<string, Konva.Group>>(new Map());
@@ -265,18 +294,32 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     tr.getLayer()?.batchDraw();
   }, [selectedId, panels, view.zoom]);
 
-  // ── keyboard: delete / escape ──
+  // ── keyboard: undo/redo, delete, escape ──
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (!selectedId) return;
+      // Never hijack keys while the user is typing in a form control.
       const el = document.activeElement as HTMLElement | null;
       const tag = el?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el?.isContentEditable) return;
+      const mod = e.metaKey || e.ctrlKey;
+      if (mod && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        applyHistoryRef.current(e.shiftKey ? 'redo' : 'undo');
+        return;
+      }
+      if (mod && e.key.toLowerCase() === 'y') {
+        e.preventDefault();
+        applyHistoryRef.current('redo');
+        return;
+      }
+      if (!selectedId) return;
       if (e.key === 'Delete' || e.key === 'Backspace') {
         e.preventDefault();
         // Guard the keyboard shortcut — a stray Delete/Backspace shouldn't
-        // silently drop a panel (there is no undo in the canvas editor).
-        if (window.confirm('Remove this panel from the canvas?')) removePanel.mutate(selectedId);
+        // silently drop a panel. (History-applied deletes skip this confirm.)
+        if (window.confirm('Remove this panel from the canvas?')) {
+          removePanel.mutate({ panelId: selectedId, record: true });
+        }
       } else if (e.key === 'Escape') {
         setSelectedId(null);
       }
@@ -297,9 +340,17 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   );
 
   // ── mutations ──
+  // Recording model: user-initiated call sites pass a `history` payload (the
+  // known BEFORE values) / `record: true`, and the op is recorded in onSuccess
+  // — i.e. only once the server accepted the edit. Undo/redo application calls
+  // the SAME mutations but omits the payload, so nothing is re-recorded (and
+  // CanvasHistory.record() additionally no-ops while `isApplying`).
   const patchPanel = useMutation({
-    mutationFn: ({ panelId, data }: { panelId: string; data: Parameters<typeof updateCanvasPanel>[2] }) =>
-      updateCanvasPanel(canvasId, panelId, data),
+    mutationFn: ({ panelId, data }: {
+      panelId: string;
+      data: Parameters<typeof updateCanvasPanel>[2];
+      history?: { before: PanelFields; label: string };
+    }) => updateCanvasPanel(canvasId, panelId, data),
     onMutate: async ({ panelId, data }) => {
       await qc.cancelQueries({ queryKey });
       const prev = qc.getQueryData<CanvasDetail>(queryKey);
@@ -310,47 +361,144 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
       if (ctx?.prev) qc.setQueryData(queryKey, ctx.prev);
       toast.error('Could not update panel');
     },
-    onSuccess: (updated) => {
+    onSuccess: (updated, vars) => {
       qc.setQueryData<CanvasDetail>(queryKey, (old) =>
         old ? { ...old, panels: old.panels.map((p) => (p.id === updated.id ? updated : p)) } : old,
       );
+      if (vars.history) {
+        historyRef.current?.record({
+          type: 'panel-update',
+          panelId: vars.panelId,
+          before: vars.history.before,
+          after: vars.data as PanelFields,
+          label: vars.history.label,
+        });
+      }
     },
   });
 
   const addPanel = useMutation({
-    mutationFn: (data: Parameters<typeof addCanvasPanel>[1]) => addCanvasPanel(canvasId, data),
-    onSuccess: (panel) => {
+    mutationFn: ({ data }: { data: Parameters<typeof addCanvasPanel>[1]; record?: boolean }) =>
+      addCanvasPanel(canvasId, data),
+    onSuccess: (panel, vars) => {
       qc.setQueryData<CanvasDetail>(queryKey, (old) =>
         old ? { ...old, panels: [...old.panels, panel] } : old,
       );
       setSelectedId(panel.id);
+      if (vars.record) {
+        historyRef.current?.record({ type: 'panel-add', snapshot: snapshotOf(panel), label: 'add panel' });
+      }
     },
     onError: () => toast.error('Could not add figure'),
   });
 
   const removePanel = useMutation({
-    mutationFn: (panelId: string) => deleteCanvasPanel(canvasId, panelId),
-    onMutate: async (panelId) => {
+    mutationFn: ({ panelId }: { panelId: string; record?: boolean }) => deleteCanvasPanel(canvasId, panelId),
+    onMutate: async ({ panelId }) => {
       await qc.cancelQueries({ queryKey });
       const prev = qc.getQueryData<CanvasDetail>(queryKey);
+      const removed = prev?.panels.find((p) => p.id === panelId) ?? null;
       qc.setQueryData<CanvasDetail>(queryKey, (old) =>
         old ? { ...old, panels: old.panels.filter((p) => p.id !== panelId) } : old,
       );
       setSelectedId((cur) => (cur === panelId ? null : cur));
-      return { prev };
+      return { prev, removed };
     },
     onError: (_e, _v, ctx) => {
       if (ctx?.prev) qc.setQueryData(queryKey, ctx.prev);
       toast.error('Could not delete panel');
     },
+    onSuccess: (_res, vars, ctx) => {
+      if (vars.record && ctx?.removed) {
+        historyRef.current?.record({ type: 'panel-delete', snapshot: snapshotOf(ctx.removed), label: 'delete panel' });
+      }
+    },
   });
 
   const patchCanvas = useMutation({
-    mutationFn: (data: Parameters<typeof updateCanvas>[1]) => updateCanvas(canvasId, data),
-    onSuccess: (updated) => {
+    mutationFn: ({ data }: {
+      data: Parameters<typeof updateCanvas>[1];
+      history?: { before: CanvasSize; after: CanvasSize };
+    }) => updateCanvas(canvasId, data),
+    onSuccess: (updated, vars) => {
       qc.setQueryData<CanvasDetail>(queryKey, (old) => (old ? { ...old, ...updated } : updated));
+      if (vars.history) {
+        historyRef.current?.record({
+          type: 'canvas-size',
+          before: vars.history.before,
+          after: vars.history.after,
+          label: 'canvas size',
+        });
+      }
     },
     onError: () => toast.error('Could not update canvas'),
+  });
+
+  // ── undo/redo application ──
+  // Re-create a deleted panel from its snapshot via the same addCanvasPanel
+  // mutation (record omitted → not re-recorded), then remap the snapshot's old
+  // id to the new server id so later history entries keep resolving.
+  async function recreatePanel(snap: PanelSnapshot) {
+    const created = await addPanel.mutateAsync({
+      data: {
+        figure_id: snap.figure_id,
+        x_mm: snap.x_mm,
+        y_mm: snap.y_mm,
+        width_mm: snap.width_mm,
+        height_mm: snap.height_mm,
+        z_order: snap.z_order,
+        label: snap.label ?? undefined,
+        pinned_version_id: snap.pinned_version_id ?? undefined,
+      },
+    });
+    history.remap(snap.panelId, created.id);
+    // addCanvasPanel cannot set label_visible — patch it if it differs.
+    if (created.label_visible !== snap.label_visible) {
+      await patchPanel.mutateAsync({ panelId: created.id, data: { label_visible: snap.label_visible } });
+    }
+  }
+
+  async function applyHistory(direction: 'undo' | 'redo') {
+    if (history.isApplying || applyingHistory) return;
+    const op = direction === 'undo' ? history.undo() : history.redo();
+    if (!op) return;
+    history.beginApply();
+    setApplyingHistory(true);
+    try {
+      switch (op.type) {
+        case 'panel-update': {
+          const fields = direction === 'undo' ? op.before : op.after;
+          await patchPanel.mutateAsync({ panelId: history.mapId(op.panelId), data: fields });
+          break;
+        }
+        case 'panel-add': {
+          // History-applied delete: intentionally NO window.confirm.
+          if (direction === 'undo') await removePanel.mutateAsync({ panelId: history.mapId(op.snapshot.panelId) });
+          else await recreatePanel(op.snapshot);
+          break;
+        }
+        case 'panel-delete': {
+          if (direction === 'undo') await recreatePanel(op.snapshot);
+          else await removePanel.mutateAsync({ panelId: history.mapId(op.snapshot.panelId) });
+          break;
+        }
+        case 'canvas-size': {
+          await patchCanvas.mutateAsync({ data: direction === 'undo' ? op.before : op.after });
+          break;
+        }
+      }
+      toast.success(`${direction === 'undo' ? 'Undid' : 'Redid'} ${op.label}`);
+    } catch {
+      // The mutation already showed its own error toast and rolled back the
+      // optimistic cache; put the op back so the user can retry.
+      history.rollback(direction);
+    } finally {
+      history.endApply();
+      setApplyingHistory(false);
+    }
+  }
+  useEffect(() => {
+    applyHistoryRef.current = applyHistory;
   });
 
   // ── export: compose the canvas into a vector file (SVG/PDF) and download it. ──
@@ -408,9 +556,16 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     const node = e.target as Konva.Group;
     const x_mm = roundMm(clampCanvasMm(pxToMm(node.x(), pxPerMm)));
     const y_mm = roundMm(clampCanvasMm(pxToMm(node.y(), pxPerMm)));
-    // Ignore a pure click (no meaningful move) — avoids a redundant PATCH.
+    // Ignore a pure click (no meaningful move) — avoids a redundant PATCH
+    // (and thus records no history entry for pure clicks).
     if (Math.abs(x_mm - panel.x_mm) < EPS_MM && Math.abs(y_mm - panel.y_mm) < EPS_MM) return;
-    patchPanel.mutate({ panelId: panel.id, data: { x_mm, y_mm } }); // position only → no re-render
+    // One history entry per gesture: `panel` still holds start-of-gesture mm
+    // (the cache is only patched on commit), so it IS the "before".
+    patchPanel.mutate({
+      panelId: panel.id,
+      data: { x_mm, y_mm }, // position only → no re-render
+      history: { before: { x_mm: panel.x_mm, y_mm: panel.y_mm }, label: 'move' },
+    });
   }
 
   // ── resize = RE-LAYOUT: reset the transient Konva scale, commit new mm; the
@@ -438,19 +593,35 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     // Commit new physical size (+ position). Updating width_mm/height_mm changes
     // the panel image key → usePanelImage calls renderCanvasPreview at the NEW mm
     // size and swaps in a freshly laid-out render (absolute-pt fonts preserved).
-    patchPanel.mutate({ panelId: panel.id, data: { x_mm, y_mm, width_mm, height_mm } });
+    // One history entry per resize gesture (before = start-of-gesture geometry).
+    patchPanel.mutate({
+      panelId: panel.id,
+      data: { x_mm, y_mm, width_mm, height_mm },
+      history: {
+        before: { x_mm: panel.x_mm, y_mm: panel.y_mm, width_mm: panel.width_mm, height_mm: panel.height_mm },
+        label: 'resize',
+      },
+    });
   }
 
   // ── z-order ──
   function bringForward(panel: CanvasPanel) {
     const maxZ = Math.max(0, ...panels.map((p) => p.z_order));
     if (panel.z_order >= maxZ && panels[panels.length - 1]?.id === panel.id) return;
-    patchPanel.mutate({ panelId: panel.id, data: { z_order: maxZ + 1 } });
+    patchPanel.mutate({
+      panelId: panel.id,
+      data: { z_order: maxZ + 1 },
+      history: { before: { z_order: panel.z_order }, label: 'reorder' },
+    });
   }
   function sendBack(panel: CanvasPanel) {
     const minZ = Math.min(0, ...panels.map((p) => p.z_order));
     if (panel.z_order <= minZ && panels[0]?.id === panel.id) return;
-    patchPanel.mutate({ panelId: panel.id, data: { z_order: minZ - 1 } });
+    patchPanel.mutate({
+      panelId: panel.id,
+      data: { z_order: minZ - 1 },
+      history: { before: { z_order: panel.z_order }, label: 'reorder' },
+    });
   }
 
   // ── add figure ──
@@ -464,13 +635,16 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     const x_mm = clampCanvasMm(Math.min(10 + (n % 4) * 8, Math.max(0, canvas.width_mm - DEFAULT_W)));
     const y_mm = clampCanvasMm(Math.min(10 + (n % 4) * 8, Math.max(0, canvas.height_mm - DEFAULT_H)));
     addPanel.mutate({
-      figure_id: fig.id,
-      x_mm: roundMm(x_mm),
-      y_mm: roundMm(y_mm),
-      width_mm: DEFAULT_W,
-      height_mm: DEFAULT_H,
-      z_order: (Math.max(0, ...panels.map((p) => p.z_order)) || 0) + 1,
-      label: nextLabel(panels),
+      data: {
+        figure_id: fig.id,
+        x_mm: roundMm(x_mm),
+        y_mm: roundMm(y_mm),
+        width_mm: DEFAULT_W,
+        height_mm: DEFAULT_H,
+        z_order: (Math.max(0, ...panels.map((p) => p.z_order)) || 0) + 1,
+        label: nextLabel(panels),
+      },
+      record: true,
     });
   }
 
@@ -521,7 +695,7 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   function commitRename() {
     const name = nameDraft.trim();
     setRenamingCanvas(false);
-    if (name && name !== canvas?.name) patchCanvas.mutate({ name });
+    if (name && name !== canvas?.name) patchCanvas.mutate({ data: { name } });
   }
   function commitSize() {
     if (!canvas) return;
@@ -529,7 +703,11 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     const height_mm = clampCanvasMm(Number(sizeDraft.h));
     if (!Number.isFinite(width_mm) || !Number.isFinite(height_mm)) return;
     if (width_mm === canvas.width_mm && height_mm === canvas.height_mm) return;
-    patchCanvas.mutate({ width_mm: roundMm(width_mm), height_mm: roundMm(height_mm) });
+    const after = { width_mm: roundMm(width_mm), height_mm: roundMm(height_mm) };
+    patchCanvas.mutate({
+      data: after,
+      history: { before: { width_mm: canvas.width_mm, height_mm: canvas.height_mm }, after },
+    });
   }
   useEffect(() => {
     if (canvas) setSizeDraft({ w: String(roundMm(canvas.width_mm)), h: String(roundMm(canvas.height_mm)) });
@@ -617,12 +795,44 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
             <span className="text-xs text-muted-foreground">mm</span>
           </div>
           <div className="flex items-center gap-0.5">
-            <Button type="button" size="icon-sm" variant="outline" onClick={() => zoomBy(1 / 1.2)} aria-label="Zoom out"><ZoomOut className="h-4 w-4" /></Button>
-            <span className="w-12 text-center text-xs tabular-nums text-muted-foreground">{Math.round(view.zoom * 100)}%</span>
-            <Button type="button" size="icon-sm" variant="outline" onClick={() => zoomBy(1.2)} aria-label="Zoom in"><ZoomIn className="h-4 w-4" /></Button>
-            <Button type="button" size="icon-sm" variant="outline" onClick={fitView} aria-label="Fit to view"><Maximize2 className="h-4 w-4" /></Button>
+            <Button
+              type="button"
+              size="icon-sm"
+              variant="outline"
+              onClick={() => applyHistory('undo')}
+              disabled={!history.canUndo || applyingHistory}
+              aria-label="Undo"
+              title="Undo (Ctrl/Cmd+Z)"
+            >
+              <Undo2 className="h-4 w-4" />
+            </Button>
+            <Button
+              type="button"
+              size="icon-sm"
+              variant="outline"
+              onClick={() => applyHistory('redo')}
+              disabled={!history.canRedo || applyingHistory}
+              aria-label="Redo"
+              title="Redo (Ctrl/Cmd+Shift+Z)"
+            >
+              <Redo2 className="h-4 w-4" />
+            </Button>
           </div>
-          <CanvasApplyStyle canvasId={canvasId} panels={panels} />
+          <div className="flex items-center gap-0.5">
+            <Button type="button" size="icon-sm" variant="outline" onClick={() => zoomBy(1 / 1.2)} aria-label="Zoom out" title="Zoom out"><ZoomOut className="h-4 w-4" /></Button>
+            <span className="w-12 text-center text-xs tabular-nums text-muted-foreground">{Math.round(view.zoom * 100)}%</span>
+            <Button type="button" size="icon-sm" variant="outline" onClick={() => zoomBy(1.2)} aria-label="Zoom in" title="Zoom in"><ZoomIn className="h-4 w-4" /></Button>
+            <Button type="button" size="icon-sm" variant="outline" onClick={fitView} aria-label="Fit to view" title="Fit the whole canvas in the viewport"><Maximize2 className="h-4 w-4" /></Button>
+          </div>
+          {/* Tooltip wrapper: the style-source select inside has no title of its
+              own (the Apply button does), and this file may not edit CanvasApplyStyle. */}
+          <span
+            className="inline-flex items-center"
+            title="Copy one panel's figure style to all other panels (creates new figure versions)"
+          >
+            <CanvasApplyStyle canvasId={canvasId} panels={panels} />
+          </span>
+          <CanvasHelpPopover />
           <DropdownMenu>
             <DropdownMenuTrigger
               render={
@@ -665,8 +875,19 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
               className="h-6 w-14 text-xs"
               maxLength={8}
               value={selectedPanel.label ?? ''}
+              onFocus={() => { labelEditStart.current = selectedPanel.label ?? null; }}
               onChange={(e) => patchLocalPanel(selectedPanel.id, { label: e.target.value })}
-              onBlur={(e) => patchPanel.mutate({ panelId: selectedPanel.id, data: { label: e.target.value.trim() || null } })}
+              onBlur={(e) => {
+                const label = e.target.value.trim() || null;
+                const before = labelEditStart.current;
+                patchPanel.mutate({
+                  panelId: selectedPanel.id,
+                  data: { label },
+                  // Keystrokes patched the local cache, so the true before was
+                  // captured on focus. Only record when the label changed.
+                  history: label !== before ? { before: { label: before }, label: 'label' } : undefined,
+                });
+              }}
               onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
               aria-label="Panel label"
               placeholder="A"
@@ -674,26 +895,33 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
             <span className="flex items-center gap-1 text-xs text-muted-foreground">
               <Switch
                 checked={selectedPanel.label_visible}
-                onCheckedChange={(v) => patchPanel.mutate({ panelId: selectedPanel.id, data: { label_visible: v } })}
+                onCheckedChange={(v) => patchPanel.mutate({
+                  panelId: selectedPanel.id,
+                  data: { label_visible: v },
+                  history: { before: { label_visible: selectedPanel.label_visible }, label: 'label visibility' },
+                })}
                 aria-label="Toggle label visibility"
               />
               label
             </span>
           </span>
-          <Button type="button" size="xs" variant="outline" onClick={() => bringForward(selectedPanel)}>
+          <Button type="button" size="xs" variant="outline" onClick={() => bringForward(selectedPanel)} title="Bring this panel in front of overlapping panels">
             <ArrowUp className="h-3.5 w-3.5" /> Forward
           </Button>
-          <Button type="button" size="xs" variant="outline" onClick={() => sendBack(selectedPanel)}>
+          <Button type="button" size="xs" variant="outline" onClick={() => sendBack(selectedPanel)} title="Send this panel behind overlapping panels">
             <ArrowDown className="h-3.5 w-3.5" /> Back
           </Button>
-          <Button type="button" size="xs" variant={lockAspect ? 'default' : 'outline'} onClick={() => setLockAspect((v) => !v)}>
+          <Button type="button" size="xs" variant={lockAspect ? 'default' : 'outline'} onClick={() => setLockAspect((v) => !v)} title="Keep the aspect ratio while resizing from a corner">
             {lockAspect ? <Lock className="h-3.5 w-3.5" /> : <Unlock className="h-3.5 w-3.5" />} Aspect
           </Button>
-          <Button type="button" size="xs" variant="ghost" className="text-destructive" onClick={() => { if (window.confirm('Remove this panel from the canvas?')) removePanel.mutate(selectedPanel.id); }}>
+          <Button type="button" size="xs" variant="ghost" className="text-destructive" title="Remove this panel from the canvas" onClick={() => { if (window.confirm('Remove this panel from the canvas?')) removePanel.mutate({ panelId: selectedPanel.id, record: true }); }}>
             <Trash2 className="h-3.5 w-3.5" /> Delete
           </Button>
         </div>
       )}
+
+      {/* one-time gesture hints (empty canvases are guided by the empty state) */}
+      <CanvasHintsBar show={panels.length > 0} />
 
       {/* stage + color editor sidebar */}
       <div className="flex flex-1 overflow-hidden" style={{ minHeight: 480 }}>
