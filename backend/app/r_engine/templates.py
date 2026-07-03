@@ -1528,22 +1528,41 @@ def _post_layers(plot_type: str, m, o) -> str:
     """Shared post-build layers appended after `p` exists, before the theme."""
     if plot_type not in _UNIVERSAL_TYPES:
         return ""
-    has_y2 = isinstance(o.get("y2_column"), str) and bool(o.get("y2_column").strip())
     out = ""
     out += _data_labels_layer(plot_type, m, o)
     out += _annotations_layer(o)
+    # Single source of truth with the canvas axis popover's capability flags:
+    # scale_editable_axes IS the gate (it was inlined here; duplicated copies
+    # would silently drift — reviewer-confirmed risk).
+    _editable = scale_editable_axes(plot_type, m, o)
+    for axis in ("x", "y"):
+        if _editable[axis]:
+            out += _axis_scale_layer(o, axis)
+    out += _series_styles_layer(plot_type, m, o)
+    out += _axis_break_layer(o)
+    return out
+
+
+def scale_editable_axes(plot_type: str, mapping: dict, options: dict) -> dict:
+    """Whether _post_layers will emit a scale_*_continuous layer per aesthetic —
+    i.e. whether x_breaks/x_tick_format/reverse_x (or the y_* twins) have ANY
+    effect for this figure. Mirrors the _post_layers gate exactly. Consumed by
+    the canvas axis popover so it never offers provably-dead controls (a
+    committed dead option burns a full render + FigureVersion silently)."""
+    o = options or {}
+    m = mapping or {}
+    has_y2 = isinstance(o.get("y2_column"), str) and bool(o.get("y2_column").strip())
+    out = {"x": False, "y": False}
     for axis in _AXIS_CONT.get(plot_type, ()):
         if axis == "x" and o.get("log_x"):
             continue
         if axis == "y" and o.get("log_y"):
             continue
         if axis == "x" and _x_is_temporal(plot_type, m, o):
-            continue  # temporal x owns its own scale_x_date/datetime
+            continue
         if axis == "y" and plot_type in ("scatter", "line") and has_y2:
             continue
-        out += _axis_scale_layer(o, axis)
-    out += _series_styles_layer(plot_type, m, o)
-    out += _axis_break_layer(o)
+        out[axis] = True
     return out
 
 

@@ -28,6 +28,7 @@ function numText(v: unknown): string {
 export function CanvasAxisPopover({
   aesthetic,
   discrete,
+  scaleEditable,
   showAngle,
   options,
   pending,
@@ -36,6 +37,10 @@ export function CanvasAxisPopover({
 }: {
   aesthetic: 'x' | 'y';
   discrete: boolean;
+  /** Backend emits a tick/format/reverse scale layer for this aesthetic —
+   *  false for e.g. line-plot x or temporal axes, where those options are
+   *  provably inert (committing them would burn a render for no change). */
+  scaleEditable: boolean;
   showAngle: boolean;
   options: Record<string, unknown>;
   pending: boolean;
@@ -80,22 +85,34 @@ export function CanvasAxisPopover({
     if (!discrete) {
       setNum(k('min'), min, options[k('min')]);
       setNum(k('max'), max, options[k('max')]);
-      setNum(k('breaks'), breaks, options[k('breaks')]);
-      const prevFormat = typeof options[k('tick_format')] === 'string' ? (options[k('tick_format')] as string) : '';
-      if (format !== prevFormat) {
-        patch[k('tick_format')] = format === '' ? null : format;
-        revert[k('tick_format')] = prevFormat === '' ? null : prevFormat;
+      // min/max (coord_cartesian) and log are universal; ticks/format/reverse
+      // only exist where the backend emits a scale layer for this aesthetic.
+      if (scaleEditable) {
+        setNum(k('breaks'), breaks, options[k('breaks')]);
+        const prevFormat = typeof options[k('tick_format')] === 'string' ? (options[k('tick_format')] as string) : '';
+        if (format !== prevFormat) {
+          patch[k('tick_format')] = format === '' ? null : format;
+          revert[k('tick_format')] = prevFormat === '' ? null : prevFormat;
+        }
+        const prevRev = Boolean(options[kPre('reverse')]);
+        if (reverse !== prevRev) {
+          patch[kPre('reverse')] = reverse;
+          revert[kPre('reverse')] = typeof options[kPre('reverse')] === 'boolean' ? (options[kPre('reverse')] as boolean) : null;
+        }
       }
       const prevLog = Boolean(options[kPre('log')]);
       if (log !== prevLog) {
         patch[kPre('log')] = log;
         revert[kPre('log')] = typeof options[kPre('log')] === 'boolean' ? (options[kPre('log')] as boolean) : null;
+        // Turning log ON kills the tick/format/reverse scale layer for this
+        // axis — drop them from the same Apply so nothing dead is committed.
+        if (log) {
+          for (const dead of [k('breaks'), k('tick_format'), kPre('reverse')]) {
+            delete patch[dead];
+            delete revert[dead];
+          }
+        }
       }
-    }
-    const prevRev = Boolean(options[kPre('reverse')]);
-    if (reverse !== prevRev) {
-      patch[kPre('reverse')] = reverse;
-      revert[kPre('reverse')] = typeof options[kPre('reverse')] === 'boolean' ? (options[kPre('reverse')] as boolean) : null;
     }
     if (showAngle) setNum('x_text_angle', angle, options.x_text_angle);
     if (Object.keys(patch).length) onApply(patch, revert);
@@ -137,33 +154,42 @@ export function CanvasAxisPopover({
             <Button type="button" size="xs" variant="outline" onClick={() => { setMin(''); setMax(''); }}>
               Auto fit
             </Button>
-            <Label className="ml-1 shrink-0 text-[11px] text-muted-foreground" htmlFor={`axis-${aesthetic}-breaks`}>Ticks</Label>
-            <Input id={`axis-${aesthetic}-breaks`} type="number" min={2} max={20} className="h-6 w-14 text-xs" placeholder="auto" value={breaks} onChange={(e) => setBreaks(e.target.value)} />
+            {scaleEditable && (
+              <>
+                <Label className="ml-1 shrink-0 text-[11px] text-muted-foreground" htmlFor={`axis-${aesthetic}-breaks`}>Ticks</Label>
+                <Input id={`axis-${aesthetic}-breaks`} type="number" min={2} max={20} className="h-6 w-14 text-xs" placeholder="auto" value={breaks} onChange={(e) => setBreaks(e.target.value)} />
+              </>
+            )}
           </div>
-          <div className="flex items-center gap-1.5">
-            <Label className="w-10 shrink-0 text-[11px] text-muted-foreground" htmlFor={`axis-${aesthetic}-format`}>Format</Label>
-            <select
-              id={`axis-${aesthetic}-format`}
-              aria-label={`${aesthetic} tick format`}
-              className="h-6 flex-1 rounded border bg-white px-1 text-xs"
-              value={format}
-              onChange={(e) => setFormat(e.target.value)}
-            >
-              <option value="">default</option>
-              {TICK_FORMATS.map((f) => <option key={f} value={f}>{f}</option>)}
-            </select>
-          </div>
+          {scaleEditable ? (
+            <div className="flex items-center gap-1.5">
+              <Label className="w-10 shrink-0 text-[11px] text-muted-foreground" htmlFor={`axis-${aesthetic}-format`}>Format</Label>
+              <select
+                id={`axis-${aesthetic}-format`}
+                aria-label={`${aesthetic} tick format`}
+                className="h-6 flex-1 rounded border bg-white px-1 text-xs"
+                value={format}
+                onChange={(e) => setFormat(e.target.value)}
+              >
+                <option value="">default</option>
+                {TICK_FORMATS.map((f) => <option key={f} value={f}>{f}</option>)}
+              </select>
+            </div>
+          ) : (
+            <p className="text-[11px] text-muted-foreground">Tick styling isn’t available for this axis type.</p>
+          )}
         </>
       )}
 
       {!discrete && (
         <div className="flex items-center gap-3">
-          {/* reverse/log are continuous-scale options — the templates' reverse
-              transform does not apply to discrete scales (verified), so the
-              checkbox would be a paid no-op there. */}
-          <label className="flex cursor-pointer items-center gap-1">
-            <input type="checkbox" checked={reverse} onChange={(e) => setReverse(e.target.checked)} /> reverse
-          </label>
+          {/* reverse rides the scale layer (dead when !scaleEditable and on
+              discrete axes — both verified paid no-ops); log is universal. */}
+          {scaleEditable && (
+            <label className="flex cursor-pointer items-center gap-1">
+              <input type="checkbox" checked={reverse} onChange={(e) => setReverse(e.target.checked)} /> reverse
+            </label>
+          )}
           <label className="flex cursor-pointer items-center gap-1">
             <input type="checkbox" checked={log} onChange={(e) => setLog(e.target.checked)} /> log scale
           </label>

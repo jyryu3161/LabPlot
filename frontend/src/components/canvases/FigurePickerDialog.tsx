@@ -17,22 +17,29 @@ export function FigurePickerDialog({
   open,
   onOpenChange,
   onPick,
+  projectId,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onPick: (figure: FigureListItem, opts: { copy: boolean }) => void;
+  /** Project-canvas scope (U3, grilling Q7-a): default the list to this
+   *  project's figures; personal figures placed on a shared canvas 404 for
+   *  collaborators, so mixing is steered against (never hard-blocked). */
+  projectId?: string | null;
 }) {
   const [query, setQuery] = useState('');
   // "Canvas-only copy": duplicate the figure and place the copy, so edits made
   // inside this canvas never propagate to the original (or other canvases).
   // Reset when the dialog closes — a sticky checkbox would surprise on reopen.
   const [copy, setCopy] = useState(false);
+  const [showAll, setShowAll] = useState(false);
   useEffect(() => {
-    if (!open) setCopy(false);
+    if (!open) { setCopy(false); setShowAll(false); }
   }, [open]);
+  const scoped = Boolean(projectId) && !showAll;
   const { data: figures, isLoading } = useQuery({
-    queryKey: ['figures', 'all'],
-    queryFn: () => listFigures(),
+    queryKey: ['figures', scoped ? projectId : 'all'],
+    queryFn: () => (scoped ? listFigures(projectId as string) : listFigures()),
     enabled: open,
   });
 
@@ -56,15 +63,27 @@ export function FigurePickerDialog({
           onChange={(e) => setQuery(e.target.value)}
           aria-label="Search figures"
         />
-        <label className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
-          {/* Accessible name comes from the wrapping label text (WCAG 2.5.3). */}
-          <input
-            type="checkbox"
-            checked={copy}
-            onChange={(e) => setCopy(e.target.checked)}
-          />
-          Add as a canvas-only copy — edits in this canvas won’t change the original figure
-        </label>
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+          <label className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+            {/* Accessible name comes from the wrapping label text (WCAG 2.5.3). */}
+            <input
+              type="checkbox"
+              checked={copy}
+              onChange={(e) => setCopy(e.target.checked)}
+            />
+            Add as a canvas-only copy — edits in this canvas won’t change the original figure
+          </label>
+          {projectId && (
+            <label className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+              <input
+                type="checkbox"
+                checked={showAll}
+                onChange={(e) => setShowAll(e.target.checked)}
+              />
+              Show all my figures (not just this project’s)
+            </label>
+          )}
+        </div>
         <div className="max-h-[55vh] overflow-y-auto">
           {isLoading ? (
             <div className="py-12 text-center text-muted-foreground">
@@ -100,6 +119,11 @@ export function FigurePickerDialog({
                   <div className="border-t px-2 py-1.5">
                     <p className="truncate text-xs font-medium" title={fig.name}>{fig.name}</p>
                     <p className="truncate text-[10px] text-muted-foreground">{fig.plot_type}</p>
+                    {projectId && showAll && fig.project_id !== projectId && (
+                      <p className="mt-0.5 truncate text-[10px] text-amber-600" title="This figure is outside the project — project collaborators won't be able to see this panel.">
+                        ⚠ Not visible to collaborators
+                      </p>
+                    )}
                   </div>
                 </button>
               ))}

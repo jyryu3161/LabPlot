@@ -8,7 +8,7 @@ import Konva from 'konva';
 import { Stage, Layer, Rect, Group, Image as KonvaImage, Text, Transformer, Line } from 'react-konva';
 import {
   getCanvas, updateCanvas, addCanvasPanel, updateCanvasPanel, deleteCanvasPanel, renderCanvasPreview,
-  downloadCanvasExport, duplicateFigure,
+  downloadCanvasExport, duplicateFigure, listProjects,
 } from '@/lib/api';
 import type { CanvasDetail, CanvasPanel, FigureListItem } from '@/lib/types';
 import { Button } from '@/components/ui/button';
@@ -20,7 +20,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import {
   Loader2, Plus, Trash2, ArrowUp, ArrowDown, Maximize2, ZoomIn, ZoomOut, Lock, Unlock, Tag, Pencil, Check,
-  Download, Undo2, Redo2, ExternalLink,
+  Download, Undo2, Redo2, ExternalLink, FlaskConical,
 } from 'lucide-react';
 import {
   mmToPx, pxToMm, roundMm, fitPxPerMm, clampCanvasMm, clampPanelMm, PANEL_MM_MIN,
@@ -30,6 +30,7 @@ import { FigurePickerDialog } from './FigurePickerDialog';
 import { CanvasColorEditor } from './CanvasColorEditor';
 import { CanvasApplyStyle } from './CanvasApplyStyle';
 import { CanvasHelpPopover, CanvasHintsBar } from './CanvasHints';
+import { useAuthContext } from '@/components/auth/AuthProvider';
 
 // ── panel figure image cache ────────────────────────────────────────────────
 // Keyed by (figure_id, version_id, round(w_mm), round(h_mm)) per design §3/§4:
@@ -241,6 +242,10 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   const qc = useQueryClient();
   const queryKey = useMemo(() => ['canvas', canvasId], [canvasId]);
   const { data: canvas, isLoading, isError } = useQuery({ queryKey, queryFn: () => getCanvas(canvasId) });
+  // Owner gate for the Move control (backend enforces too; hiding avoids
+  // showing project editors a button that can only ever 403).
+  const { user } = useAuthContext();
+  const isOwner = Boolean(user && canvas && user.id === canvas.owner_id);
 
   // Figures can gain versions in another tab (the "Edit figure" button opens
   // one). Window-focus refetch is globally disabled (app-providers), so refetch
@@ -254,6 +259,9 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     document.addEventListener('visibilitychange', onVis);
     return () => document.removeEventListener('visibilitychange', onVis);
   }, [qc, queryKey]);
+
+  // Project names for the breadcrumb badge and the move dialog (U3).
+  const { data: projects } = useQuery({ queryKey: ['projects'], queryFn: listProjects });
 
   const containerRef = useRef<HTMLDivElement>(null);
   // Mirror the container element into state so the color editor can portal its
@@ -306,6 +314,9 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   // at a different aspect than its native render, which reads as "distorted".
   const [lockAspect, setLockAspect] = useState(true);
   const [pickerOpen, setPickerOpen] = useState(false);
+  // U3: project affiliation — breadcrumb link + owner-only move dialog.
+  const [moveOpen, setMoveOpen] = useState(false);
+  const [moveTarget, setMoveTarget] = useState<string>('personal');
   const [guides, setGuides] = useState<{ x: number | null; y: number | null }>({ x: null, y: null });
   const [renamingCanvas, setRenamingCanvas] = useState(false);
   const [nameDraft, setNameDraft] = useState('');
@@ -518,7 +529,7 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
         });
       }
     },
-    onError: () => toast.error('Could not update canvas'),
+    onError: (e) => toast.error(e instanceof Error && e.message ? e.message : 'Could not update canvas'),
   });
 
   // ── undo/redo application ──
@@ -903,6 +914,15 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
       <div className="flex flex-wrap items-center gap-2 border-b bg-background px-4 py-2">
         <div className="mr-1 flex items-center gap-1 text-sm text-muted-foreground">
           <Link href="/canvases" className="hover:underline">Canvases</Link><span>/</span>
+          {canvas.project_id && (
+            <>
+              <Link href={`/projects/${canvas.project_id}`} className="flex items-center gap-1 hover:underline" title="Open the project this canvas belongs to">
+                <FlaskConical className="h-3.5 w-3.5" />
+                {projects?.find((p) => p.id === canvas.project_id)?.name ?? 'Project'}
+              </Link>
+              <span>/</span>
+            </>
+          )}
         </div>
         {renamingCanvas ? (
           <span className="flex items-center gap-1">
@@ -988,6 +1008,18 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
           >
             <CanvasApplyStyle canvasId={canvasId} panels={panels} />
           </span>
+          {isOwner && (
+            <Button
+              type="button"
+              size="icon-sm"
+              variant="outline"
+              aria-label="Move to project"
+              title="Move this canvas into a project (or make it personal)"
+              onClick={() => { setMoveTarget(canvas.project_id ?? 'personal'); setMoveOpen(true); }}
+            >
+              <FlaskConical className="h-4 w-4" />
+            </Button>
+          )}
           <CanvasHelpPopover />
           <DropdownMenu>
             <DropdownMenuTrigger
@@ -1214,7 +1246,70 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
         )}
       </div>
 
-      <FigurePickerDialog open={pickerOpen} onOpenChange={setPickerOpen} onPick={handlePick} />
+      {moveOpen && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/30" role="presentation" onClick={() => setMoveOpen(false)}>
+          <div
+            role="dialog"
+            aria-label="Move canvas to project"
+            className="w-80 rounded-lg border bg-background p-4 shadow-xl outline-none"
+            onClick={(e) => e.stopPropagation()}
+            // Modal behavior: hold focus so Escape closes THIS dialog and the
+            // editor's window-level keys (Delete/Escape/undo) never fire behind.
+            tabIndex={-1}
+            ref={(el) => el?.focus()}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') setMoveOpen(false);
+              e.stopPropagation();
+            }}
+          >
+            <p className="mb-1 text-sm font-semibold">Move canvas</p>
+            <p className="mb-3 text-xs text-muted-foreground">
+              Project canvases are shared with project members. Only the canvas owner can move it.
+            </p>
+            {panels.length > 0 && (
+              <p className="mb-3 rounded bg-amber-50 p-2 text-[11px] text-amber-700">
+                Panels whose figures live outside the target project won’t be visible to its members.
+              </p>
+            )}
+            <select
+              aria-label="Target project"
+              className="mb-3 w-full rounded border bg-background px-2 py-1.5 text-sm"
+              value={moveTarget}
+              onChange={(e) => setMoveTarget(e.target.value)}
+            >
+              <option value="personal">Personal (no project)</option>
+              {(projects ?? []).filter((p) => p.role !== 'viewer').map((p) => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+              ))}
+            </select>
+            <div className="flex justify-end gap-2">
+              <Button type="button" size="sm" variant="outline" onClick={() => setMoveOpen(false)}>Cancel</Button>
+              <Button
+                type="button"
+                size="sm"
+                disabled={patchCanvas.isPending}
+                onClick={async () => {
+                  const target = moveTarget === 'personal' ? null : moveTarget;
+                  if ((canvas.project_id ?? null) === target) { setMoveOpen(false); return; }
+                  try {
+                    await patchCanvas.mutateAsync({ data: { project_id: target } });
+                    qc.invalidateQueries({ queryKey: ['canvases'] });
+                    toast.success(target ? 'Canvas moved to project' : 'Canvas is now personal');
+                    setMoveOpen(false);
+                  } catch {
+                    /* patchCanvas onError already toasts (owner-only 403 etc.) */
+                  }
+                }}
+              >
+                {patchCanvas.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+                Move
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <FigurePickerDialog open={pickerOpen} onOpenChange={setPickerOpen} onPick={handlePick} projectId={canvas.project_id ?? null} />
     </div>
   );
 }

@@ -554,6 +554,7 @@ export async function getCanvas(id: string): Promise<import('./types').CanvasDet
 }
 export async function updateCanvas(id: string, data: {
   name?: string; description?: string; preset?: string; width_mm?: number; height_mm?: number; background?: string;
+  project_id?: string | null; // owner-only: attach/move/detach (null detaches)
 }): Promise<import('./types').CanvasDetail> {
   return fetcher(`/api/canvases/${id}`, { method: 'PATCH', body: JSON.stringify(data) });
 }

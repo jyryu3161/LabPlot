@@ -76,14 +76,20 @@ def get_canvas(canvas_id: uuid.UUID, db: Session = Depends(get_db),
 @router.patch("/{canvas_id}", response_model=CanvasDetail)
 def update_canvas(canvas_id: uuid.UUID, data: CanvasUpdate, request: Request,
                   db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    detail = service.update_canvas(db, canvas_id, current_user.id, data.model_dump(exclude_unset=True))
+    changed = data.model_dump(exclude_unset=True)
+    detail = service.update_canvas(db, canvas_id, current_user.id, changed)
+    # Record WHAT changed — a project attach/move/detach alters sharing scope
+    # and must be traceable in the audit trail.
+    meta: dict = {"changed": sorted(changed.keys())}
+    if "project_id" in changed:
+        meta["project_id"] = str(changed["project_id"]) if changed["project_id"] else None
     audit_service.log_event(
         db,
         actor_id=current_user.id,
         action="canvas.update",
         target_type="canvas",
         target_id=canvas_id,
-        metadata={},
+        metadata=meta,
         request=request,
     )
     db.commit()

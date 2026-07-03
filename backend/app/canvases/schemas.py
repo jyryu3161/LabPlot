@@ -28,6 +28,10 @@ class CanvasUpdate(BaseModel):
     height_mm: float | None = Field(default=None, ge=_CANVAS_MM_MIN, le=_CANVAS_MM_MAX)
     background: str | None = None
     preset: str | None = Field(default=None, max_length=40)
+    # Attach to / move between / detach from a project (None detaches). The
+    # service restricts ALL project_id changes to the canvas OWNER — a
+    # non-owner editor could otherwise privatize a shared canvas.
+    project_id: uuid.UUID | None = None
 
 
 class PanelCreate(BaseModel):

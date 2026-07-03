@@ -25,6 +25,7 @@ from app.figures import service as figures_service
 from app.figures.models import Figure, FigureVersion
 from app.r_engine import renderer
 from app.r_engine.presets import JOURNAL_SPECS, PRESETS
+from app.r_engine.templates import scale_editable_axes
 
 # mm clamps (design §5): canvas 20-500 mm/side; panel 10-500 mm/side. Enforced
 # again defensively here even though the request schema already validates the
@@ -186,15 +187,28 @@ def _render_preview_ref(db: Session, owner_id: uuid.UUID, req: PreviewRenderRequ
     )
     digest = hashlib.sha256(key_material.encode("utf-8")).hexdigest()
 
+    # Request-time augmentation (NOT cached): whether the backend will actually
+    # emit a tick/format/reverse scale layer per aesthetic for THIS figure —
+    # the axis popover hides those controls when false. Computed here so stale
+    # cached sidecars get the flags too, with the CURRENT gate logic.
+    _scale_flags = scale_editable_axes(plot_type, mapping, options)
+
+    def _aug(layout: dict | None) -> dict | None:
+        if isinstance(layout, dict):
+            layout = dict(layout)
+            layout["scale_editable_x"] = _scale_flags["x"]
+            layout["scale_editable_y"] = _scale_flags["y"]
+        return layout
+
     # Cache hit -> return without rendering, no version, no artifact written.
     if storage.object_storage_enabled():
         cache_ref = _object_cache_ref(digest)
         if storage.exists(cache_ref):
-            return cache_ref, _read_layout_object(digest), True
+            return cache_ref, _aug(_read_layout_object(digest)), True
     else:
         cache_path = _local_cache_path(digest)
         if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
-            return cache_path, _read_layout_local(digest), True
+            return cache_path, _aug(_read_layout_local(digest)), True
 
     # 4. Render (sandbox intact via renderer.render). Copy ONLY the SVG to the
     #    cache path; never persist png/version/etc. On failure raise RENDER_FAILED
@@ -229,7 +243,7 @@ def _render_preview_ref(db: Session, owner_id: uuid.UUID, req: PreviewRenderRequ
                     storage.upload_file(layout_src, storage.object_key(*_PREVIEW_PARTS, f"{digest}.layout.json"), content_type="application/json")
                 except Exception:
                     pass
-            return cache_ref, layout, False
+            return cache_ref, _aug(layout), False
 
         cache_path = _local_cache_path(digest)
         os.makedirs(os.path.dirname(cache_path), exist_ok=True)
@@ -239,7 +253,7 @@ def _render_preview_ref(db: Session, owner_id: uuid.UUID, req: PreviewRenderRequ
                 shutil.copyfile(layout_src, _local_layout_path(digest))
             except Exception:
                 pass
-        return cache_path, layout, False
+        return cache_path, _aug(layout), False
 
 
 # ============================================================================
@@ -427,6 +441,17 @@ def update_canvas(db: Session, canvas_id: uuid.UUID, owner_id: uuid.UUID, data: 
         canvas.background = data["background"] if data["background"] in _CANVAS_BACKGROUNDS else "white"
     if "preset" in data:
         canvas.preset = data["preset"]
+    if "project_id" in data:
+        # Owner-only (grilling Q6): attach/move/detach all change which team
+        # can see the canvas — an editor could otherwise privatize it.
+        if canvas.owner_id != owner_id:
+            raise AppError("Only the canvas owner can move it between projects",
+                           status_code=403, error_code="OWNER_ONLY")
+        new_project_id = data["project_id"]
+        if new_project_id is not None:
+            from app.projects import service as project_service
+            project_service.require_project_write(db, new_project_id, owner_id)
+        canvas.project_id = new_project_id
     db.commit()
     return canvas_detail(db, canvas_id, owner_id)
 
@@ -675,16 +700,23 @@ def _compose_canvas_svg(db: Session, owner_id: uuid.UUID, canvas: Canvas) -> tup
         pw_mm = _clamp(panel.width_mm, _PANEL_MM_MIN, _PANEL_MM_MAX)
         ph_mm = _clamp(panel.height_mm, _PANEL_MM_MIN, _PANEL_MM_MAX)
         # Reuse the exact physical-size vector renderer (fonts stay pt, §5).
-        ref, _layout, _cached = _render_preview_ref(
-            db,
-            owner_id,
-            PreviewRenderRequest(
-                figure_id=panel.figure_id,
-                version_id=effective,
-                width_mm=pw_mm,
-                height_mm=ph_mm,
-            ),
-        )
+        try:
+            ref, _layout, _cached = _render_preview_ref(
+                db,
+                owner_id,
+                PreviewRenderRequest(
+                    figure_id=panel.figure_id,
+                    version_id=effective,
+                    width_mm=pw_mm,
+                    height_mm=ph_mm,
+                ),
+            )
+        except NotFoundError:
+            # The exporting user can't access this panel's figure (e.g. the
+            # canvas was moved into a project while a panel still references a
+            # personal figure). Fail-closed per PANEL — skip it — instead of
+            # hard-404ing a collaborator's ENTIRE export on the first miss.
+            continue
         svg_text = storage.read_bytes(ref).decode("utf-8")
         attrs, inner = _split_svg(svg_text)
         native_w, native_h = _svg_native_size(attrs)

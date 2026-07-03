@@ -1,36 +1,18 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { createCanvas, deleteCanvas, getCanvasPresets, listCanvases } from '@/lib/api';
+import { deleteCanvas, listCanvases, listProjects } from '@/lib/api';
 import { AppHeader } from '@/components/layout/AppHeader';
+import { NewCanvasDialog } from '@/components/canvases/NewCanvasDialog';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Textarea } from '@/components/ui/textarea';
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { AlertTriangle, LayoutGrid, Layers, Loader2, Plus, RotateCcw, Search, SearchX, Trash2 } from 'lucide-react';
-
-const MM_MIN = 20;
-const MM_MAX = 500;
-const CUSTOM = 'custom';
-
-function clampMm(value: number): number {
-  if (Number.isNaN(value)) return MM_MIN;
-  return Math.min(MM_MAX, Math.max(MM_MIN, Math.round(value)));
-}
+import { AlertTriangle, FlaskConical, LayoutGrid, Layers, Loader2, Plus, RotateCcw, Search, SearchX, Trash2 } from 'lucide-react';
 
 function formatUpdated(iso: string): string {
   const d = new Date(iso);
@@ -44,33 +26,17 @@ export default function CanvasesPage() {
   const [search, setSearch] = useState('');
   const [open, setOpen] = useState(false);
 
-  // Create-dialog form state
-  const [name, setName] = useState('');
-  const [desc, setDesc] = useState('');
-  const [presetKey, setPresetKey] = useState<string>(CUSTOM);
-  // A4 portrait — matches the first backend preset, so the form shows A4 even
-  // before the presets query resolves (or if it fails).
-  const [widthMm, setWidthMm] = useState<number>(210);
-  const [heightMm, setHeightMm] = useState<number>(297);
-
   const { data: canvases, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['canvases'],
     queryFn: () => listCanvases(),
   });
-  const { data: presets } = useQuery({
-    queryKey: ['canvas-presets'],
-    queryFn: getCanvasPresets,
-  });
-
-  // Seed the form with the first preset once presets load and while the dialog is closed.
-  useEffect(() => {
-    if (!open && presets?.length && presetKey === CUSTOM) {
-      const first = presets[0];
-      setPresetKey(first.key);
-      setWidthMm(first.width_mm);
-      setHeightMm(first.height_mm);
-    }
-  }, [presets, open, presetKey]);
+  // Project names for the badge on project-scoped canvases (U3).
+  const { data: projects } = useQuery({ queryKey: ['projects'], queryFn: listProjects });
+  const projectNames = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const p of projects ?? []) m.set(p.id, p.name);
+    return m;
+  }, [projects]);
 
   const visibleCanvases = useMemo(() => {
     if (!canvases) return [];
@@ -78,59 +44,11 @@ export default function CanvasesPage() {
     return q ? canvases.filter((c) => c.name.toLowerCase().includes(q)) : canvases;
   }, [canvases, search]);
 
-  const create = useMutation({
-    mutationFn: () => createCanvas({
-      name: name.trim(),
-      description: desc.trim() || undefined,
-      preset: presetKey === CUSTOM ? undefined : presetKey,
-      width_mm: clampMm(widthMm),
-      height_mm: clampMm(heightMm),
-    }),
-    onSuccess: (canvas) => {
-      toast.success('Canvas created');
-      qc.invalidateQueries({ queryKey: ['canvases'] });
-      setOpen(false);
-      router.push(`/canvases/${canvas.id}`);
-    },
-    onError: (e) => toast.error(e instanceof Error ? e.message : 'Create failed'),
-  });
-
   const del = useMutation({
     mutationFn: deleteCanvas,
     onSuccess: () => { toast.success('Canvas deleted'); qc.invalidateQueries({ queryKey: ['canvases'] }); },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Delete failed'),
   });
-
-  function onPresetChange(key: string | null) {
-    const next = key ?? CUSTOM;
-    setPresetKey(next);
-    if (next !== CUSTOM) {
-      const preset = presets?.find((p) => p.key === next);
-      if (preset) {
-        setWidthMm(preset.width_mm);
-        setHeightMm(preset.height_mm);
-      }
-    }
-  }
-
-  function onDialogOpenChange(next: boolean) {
-    setOpen(next);
-    if (next) {
-      // Reset to a clean form, seeded with the first preset if available.
-      setName('');
-      setDesc('');
-      const first = presets?.[0];
-      if (first) {
-        setPresetKey(first.key);
-        setWidthMm(first.width_mm);
-        setHeightMm(first.height_mm);
-      } else {
-        setPresetKey(CUSTOM);
-      }
-    }
-  }
-
-  const canSubmit = name.trim().length > 0 && !create.isPending;
 
   return (
     <div className="min-h-screen bg-muted/20">
@@ -141,7 +59,7 @@ export default function CanvasesPage() {
             <h1 className="text-2xl font-bold">Canvases</h1>
             <p className="text-sm text-muted-foreground">Compose multi-panel figures at physical (mm) print size.</p>
           </div>
-          <Button onClick={() => onDialogOpenChange(true)}><Plus className="mr-1 h-4 w-4" /> New canvas</Button>
+          <Button onClick={() => setOpen(true)}><Plus className="mr-1 h-4 w-4" /> New canvas</Button>
         </div>
 
         {isLoading ? (
@@ -202,13 +120,21 @@ export default function CanvasesPage() {
                       <button
                         type="button"
                         onClick={() => router.push(`/canvases/${c.id}`)}
-                        className="mt-3 flex w-full items-center justify-between text-left"
+                        className="mt-3 flex w-full items-center justify-between gap-2 text-left"
                       >
-                        <Badge variant="secondary">
-                          <Layers className="mr-1 h-3 w-3" />
-                          {c.panel_count} panel{c.panel_count === 1 ? '' : 's'}
-                        </Badge>
-                        <span className="text-xs text-muted-foreground">Updated {formatUpdated(c.updated_at)}</span>
+                        <span className="flex min-w-0 items-center gap-1.5">
+                          <Badge variant="secondary">
+                            <Layers className="mr-1 h-3 w-3" />
+                            {c.panel_count} panel{c.panel_count === 1 ? '' : 's'}
+                          </Badge>
+                          {c.project_id && (
+                            <Badge variant="outline" className="min-w-0">
+                              <FlaskConical className="mr-1 h-3 w-3 shrink-0" />
+                              <span className="truncate">{projectNames.get(c.project_id) ?? 'Project'}</span>
+                            </Badge>
+                          )}
+                        </span>
+                        <span className="shrink-0 text-xs text-muted-foreground">Updated {formatUpdated(c.updated_at)}</span>
                       </button>
                     </CardContent>
                   </Card>
@@ -219,104 +145,7 @@ export default function CanvasesPage() {
         )}
       </main>
 
-      <Dialog open={open} onOpenChange={onDialogOpenChange}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>New canvas</DialogTitle>
-            <DialogDescription>Pick a journal preset or set a custom physical size (mm).</DialogDescription>
-          </DialogHeader>
-          <form
-            className="space-y-4"
-            onSubmit={(e) => { e.preventDefault(); if (canSubmit) create.mutate(); }}
-          >
-            <div className="space-y-1.5">
-              <Label htmlFor="canvas-name">Name</Label>
-              <Input
-                id="canvas-name"
-                value={name}
-                autoFocus
-                maxLength={255}
-                placeholder="e.g. Figure 1 — main"
-                onChange={(e) => setName(e.target.value)}
-              />
-            </div>
-
-            <div className="space-y-1.5">
-              <Label htmlFor="canvas-preset">Preset</Label>
-              <Select value={presetKey} onValueChange={onPresetChange}>
-                <SelectTrigger id="canvas-preset" aria-label="Canvas size preset" className="w-full">
-                  <SelectValue placeholder="Choose a preset">
-                    {(value) =>
-                      value === CUSTOM
-                        ? 'Custom size'
-                        : presets?.find((p) => p.key === value)?.label ?? 'Choose a preset'
-                    }
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  {presets?.map((p) => (
-                    <SelectItem key={p.key} value={p.key}>
-                      {p.label} ({p.width_mm} × {p.height_mm} mm)
-                    </SelectItem>
-                  ))}
-                  <SelectItem value={CUSTOM}>Custom size</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1.5">
-                <Label htmlFor="canvas-width">Width (mm)</Label>
-                <Input
-                  id="canvas-width"
-                  type="number"
-                  inputMode="numeric"
-                  min={MM_MIN}
-                  max={MM_MAX}
-                  value={widthMm}
-                  onChange={(e) => { setWidthMm(Number(e.target.value)); setPresetKey(CUSTOM); }}
-                  onBlur={() => setWidthMm((v) => clampMm(v))}
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="canvas-height">Height (mm)</Label>
-                <Input
-                  id="canvas-height"
-                  type="number"
-                  inputMode="numeric"
-                  min={MM_MIN}
-                  max={MM_MAX}
-                  value={heightMm}
-                  onChange={(e) => { setHeightMm(Number(e.target.value)); setPresetKey(CUSTOM); }}
-                  onBlur={() => setHeightMm((v) => clampMm(v))}
-                />
-              </div>
-            </div>
-            <p className="text-xs text-muted-foreground">Each side is clamped to {MM_MIN}–{MM_MAX} mm.</p>
-
-            <div className="space-y-1.5">
-              <Label htmlFor="canvas-desc">Description</Label>
-              <Textarea
-                id="canvas-desc"
-                value={desc}
-                rows={2}
-                placeholder="Optional"
-                onChange={(e) => setDesc(e.target.value)}
-              />
-            </div>
-
-            <DialogFooter>
-              <Button type="button" variant="outline" onClick={() => setOpen(false)} disabled={create.isPending}>
-                Cancel
-              </Button>
-              <Button type="submit" disabled={!canSubmit}>
-                {create.isPending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Plus className="mr-1 h-4 w-4" />}
-                Create canvas
-              </Button>
-            </DialogFooter>
-          </form>
-        </DialogContent>
-      </Dialog>
+      <NewCanvasDialog open={open} onOpenChange={setOpen} />
     </div>
   );
 }

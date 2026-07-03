@@ -569,6 +569,7 @@ export interface CanvasPanel {
 }
 export interface Canvas {
   id: string;
+  owner_id: string;
   name: string;
   description?: string | null;
   project_id?: string | null;

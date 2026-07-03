@@ -504,6 +504,7 @@ export function CanvasColorEditor({
                     key={`${axisEdit}-${effVersionId ?? 'v'}`}
                     aesthetic={axisAestheticFor(axisEdit)}
                     discrete={axisDiscreteFor(axisEdit)}
+                    scaleEditable={Boolean((layout as Record<string, unknown> | null)?.[`scale_editable_${axisAestheticFor(axisEdit)}`])}
                     showAngle={axisAestheticFor(axisEdit) === 'x' && !flipped}
                     options={effOptions}
                     pending={commitText.isPending}
@@ -528,6 +529,7 @@ export function CanvasColorEditor({
                   key={`${axisEdit}-${effVersionId ?? 'v'}`}
                   aesthetic={axisAestheticFor(axisEdit)}
                   discrete={axisDiscreteFor(axisEdit)}
+                  scaleEditable={Boolean((layout as Record<string, unknown> | null)?.[`scale_editable_${axisAestheticFor(axisEdit)}`])}
                   showAngle={false}
                   options={effOptions}
                   pending={commitText.isPending}

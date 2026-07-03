@@ -5,10 +5,11 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { addProjectCollaborator, getProject, updateProject, listDatasets, listFigures, deleteDataset, deleteFigure, downloadProjectPack, enhancePrompt, removeProjectCollaborator, updateDataset, updateFigure, reorderDatasets, reorderFigures } from '@/lib/api';
+import { addProjectCollaborator, getProject, updateProject, listCanvases, listDatasets, listFigures, deleteCanvas, deleteDataset, deleteFigure, downloadProjectPack, enhancePrompt, removeProjectCollaborator, updateDataset, updateFigure, reorderDatasets, reorderFigures } from '@/lib/api';
 import type { DatasetListItem, FigureListItem, ProjectInviteDraft } from '@/lib/types';
 import { AppHeader } from '@/components/layout/AppHeader';
 import { DatasetUploadWizard } from '@/components/datasets/DatasetUploadWizard';
+import { NewCanvasDialog } from '@/components/canvases/NewCanvasDialog';
 import { ProjectCollaboratorPicker } from '@/components/projects/ProjectCollaboratorPicker';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -16,7 +17,7 @@ import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Check, GripVertical, Loader2, FileSpreadsheet, Trash2, Images, Database, Package, FlaskConical, Pencil, Sparkles, Users, X } from 'lucide-react';
+import { Check, GripVertical, LayoutGrid, Layers, Loader2, FileSpreadsheet, Trash2, Images, Database, Package, FlaskConical, Pencil, Plus, Sparkles, Users, X } from 'lucide-react';
 import { formatStylePreset } from '@/lib/style-presets';
 
 type DropPosition = 'before' | 'after';
@@ -72,6 +73,8 @@ export default function ProjectWorkspace({ params }: { params: Promise<{ id: str
   const { data: project } = useQuery({ queryKey: ['project', id], queryFn: () => getProject(id) });
   const { data: datasets, isLoading: dsLoading } = useQuery({ queryKey: ['datasets', id], queryFn: () => listDatasets(id) });
   const { data: figures } = useQuery({ queryKey: ['figures', id], queryFn: () => listFigures(id) });
+  const { data: canvases } = useQuery({ queryKey: ['canvases', id], queryFn: () => listCanvases(id) });
+  const [newCanvasOpen, setNewCanvasOpen] = useState(false);
   const [uploadDesc, setUploadDesc] = useState('');
   const [newCollaborators, setNewCollaborators] = useState<ProjectInviteDraft[]>([]);
   const [editingDatasetId, setEditingDatasetId] = useState<string | null>(null);
@@ -86,6 +89,7 @@ export default function ProjectWorkspace({ params }: { params: Promise<{ id: str
 
   const delDs = useMutation({ mutationFn: deleteDataset, onSuccess: () => { toast.success('Dataset deleted'); qc.invalidateQueries({ queryKey: ['datasets', id] }); } });
   const delFig = useMutation({ mutationFn: deleteFigure, onSuccess: () => { toast.success('Figure deleted'); qc.invalidateQueries({ queryKey: ['figures', id] }); } });
+  const delCanvas = useMutation({ mutationFn: deleteCanvas, onSuccess: () => { toast.success('Canvas deleted'); qc.invalidateQueries({ queryKey: ['canvases'] }); }, onError: (e) => toast.error(e instanceof Error ? e.message : 'Delete failed') });
   const renameFig = useMutation({
     mutationFn: ({ figureId, name }: { figureId: string; name: string }) => updateFigure(figureId, { name }),
     onSuccess: () => {
@@ -322,6 +326,7 @@ export default function ProjectWorkspace({ params }: { params: Promise<{ id: str
           <TabsList>
             <TabsTrigger value="datasets">Datasets ({datasets?.length ?? 0})</TabsTrigger>
             <TabsTrigger value="figures">Figures ({figures?.length ?? 0})</TabsTrigger>
+            <TabsTrigger value="canvases">Canvases ({canvases?.length ?? 0})</TabsTrigger>
           </TabsList>
 
           <TabsContent value="datasets" className="space-y-6">
@@ -520,8 +525,67 @@ export default function ProjectWorkspace({ params }: { params: Promise<{ id: str
                 </div>
               )}
           </TabsContent>
+
+          <TabsContent value="canvases" className="space-y-4">
+            {canEditProject && (
+              <Button size="sm" onClick={() => setNewCanvasOpen(true)}>
+                <Plus className="mr-1 h-4 w-4" /> New canvas in this project
+              </Button>
+            )}
+            {!canvases?.length ? (
+              <div className="rounded-lg border border-dashed p-10 text-center text-muted-foreground">
+                <LayoutGrid className="mx-auto mb-2 h-7 w-7" /> No canvases yet. Compose project figures into a multi-panel canvas.
+              </div>
+            ) : (
+              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                {canvases.map((c) => (
+                  <Card key={c.id} className="group h-full transition hover:shadow-md">
+                    <CardContent className="p-4">
+                      <div className="flex items-start justify-between gap-2">
+                        <button
+                          type="button"
+                          onClick={() => router.push(`/canvases/${c.id}`)}
+                          className="min-w-0 flex-1 text-left"
+                        >
+                          <p className="flex items-center gap-2 truncate font-medium">
+                            <LayoutGrid className="h-4 w-4 shrink-0 text-primary" />
+                            <span className="truncate">{c.name}</span>
+                          </p>
+                          <p className="mt-1 text-xs text-muted-foreground">{c.width_mm} × {c.height_mm} mm</p>
+                        </button>
+                        {canEditProject && (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            aria-label={`Delete canvas ${c.name}`}
+                            onClick={() => { if (confirm(`Delete canvas "${c.name}"?`)) delCanvas.mutate(c.id); }}
+                            disabled={delCanvas.isPending}
+                          >
+                            <Trash2 className="h-4 w-4 text-muted-foreground" />
+                          </Button>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => router.push(`/canvases/${c.id}`)}
+                        className="mt-3 flex w-full items-center justify-between text-left"
+                      >
+                        <Badge variant="secondary">
+                          <Layers className="mr-1 h-3 w-3" />
+                          {c.panel_count} panel{c.panel_count === 1 ? '' : 's'}
+                        </Badge>
+                      </button>
+                    </CardContent>
+                  </Card>
+                ))}
+              </div>
+            )}
+          </TabsContent>
         </Tabs>
       </main>
+
+      <NewCanvasDialog open={newCanvasOpen} onOpenChange={setNewCanvasOpen} projectId={id} />
     </div>
   );
 }
