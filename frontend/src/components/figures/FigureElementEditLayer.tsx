@@ -51,7 +51,6 @@ export function FigureElementEditLayer({
     ? { w: imgPxRaw.w, h: imgPxRaw.h } : null;
   const regionBoxes = textRegionBoxes(layout);
   const axisBoxes = axisRegionBoxes(layout);
-  if (!layout || !imgPx || imgW <= 0 || imgH <= 0) return null;
 
   // coord_flip: the bottom cell renders the y label (verified in-container for
   // U4); map the clicked POSITIONAL box to the option that renders there.
@@ -77,7 +76,13 @@ export function FigureElementEditLayer({
     if (value !== optionText(key).trim()) onPatch({ [key]: value });
     setTextEdit(null);
   }
-  commitRef.current = commitTextDraft;
+  // Keep the unmount-commit pointing at the latest closure. Assigned in an
+  // effect (refs must not be written during render), placed after the
+  // declaration (compiler forbids forward references), and BEFORE the layout
+  // guard so the hook order is unconditional.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { commitRef.current = commitTextDraft; });
+  if (!layout || !imgPx || imgW <= 0 || imgH <= 0) return null;
 
   return (
     <>
