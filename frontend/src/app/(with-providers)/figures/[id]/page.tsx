@@ -11,7 +11,7 @@ import {
   improveVersion, applyImprovement, applyImprovements, updateFigure, generateLegend, downloadExport, enhancePrompt,
   deleteFigureVersion, getProject, saveFigureTemplateFavorite, deleteFigureTemplateFavorite, setFigureShare,
   createCustomPalette, updateCustomPalette, deleteCustomPalette, duplicateFigure,
-  getColumnValues, getMethodsText, getAltText,
+  getColumnValues, getMethodsText, getAltText, ApiError,
 } from '@/lib/api';
 import type { ImproveVersionRequest } from '@/lib/api';
 import type { FigureVersion, Review, Improvement, PlotTypeDef, ColumnProfile, PaletteDef, FigureAnnotation, SeriesStyle } from '@/lib/types';
@@ -318,9 +318,25 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
     setPlotType(null); setMapping(null); setOptions(null); setStyle(null);
   }
   const apply = useMutation({
-    mutationFn: () => rerenderFigure(id, { plot_type: effectivePlotType, mapping: effectiveMapping, options: effectiveOptions, style_preset: effectiveStyle, change_note: 'Edited in figure editor' }),
+    // base_version_id: reject (409) if the figure changed in another tab (e.g.
+    // a canvas editor committed) since this draft was based on `version`.
+    // ONLY sent when the CURRENT version is being edited — applying while
+    // viewing an old version is the legitimate fork-from-history workflow and
+    // must not trip the guard (backend compares against current_version_id).
+    mutationFn: () => rerenderFigure(id, {
+      plot_type: effectivePlotType, mapping: effectiveMapping, options: effectiveOptions, style_preset: effectiveStyle,
+      change_note: 'Edited in figure editor',
+      base_version_id: version?.id && version.id === fig?.current_version_id ? version.id : undefined,
+    }),
     onSuccess: (v) => { toast.success(`Re-rendered (v${v.version_number})`); setSelectedVid(v.id); setReview(null); setImprovements(null); resetEditDrafts(); qc.invalidateQueries({ queryKey: ['figure', id] }); qc.invalidateQueries({ queryKey: ['figures'] }); },
-    onError: (e) => toast.error(e instanceof Error ? e.message : 'Render failed'),
+    onError: (e) => {
+      if (e instanceof ApiError && e.status === 409) {
+        toast.error('This figure changed elsewhere — review the latest version, then apply again.');
+        qc.invalidateQueries({ queryKey: ['figure', id] });
+        return;
+      }
+      toast.error(e instanceof Error ? e.message : 'Render failed');
+    },
   });
   // Debounced live-preview render. Unlike `apply` it stays quiet (no toast) and
   // only clears the drafts when no further edits arrived while it was in flight
@@ -878,6 +894,18 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
                     annotations={annotationList(effectiveOptions.annotations)}
                     onChange={setAnnotations}
                     layout={version?.layout}
+                    elementOptions={effectiveOptions}
+                    renderedElementOptions={version?.options}
+                    onOptionsPatch={(patch) => {
+                      // U6: element edits land in the DRAFT (undo/redo + live
+                      // preview + Apply pipeline); null unsets an option.
+                      const next = { ...effectiveOptions } as Record<string, unknown>;
+                      for (const [key, value] of Object.entries(patch)) {
+                        if (value === null) delete next[key];
+                        else next[key] = value;
+                      }
+                      setOptions(next);
+                    }}
                   />
                 ) : (
                   <img src={previewUrl} alt={fig.name} decoding="async" className="mx-auto max-h-[58vh] w-auto rounded bg-white object-contain" />

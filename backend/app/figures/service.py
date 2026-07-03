@@ -350,6 +350,24 @@ def _resolve_custom_palette_options(db: Session, owner_id: uuid.UUID, options: d
     return clean
 
 
+def _augmented_layout(v: FigureVersion) -> dict | None:
+    """Sidecar layout + request-time scale_editable_x/y capability flags (same
+    augmentation the canvas preview endpoint applies) so the figure page's
+    element-edit overlay can gate axis controls the renderer would ignore."""
+    layout = v.layout
+    if not isinstance(layout, dict):
+        return layout
+    try:
+        from app.r_engine.templates import scale_editable_axes
+        flags = scale_editable_axes(v.figure.plot_type, v.mapping or {}, v.options or {})
+        layout = dict(layout)
+        layout["scale_editable_x"] = flags["x"]
+        layout["scale_editable_y"] = flags["y"]
+    except Exception:
+        pass
+    return layout
+
+
 def version_response(v: FigureVersion) -> dict:
     return {
         "id": v.id,
@@ -366,7 +384,7 @@ def version_response(v: FigureVersion) -> dict:
         "eps_url": _url(v.eps_path),
         "html_url": _url(v.html_path),
         "r_url": _url(v.r_path),
-        "layout": v.layout,
+        "layout": _augmented_layout(v),
     }
 
 

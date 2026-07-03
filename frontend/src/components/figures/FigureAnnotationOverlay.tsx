@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import type { FigureAnnotation, FigureLayout, AnnotationCoord } from '@/lib/types';
+import { FigureElementEditLayer } from './FigureElementEditLayer';
 
 type RelTool = 'text' | 'arrow' | 'rect' | 'bracket';
 
@@ -110,12 +111,23 @@ export function FigureAnnotationOverlay({
   annotations,
   onChange,
   layout,
+  elementOptions,
+  renderedElementOptions,
+  onOptionsPatch,
 }: {
   imageUrl: string;
   alt: string;
   annotations: FigureAnnotation[];
   onChange: (next: FigureAnnotation[]) => void;
   layout?: FigureLayout | null;
+  /** U6 element editing (optional): current draft options + patcher. When
+   *  provided, title/axis-label/axis-strip hit targets render over the image
+   *  (outside the plotting panel, so they never collide with the annotation
+   *  stage) and edits go to the page's DRAFT options — zero extra renders. */
+  elementOptions?: Record<string, unknown>;
+  /** RENDERED version's options (flip mapping follows the on-screen render). */
+  renderedElementOptions?: Record<string, unknown>;
+  onOptionsPatch?: (patch: Record<string, string | number | boolean | null>) => void;
 }) {
   const imgRef = useRef<HTMLImageElement>(null);
   const [enabled, setEnabled] = useState(false);
@@ -439,6 +451,9 @@ export function FigureAnnotationOverlay({
           <MapPin className={`h-4 w-4 ${enabled ? 'text-primary' : 'text-muted-foreground'}`} />
           <Label htmlFor="place-on-figure" className="cursor-pointer text-sm">Place on figure</Label>
           <Switch id="place-on-figure" checked={enabled} onCheckedChange={setEnabled} aria-label="Toggle visual annotation placement" />
+          {enabled && elementOptions && (
+            <span className="text-[10px] text-muted-foreground">(element editing paused while placing)</span>
+          )}
         </div>
         {ownedCount > 0 && <Badge variant="secondary" className="text-[10px]">{ownedCount} placed</Badge>}
         {enabled && (
@@ -485,6 +500,16 @@ export function FigureAnnotationOverlay({
           className="mx-auto block max-h-[58vh] w-auto rounded bg-white object-contain"
           onLoad={() => { const img = imgRef.current; if (img) setDims({ w: img.clientWidth, h: img.clientHeight }); }}
         />
+        {!enabled && elementOptions && onOptionsPatch && w > 0 && h > 0 && (
+          <FigureElementEditLayer
+            layout={layout as Record<string, unknown> | null}
+            imgW={w}
+            imgH={h}
+            options={elementOptions}
+            renderedOptions={renderedElementOptions}
+            onPatch={onOptionsPatch}
+          />
+        )}
         {enabled && stageW > 0 && stageH > 0 && (
           <div
             style={{ ...containerStyle, cursor: labelInput ? 'text' : 'crosshair' }}
