@@ -17,7 +17,12 @@ export function CanvasHelpPopover() {
       if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
     }
     function onKey(e: KeyboardEvent) {
-      if (e.key === 'Escape') setOpen(false);
+      if (e.key === 'Escape') {
+        // Consume Escape so the editor's window-level handler doesn't also
+        // deselect the current panel — this popover close is the only effect.
+        e.stopPropagation();
+        setOpen(false);
+      }
     }
     document.addEventListener('mousedown', onPointerDown);
     document.addEventListener('keydown', onKey);
