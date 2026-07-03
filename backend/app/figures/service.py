@@ -472,11 +472,21 @@ def template_favorite_response(favorite: FigureTemplateFavorite) -> dict:
     }
 
 
+def native_size_mm(options: dict | None) -> tuple[float | None, float | None]:
+    """Physical size (mm) a version's options render at — the figure's "native"
+    size, used by the canvas editor to place new panels at original size.
+    None options (figure has no version yet) -> unknown."""
+    if options is None:
+        return None, None
+    w_in, h_in, _dpi = renderer._dimensions(options)
+    return round(w_in * 25.4, 2), round(h_in * 25.4, 2)
+
+
 def list_figures(db: Session, owner_id: uuid.UUID, project_id: uuid.UUID | None = None) -> list[dict]:
     from app.projects import service as project_service
 
     q = (
-        db.query(Figure, FigureVersion.png_path)
+        db.query(Figure, FigureVersion.png_path, FigureVersion.options)
         .outerjoin(FigureVersion, Figure.current_version_id == FigureVersion.id)
     )
     if project_id is not None:
@@ -489,9 +499,10 @@ def list_figures(db: Session, owner_id: uuid.UUID, project_id: uuid.UUID | None 
         rows = q.order_by(Figure.display_order.is_(None), Figure.display_order.asc(), Figure.updated_at.desc()).all()
     else:
         rows = q.order_by(Figure.updated_at.desc()).all()
-    favorite_ids = _favorite_figure_ids(db, owner_id, [f.id for f, _ in rows])
+    favorite_ids = _favorite_figure_ids(db, owner_id, [f.id for f, _, _ in rows])
     out = []
-    for f, png_path in rows:
+    for f, png_path, v_options in rows:
+        nw, nh = native_size_mm(v_options)
         out.append({
             "id": f.id, "name": f.name, "plot_type": f.plot_type, "style_preset": f.style_preset,
             "status": f.status, "dataset_id": f.dataset_id, "project_id": f.project_id,
@@ -499,6 +510,7 @@ def list_figures(db: Session, owner_id: uuid.UUID, project_id: uuid.UUID | None 
             "display_order": f.display_order,
             "is_favorite": f.id in favorite_ids,
             "thumb_url": _url(png_path),
+            "native_width_mm": nw, "native_height_mm": nh,
         })
     if project_id is not None:
         return out

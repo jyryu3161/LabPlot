@@ -70,6 +70,10 @@ class CanvasPanel(BaseModel):
     # figure.current_version_id, and the derived-cache render artifact (§4).
     effective_version_id: uuid.UUID | None = None
     render_url: str | None = None
+    # Native render size (mm) of the effective version's options — lets the
+    # editor offer original-size placement/reset. None when no version.
+    native_width_mm: float | None = None
+    native_height_mm: float | None = None
 
 
 class CanvasListItem(BaseModel):

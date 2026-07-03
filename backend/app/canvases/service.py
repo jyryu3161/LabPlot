@@ -22,7 +22,7 @@ from app.config import settings
 from app.datasets import service as ds_service
 from app.datasets.models import Dataset
 from app.figures import service as figures_service
-from app.figures.models import Figure
+from app.figures.models import Figure, FigureVersion
 from app.r_engine import renderer
 from app.r_engine.presets import JOURNAL_SPECS, PRESETS
 
@@ -288,14 +288,31 @@ def _figure_current_versions(db: Session, figure_ids: list[uuid.UUID]) -> dict[u
     return {fid: cvid for fid, cvid in rows}
 
 
+def _version_native_sizes(db: Session, version_ids: list[uuid.UUID | None]) -> dict[uuid.UUID, tuple[float | None, float | None]]:
+    """Map version_id -> (native_width_mm, native_height_mm) from its options.
+
+    One query for all effective versions of a canvas; feeds the panel
+    serializer so the editor can offer original-size placement/reset."""
+    ids = list({vid for vid in version_ids if vid is not None})
+    if not ids:
+        return {}
+    rows = db.query(FigureVersion.id, FigureVersion.options).filter(FigureVersion.id.in_(ids)).all()
+    return {vid: figures_service.native_size_mm(options) for vid, options in rows}
+
+
 # ---------------------------------------------------------------- serialization
-def _panel_response(panel: CanvasPanel, current_map: dict[uuid.UUID, uuid.UUID | None]) -> dict:
+def _panel_response(panel: CanvasPanel, current_map: dict[uuid.UUID, uuid.UUID | None],
+                    native_map: dict[uuid.UUID, tuple[float | None, float | None]] | None = None) -> dict:
     # effective_version_id (§3): the pin if set, else the figure's current
     # version (None if the figure has no version yet). Resolved here so the
     # editor needs no extra round-trip. render_url is the committed derived-cache
     # artifact (§4), populated by later milestones; None for pure CRUD.
     effective = panel.pinned_version_id or current_map.get(panel.figure_id)
+    native = (native_map or {}).get(effective) if effective else None
+    nw, nh = native if native else (None, None)
     return {
+        "native_width_mm": nw,
+        "native_height_mm": nh,
         "id": panel.id,
         "canvas_id": panel.canvas_id,
         "figure_id": panel.figure_id,
@@ -316,6 +333,8 @@ def _panel_response(panel: CanvasPanel, current_map: dict[uuid.UUID, uuid.UUID |
 
 def _canvas_detail(db: Session, canvas: Canvas) -> dict:
     current_map = _figure_current_versions(db, [p.figure_id for p in canvas.panels])
+    native_map = _version_native_sizes(
+        db, [p.pinned_version_id or current_map.get(p.figure_id) for p in canvas.panels])
     # Ordered by z_order; ties broken by id for stable paint order (§2).
     panels = sorted(canvas.panels, key=lambda p: (p.z_order, str(p.id)))
     return {
@@ -331,7 +350,7 @@ def _canvas_detail(db: Session, canvas: Canvas) -> dict:
         "export_snapshot": canvas.export_snapshot,
         "created_at": canvas.created_at,
         "updated_at": canvas.updated_at,
-        "panels": [_panel_response(p, current_map) for p in panels],
+        "panels": [_panel_response(p, current_map, native_map) for p in panels],
     }
 
 
@@ -439,8 +458,12 @@ def add_panel(db: Session, canvas_id: uuid.UUID, owner_id: uuid.UUID, data: Pane
         canvas_id=canvas.id,
         figure_id=fig.id,
         pinned_version_id=data.pinned_version_id,
-        x_mm=data.x_mm,
-        y_mm=data.y_mm,
+        # Position clamp [0, 500]: coordinates were stored unvalidated; a panel's
+        # top-left can never usefully sit off the sheet's origin or beyond the
+        # max canvas envelope. (Upper bound is the envelope, not canvas-size —
+        # a canvas may legitimately be shrunk after placement.)
+        x_mm=_clamp(data.x_mm, 0.0, _CANVAS_MM_MAX),
+        y_mm=_clamp(data.y_mm, 0.0, _CANVAS_MM_MAX),
         width_mm=_clamp(data.width_mm, _PANEL_MM_MIN, _PANEL_MM_MAX),
         height_mm=_clamp(data.height_mm, _PANEL_MM_MIN, _PANEL_MM_MAX),
         z_order=z_order,
@@ -450,7 +473,8 @@ def add_panel(db: Session, canvas_id: uuid.UUID, owner_id: uuid.UUID, data: Pane
     db.commit()
     db.refresh(panel)
     current_map = _figure_current_versions(db, [panel.figure_id])
-    return _panel_response(panel, current_map)
+    native_map = _version_native_sizes(db, [panel.pinned_version_id or current_map.get(panel.figure_id)])
+    return _panel_response(panel, current_map, native_map)
 
 
 def update_panel(db: Session, canvas_id: uuid.UUID, panel_id: uuid.UUID,
@@ -465,9 +489,9 @@ def update_panel(db: Session, canvas_id: uuid.UUID, panel_id: uuid.UUID,
     panel = _get_panel(canvas, panel_id)
 
     if data.get("x_mm") is not None:
-        panel.x_mm = data["x_mm"]
+        panel.x_mm = _clamp(data["x_mm"], 0.0, _CANVAS_MM_MAX)
     if data.get("y_mm") is not None:
-        panel.y_mm = data["y_mm"]
+        panel.y_mm = _clamp(data["y_mm"], 0.0, _CANVAS_MM_MAX)
     if data.get("width_mm") is not None:
         panel.width_mm = _clamp(data["width_mm"], _PANEL_MM_MIN, _PANEL_MM_MAX)
     if data.get("height_mm") is not None:
@@ -488,7 +512,8 @@ def update_panel(db: Session, canvas_id: uuid.UUID, panel_id: uuid.UUID,
     db.commit()
     db.refresh(panel)
     current_map = _figure_current_versions(db, [panel.figure_id])
-    return _panel_response(panel, current_map)
+    native_map = _version_native_sizes(db, [panel.pinned_version_id or current_map.get(panel.figure_id)])
+    return _panel_response(panel, current_map, native_map)
 
 
 def remove_panel(db: Session, canvas_id: uuid.UUID, panel_id: uuid.UUID, owner_id: uuid.UUID) -> None:

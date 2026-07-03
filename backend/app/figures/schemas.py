@@ -173,6 +173,10 @@ class FigureListItem(BaseModel):
     display_order: int | None = None
     is_favorite: bool = False
     thumb_url: str | None = None
+    # Physical size (mm) of the current version's render — the "native" size
+    # the canvas editor places new panels at. None when no version exists.
+    native_width_mm: float | None = None
+    native_height_mm: float | None = None
 
 
 class GalleryFigureItem(BaseModel):

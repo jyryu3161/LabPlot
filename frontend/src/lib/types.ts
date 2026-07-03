@@ -300,6 +300,9 @@ export interface FigureListItem {
   display_order?: number | null;
   is_favorite: boolean;
   thumb_url?: string;
+  /** Physical size (mm) of the current version's render — canvas "native" placement size. */
+  native_width_mm?: number | null;
+  native_height_mm?: number | null;
 }
 
 export interface GalleryFigureItem extends FigureListItem {
@@ -558,6 +561,9 @@ export interface CanvasPanel {
   label_visible: boolean;
   effective_version_id?: string | null;
   render_url?: string | null;
+  /** Native render size (mm) of the effective version — for original-size reset. */
+  native_width_mm?: number | null;
+  native_height_mm?: number | null;
   created_at: string;
   updated_at: string;
 }

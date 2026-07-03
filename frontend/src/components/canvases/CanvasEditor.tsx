@@ -656,9 +656,12 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
 
   function handleDragEnd(panel: CanvasPanel, e: Konva.KonvaEventObject<DragEvent>) {
     setGuides({ x: null, y: null });
+    if (!canvas) return;
     const node = e.target as Konva.Group;
-    const x_mm = roundMm(clampCanvasMm(pxToMm(node.x(), pxPerMm)));
-    const y_mm = roundMm(clampCanvasMm(pxToMm(node.y(), pxPerMm)));
+    // Position clamp is [0, canvas − panel] (clampCanvasMm is a SIZE clamp
+    // whose 20mm floor forbade placing panels near the top/left edges).
+    const x_mm = clampPosMm(pxToMm(node.x(), pxPerMm), panel.width_mm, canvas.width_mm);
+    const y_mm = clampPosMm(pxToMm(node.y(), pxPerMm), panel.height_mm, canvas.height_mm);
     // Ignore a pure click (no meaningful move) — avoids a redundant PATCH
     // (and thus records no history entry for pure clicks).
     if (Math.abs(x_mm - panel.x_mm) < EPS_MM && Math.abs(y_mm - panel.y_mm) < EPS_MM) return;
@@ -685,8 +688,9 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     const width_mm = roundMm(clampPanelMm(pxToMm(newWpx, pxPerMm)));
     const height_mm = roundMm(clampPanelMm(pxToMm(newHpx, pxPerMm)));
     // The transform may also shift the top-left (resizing from a non-BR handle).
-    const x_mm = roundMm(clampCanvasMm(pxToMm(node.x(), pxPerMm)));
-    const y_mm = roundMm(clampCanvasMm(pxToMm(node.y(), pxPerMm)));
+    // Same [0, canvas − panel] position rule as drag (NOT the 20mm size clamp).
+    const x_mm = canvas ? clampPosMm(pxToMm(node.x(), pxPerMm), width_mm, canvas.width_mm) : roundMm(pxToMm(node.x(), pxPerMm));
+    const y_mm = canvas ? clampPosMm(pxToMm(node.y(), pxPerMm), height_mm, canvas.height_mm) : roundMm(pxToMm(node.y(), pxPerMm));
     if (
       Math.abs(width_mm - panel.width_mm) < EPS_MM &&
       Math.abs(height_mm - panel.height_mm) < EPS_MM &&
@@ -728,22 +732,42 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   }
 
   // ── add figure ──
+  // New panels default to the figure's NATIVE render size (mm) so it looks
+  // identical to the figure page — fonts are absolute pt, so a different panel
+  // size re-layouts the plot and reads as "changed". Shrunk uniformly (aspect
+  // preserved) if the native size exceeds ~90% of the canvas; 60×45 fallback
+  // when the figure has no version (native size unknown).
+  function fitToCanvasMm(nw: number, nh: number): { width_mm: number; height_mm: number } {
+    if (!canvas) return { width_mm: nw, height_mm: nh };
+    let s = Math.min(1, (canvas.width_mm * 0.9) / nw, (canvas.height_mm * 0.9) / nh);
+    // Keep BOTH sides ≥ PANEL_MM_MIN by raising the uniform scale (a per-axis
+    // floor would break the aspect ratio the whole function exists to keep).
+    s = Math.max(s, PANEL_MM_MIN / nw, PANEL_MM_MIN / nh);
+    return { width_mm: roundMm(nw * s), height_mm: roundMm(nh * s) };
+  }
+  // Position clamp: keep the panel's top-left inside [0, canvas − panel] on
+  // each axis. NOT clampCanvasMm — that is a SIZE clamp whose 20mm floor would
+  // shove near-canvas-width panels off the sheet.
+  function clampPosMm(pos: number, panelMm: number, canvasMm: number): number {
+    return roundMm(Math.max(0, Math.min(pos, canvasMm - panelMm)));
+  }
   function handlePick(fig: FigureListItem) {
     setPickerOpen(false);
     if (!canvas) return;
-    const DEFAULT_W = 60;
-    const DEFAULT_H = 45;
+    const { width_mm, height_mm } = fig.native_width_mm && fig.native_height_mm
+      ? fitToCanvasMm(fig.native_width_mm, fig.native_height_mm)
+      : { width_mm: 60, height_mm: 45 };
     const n = panels.length;
-    // Stagger new panels so they don't stack exactly, clamped inside the canvas.
-    const x_mm = clampCanvasMm(Math.min(10 + (n % 4) * 8, Math.max(0, canvas.width_mm - DEFAULT_W)));
-    const y_mm = clampCanvasMm(Math.min(10 + (n % 4) * 8, Math.max(0, canvas.height_mm - DEFAULT_H)));
+    // Stagger new panels so they don't stack exactly, kept inside the canvas.
+    const x_mm = clampPosMm(10 + (n % 4) * 8, width_mm, canvas.width_mm);
+    const y_mm = clampPosMm(10 + (n % 4) * 8, height_mm, canvas.height_mm);
     addPanel.mutate({
       data: {
         figure_id: fig.id,
         x_mm: roundMm(x_mm),
         y_mm: roundMm(y_mm),
-        width_mm: DEFAULT_W,
-        height_mm: DEFAULT_H,
+        width_mm,
+        height_mm,
         z_order: (Math.max(0, ...panels.map((p) => p.z_order)) || 0) + 1,
         label: nextLabel(panels),
       },
@@ -1030,6 +1054,42 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
           <Button type="button" size="xs" variant={lockAspect ? 'default' : 'outline'} onClick={() => setLockAspect((v) => !v)} title="Keep the aspect ratio while resizing from a corner">
             {lockAspect ? <Lock className="h-3.5 w-3.5" /> : <Unlock className="h-3.5 w-3.5" />} Aspect
           </Button>
+          {selectedPanel.native_width_mm && selectedPanel.native_height_mm ? (
+            <Button
+              type="button"
+              size="xs"
+              variant="outline"
+              title="Resize this panel to the figure's original render size"
+              onClick={() => {
+                const fit = fitToCanvasMm(selectedPanel.native_width_mm!, selectedPanel.native_height_mm!);
+                // Growing in place can push the panel past the sheet — pull the
+                // top-left back so the restored panel stays fully on-canvas.
+                const x_mm = clampPosMm(selectedPanel.x_mm, fit.width_mm, canvas.width_mm);
+                const y_mm = clampPosMm(selectedPanel.y_mm, fit.height_mm, canvas.height_mm);
+                if (
+                  Math.abs(fit.width_mm - selectedPanel.width_mm) < EPS_MM &&
+                  Math.abs(fit.height_mm - selectedPanel.height_mm) < EPS_MM &&
+                  Math.abs(x_mm - selectedPanel.x_mm) < EPS_MM &&
+                  Math.abs(y_mm - selectedPanel.y_mm) < EPS_MM
+                ) return;
+                patchPanel.mutate({
+                  panelId: selectedPanel.id,
+                  data: { ...fit, x_mm, y_mm },
+                  history: {
+                    before: {
+                      x_mm: selectedPanel.x_mm,
+                      y_mm: selectedPanel.y_mm,
+                      width_mm: selectedPanel.width_mm,
+                      height_mm: selectedPanel.height_mm,
+                    },
+                    label: 'resize',
+                  },
+                });
+              }}
+            >
+              <Maximize2 className="h-3.5 w-3.5" /> Original size
+            </Button>
+          ) : null}
           <Button
             type="button"
             size="xs"
