@@ -36,3 +36,45 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run build
+
+  # Deploy to the self-hosted production box (labplotai.com). Runs ONLY on a
+  # push to main and ONLY after both static/lint/build jobs pass, on the
+  # self-hosted runner installed on the prod host. The runner user (ubuntu) is
+  # in the docker group and owns the compose working tree, so it deploys the
+  # exact origin/main tree via docker compose. pull_request events skip this
+  # (the `if` guard) and never touch the box.
+  deploy:
+    needs: [backend-static, frontend]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, labplot-prod]
+    concurrency:
+      group: deploy-prod
+      cancel-in-progress: false
+    steps:
+      - name: Sync working tree to origin/main
+        run: |
+          cd /home/ubuntu/web_projects/LabPlot
+          git fetch --prune origin main
+          git reset --hard origin/main
+          echo "Deploying $(git rev-parse --short HEAD): $(git log -1 --pretty=%s)"
+      - name: Build images and restart containers
+        run: |
+          cd /home/ubuntu/web_projects/LabPlot
+          docker compose build
+          docker compose up -d
+      - name: Health check (containers + live site)
+        run: |
+          cd /home/ubuntu/web_projects/LabPlot
+          for i in $(seq 1 40); do
+            fe=$(docker inspect -f '{{.State.Health.Status}}' labplot-frontend 2>/dev/null || echo none)
+            be=$(docker inspect -f '{{.State.Health.Status}}' labplot-backend 2>/dev/null || echo none)
+            echo "attempt $i: frontend=$fe backend=$be"
+            if [ "$fe" = healthy ] && [ "$be" = healthy ]; then
+              code=$(curl -s -o /dev/null -w '%{http_code}' https://labplotai.com/canvases)
+              echo "live /canvases -> HTTP $code"
+              [ "$code" = "200" ] && exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::deploy health check did not go green in time"
+          exit 1
