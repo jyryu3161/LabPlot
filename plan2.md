@@ -43,7 +43,9 @@
 
 e2e: 러버밴드 선택 수(서버 무관 UI+정렬 후 좌표 서버 검증), 정렬 버튼 → x_mm 일치, 너지 → 1mm 이동. 리스크: Transformer 멀티노드와 개별 재렌더(transformend에 패널별 커밋), Space 키와 텍스트 입력 충돌(입력 포커스 가드 기존 패턴).
 
-## U8 — 캔버스 텍스트·도형 오브젝트 (요청 4 본체)
+## U8 — 캔버스 텍스트·도형 오브젝트 (요청 4 본체) ✅ DONE (2026-07-04 배포·42 e2e green)
+
+**Sonnet 구현 → Fable 검증·수정 체제 3회차.** Sonnet 2에이전트 병렬(백엔드: 마이그레이션 0020+`_sanitize_annotations` 25하네스+`_annotation_svg` 벡터 방출·라이브 DB 업/다운 검증 ∥ 프런트: 신규 4컴포넌트+CanvasEditor ~1000줄 통합, 계약 리딩으로 빈텍스트 400 선발견) + e2e 에이전트(2회-undo UX 결함 발견). 내 게이트에서 **fresh-text 로컬-낙관 모델** 재설계(단일 'add text' 엔트리→1회 undo)와 **프로덕션 차단급 버그** 수정: mousedown 기본 포커스 동작이 방금 autoFocus된 인라인 편집기를 즉시 blur→빈값 커밋으로 텍스트 툴 전멸(3단계 계측으로 포착, `e.evt.preventDefault()`). Fable 리뷰 **12발견 12확정(기각 0)** 전량 수정: ① XML무효 제어문자 스트립(NUL→jsonb 500·BEL→export 영구파괴 차단) ② `annotations_rev` 낙관적 동시성(mig 0021, 409 ANNOTATIONS_CONFLICT — 동시 편집자 무음 클로버 차단) ③ 텍스트 줄바꿈 parity(wrap=none+측정 anchor 에뮬레이션) ④ hex fullmatch ⑤ 중복 id 400 ⑥ z 동률 codepoint 정렬 통일 ⑦ 프룬 효과 주석 포함(혼합 선택 보존) ⑧ Escape 동기 discard(유령/커밋 삼킴 차단) ⑨ 부분 hex 캐시 오염 게이트 ⑩ 빈텍스트 삭제 히스토리 오염(undo 영구 wedge) 복원 ⑪ 컬러피커 debounce(히스토리 50캡 잠식 차단) ⑫ 리페치의 fresh 텍스트 소거 가드. 덤: 기존 AppError 위치인자 오용(OWNER_ONLY 403→500) 수정. 시각 검증: 에디터↔export 벡터 렌더 5타입 WYSIWYG 확인.
 
 1. **모델**: `canvases.annotations` JSONB 컬럼 (마이그레이션 0020). 항목: `{id, type: text|arrow|line|rect|ellipse, x_mm, y_mm, w_mm, h_mm | points_mm, rotation_deg?, text?, font_pt, stroke_hex, stroke_pt, fill_hex?, z}`. **캔버스 소유(배치 계층) — FigureVersion 무관** (계약 §1 정합). PATCH `/api/canvases/{id}` annotations 필드(서버 shape-검증: 타입 화이트리스트·mm/pt 클램프·개수 상한).
 2. **에디터**: 좌측 세로 미니 툴바(선택 V·텍스트 T·화살표·선·□·○, 단축키). 도구 선택 → 캔버스 클릭/드래그로 생성 → 즉시 인라인 편집(텍스트는 dblclick 재편집). 오브젝트도 패널과 같은 레일: 러버밴드/Shift 선택·이동·리사이즈·스냅(오브젝트 엣지도 스냅 타깃)·회전(화살표/선만)·undo(annotation-add/update/delete op).

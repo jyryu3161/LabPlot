@@ -2,15 +2,16 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
+import { createPortal } from 'react-dom';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import Konva from 'konva';
-import { Stage, Layer, Rect, Group, Image as KonvaImage, Text, Transformer, Line } from 'react-konva';
+import { Stage, Layer, Rect, Group, Image as KonvaImage, Text, Transformer, Line, Circle } from 'react-konva';
 import {
   getCanvas, updateCanvas, addCanvasPanel, updateCanvasPanel, deleteCanvasPanel, renderCanvasPreview,
-  downloadCanvasExport, duplicateFigure, listProjects,
+  downloadCanvasExport, duplicateFigure, listProjects, ApiError,
 } from '@/lib/api';
-import type { CanvasDetail, CanvasPanel, FigureListItem } from '@/lib/types';
+import type { CanvasDetail, CanvasPanel, CanvasAnnotation, FigureListItem } from '@/lib/types';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -34,6 +35,13 @@ import { CanvasColorEditor } from './CanvasColorEditor';
 import { CanvasApplyStyle } from './CanvasApplyStyle';
 import { CanvasHelpPopover, CanvasHintsBar } from './CanvasHints';
 import { useAuthContext } from '@/components/auth/AuthProvider';
+import { CanvasAnnotationNode } from './CanvasAnnotationNode';
+import { CanvasAnnotationInspector } from './CanvasAnnotationInspector';
+import { CanvasAnnotationToolbar, TOOL_KEY_MAP, type ToolId } from './CanvasAnnotationToolbar';
+import {
+  originMm, sizeMm, translateAnnotation, createAnnotation, nextAnnotationZ, clampNum, annotationBoxPx,
+  MIN_CREATE_DRAG_MM, sanitizeText, ptToMm as annPtToMm, FONT_PT_DEFAULT as ANN_FONT_PT_DEFAULT,
+} from './annotations';
 
 // ── panel figure image cache ────────────────────────────────────────────────
 // Keyed by (figure_id, version_id, round(w_mm), round(h_mm)) per design §3/§4:
@@ -99,6 +107,7 @@ function CanvasPanelNode({
   selected,
   transparent,
   draggableEnabled,
+  listening = true,
   registerNode,
   onPanelMouseDown,
   onPanelClick,
@@ -113,6 +122,9 @@ function CanvasPanelNode({
   transparent: boolean;
   /** false while Space is held — the Stage pans instead of the panel dragging. */
   draggableEnabled: boolean;
+  /** U8: false while a creation tool is active, so a shape/text drag can
+   * start on top of an existing panel instead of the panel intercepting it. */
+  listening?: boolean;
   registerNode: (id: string, node: Konva.Group | null) => void;
   onPanelMouseDown: (panel: CanvasPanel, e: Konva.KonvaEventObject<MouseEvent | TouchEvent>) => void;
   // onTap (touch) shares this handler and carries a TouchEvent, not a MouseEvent.
@@ -155,6 +167,7 @@ function CanvasPanelNode({
       y={mmToPx(panel.y_mm, pxPerMm)}
       width={w}
       height={h}
+      listening={listening}
       draggable={draggableEnabled}
       dragDistance={3}
       onMouseDown={(e) => onPanelMouseDown(panel, e)}
@@ -241,6 +254,15 @@ function snapshotOf(panel: CanvasPanel): PanelSnapshot {
   };
 }
 
+// Paint-order tie-break must match the backend's codepoint sort in
+// _compose_canvas_svg (sorted by (z, str(id))) — localeCompare uses ICU
+// collation and orders e.g. 'a0' before 'A1', the opposite of Python, which
+// would flip which of two same-z overlapping objects paints on top in the
+// export vs the editor.
+function byCodepoint(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 function nextLabel(panels: CanvasPanel[]): string {
   const used = new Set(panels.map((p) => (p.label ?? '').toUpperCase()).filter(Boolean));
   for (let i = 0; i < 26; i++) {
@@ -266,7 +288,17 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   // keep showing the old figure while export uses the new version.
   useEffect(() => {
     const onVis = () => {
-      if (document.visibilityState === 'visible') qc.invalidateQueries({ queryKey });
+      if (document.visibilityState !== 'visible') return;
+      // A fresh text annotation exists ONLY in the local query cache until
+      // its first commit (see freshTextIdRef) — a refetch resolving now would
+      // wipe it and the text being typed (user tabs away to copy a caption,
+      // tabs back). Mark stale without refetching; the commit's own PATCH
+      // round-trip returns fresh canvas data anyway.
+      if (freshTextIdRef.current) {
+        qc.invalidateQueries({ queryKey, refetchType: 'none' });
+        return;
+      }
+      qc.invalidateQueries({ queryKey });
     };
     document.addEventListener('visibilitychange', onVis);
     return () => document.removeEventListener('visibilitychange', onVis);
@@ -401,22 +433,82 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   const groupResizeActiveRef = useRef(false);
   const groupResizeItemsRef = useRef<{ panelId: string; before: PanelFields; after: PanelFields }[]>([]);
   const groupResizeSeenRef = useRef(0);
+  // U8: parallel accumulator for annotations caught in a group resize (only
+  // needs "after" per item — commitAnnotations snapshots "before" itself from
+  // the live array at commit time), plus the count of TRANSFORMER-ELIGIBLE
+  // selected ids (excludes line/arrow, which never attach to the Transformer
+  // and so never fire transformend) — the real threshold for "last one in".
+  const groupResizeAnnotationItemsRef = useRef<{ id: string; after: CanvasAnnotation }[]>([]);
+  const groupResizeEligibleCountRef = useRef(0);
 
   // U7 5d: keyboard nudge — optimistic local move + debounced batched commit.
   const nudgeAccumRef = useRef<Map<string, { before: { x_mm: number; y_mm: number }; after: { x_mm: number; y_mm: number } }>>(new Map());
   const nudgeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // U8: parallel accumulator for nudged ANNOTATIONS — one whole-array commit
+  // per gesture instead of per-item PATCHes, so this only needs each touched
+  // annotation's pre-nudge-session snapshot (see commitAnnotationNudge).
+  const nudgeAnnotationAccumRef = useRef<Map<string, CanvasAnnotation>>(new Map());
   // F4: per-gesture union min box (mm) so a group resize can't squeeze its
   // smallest member below PANEL_MM_MIN. Null for single-node transforms.
   const groupMinBoxRef = useRef<{ w: number; h: number } | null>(null);
 
+  // ── U8: annotation tool state ──
+  const [activeTool, setActiveTool] = useState<ToolId>('select');
+  // In-progress shape/line/arrow creation drag, in CANVAS ("fit px") coords —
+  // same space + window-mouseup-fallback convention as the U7 marquee.
+  const [drawing, setDrawing] = useState<{ type: Exclude<ToolId, 'select' | 'text'>; x0: number; y0: number; x1: number; y1: number } | null>(null);
+  const drawingRef = useRef<typeof drawing>(null);
+  const finalizeDrawingRef = useRef<() => void>(() => {});
+  // Inline text editor overlay (opened immediately on text-tool creation and
+  // on dblclick of an existing text annotation).
+  const [textEditing, setTextEditing] = useState<{ id: string; value: string } | null>(null);
+  // Escape must DISCARD the in-progress edit, not commit it. Removing a
+  // focused input from the DOM fires NO blur/focusout (WHATWG focus-fixup
+  // rule), so ALL cancel cleanup happens synchronously in cancelTextEditing;
+  // this ref exists only to swallow a genuinely stray blur racing the
+  // unmount. Both editor-open sites disarm it so a never-consumed flag can't
+  // leak into (and silently discard) the NEXT edit session's commit.
+  const textEditCancelRef = useRef(false);
+  // A text annotation freshly placed by the Text tool exists ONLY in the local
+  // query cache until its first real text is committed (single 'add text'
+  // history entry — one Ctrl+Z fully removes it). Escape/empty on a fresh one
+  // is a pure local removal: the server never saw it. Holds the fresh id, or
+  // null when the inline editor targets an already-persisted annotation.
+  const freshTextIdRef = useRef<string | null>(null);
+  // Live override of a line/arrow's points WHILE an endpoint handle is being
+  // dragged (see handleEndpointDragMove/-End) — gives immediate visual
+  // feedback without committing on every mousemove.
+  const [endpointDraft, setEndpointDraft] = useState<{ id: string; points_mm: [number, number, number, number] } | null>(null);
+  // Actual rendered size (mm) of auto-width text annotations, reported by
+  // CanvasAnnotationNode post-layout (a pure-geometry helper can't know
+  // browser font metrics) — read by marquee/snap/bbox code below.
+  const measuredTextRef = useRef<Map<string, { w_mm: number; h_mm: number }>>(new Map());
+  const [, bumpMeasure] = useState(0);
+  // U8 5d/6: debounced inspector field edits — mirrors the U7 nudge
+  // accumulator (one before/after snapshot per edit "session", committed
+  // ~400ms after the last change to that field).
+  const annoEditAccumRef = useRef<{ id: string; before: CanvasAnnotation } | null>(null);
+  const annoEditTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const panels = useMemo(
-    () => (canvas?.panels ?? []).slice().sort((a, b) => a.z_order - b.z_order || a.id.localeCompare(b.id)),
+    () => (canvas?.panels ?? []).slice().sort((a, b) => a.z_order - b.z_order || byCodepoint(a.id, b.id)),
     [canvas?.panels],
+  );
+  const annotations = useMemo(
+    () => (canvas?.annotations ?? []).slice().sort((a, b) => a.z - b.z || byCodepoint(a.id, b.id)),
+    [canvas?.annotations],
   );
   // Single selection keeps every existing single-panel affordance (toolbar,
   // color/text editors, overlay). 2+ selected panels switch to the
   // align/distribute toolbar instead (rendered where selectedPanel is null).
   const selectedPanel = selectedIds.length === 1 ? panels.find((p) => p.id === selectedIds[0]) ?? null : null;
+  // U8: selection composition drives which sidebar/toolbar shows (see render).
+  const selectedPanelIds = useMemo(() => selectedIds.filter((id) => panels.some((p) => p.id === id)), [selectedIds, panels]);
+  const selectedAnnotationIds = useMemo(() => selectedIds.filter((id) => annotations.some((a) => a.id === id)), [selectedIds, annotations]);
+  const selectedAnnotations = useMemo(
+    () => selectedAnnotationIds.map((id) => annotations.find((a) => a.id === id)).filter((a): a is CanvasAnnotation => Boolean(a)),
+    [selectedAnnotationIds, annotations],
+  );
 
   // Fit scale (px/mm): the whole canvas fits the viewport with a margin; zoom
   // multiplies this via the Stage scale (uniform).
@@ -455,15 +547,18 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   }, [fitSig]);
 
   // ── attach transformer to every selected node (U7 8: multi-node resize) ──
+  // U8: line/arrow annotations are excluded — they get draggable endpoint
+  // handles instead (rendered alongside the Transformer further below).
   useEffect(() => {
     const tr = trRef.current;
     if (!tr) return;
     const nodes = selectedIds
+      .filter((id) => panels.some((p) => p.id === id) || annotations.some((a) => a.id === id && a.type !== 'line' && a.type !== 'arrow'))
       .map((id) => nodeRefs.current.get(id))
       .filter((n): n is Konva.Group => Boolean(n));
     tr.nodes(nodes);
     tr.getLayer()?.batchDraw();
-  }, [selectedIds, panels, view.zoom]);
+  }, [selectedIds, panels, annotations, view.zoom]);
 
   // ── keyboard: undo/redo, delete, escape ──
   useEffect(() => {
@@ -483,22 +578,38 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
         applyHistoryRef.current('redo');
         return;
       }
+      // U8: tool shortcuts (V/T/A/L/R/O) — must work with NO selection, so
+      // this runs before the selectedIds gate below. Guarded against focused
+      // buttons/switches (the same a11y guard the Space-pan handler uses)
+      // so e.g. tabbing to a toolbar button and pressing a letter mnemonic
+      // elsewhere never gets stolen.
+      if (!mod && !e.altKey) {
+        const toolKey = TOOL_KEY_MAP[e.key.toLowerCase()];
+        if (toolKey) {
+          const role = el?.getAttribute('role') ?? '';
+          const isControl = Boolean(el && (tag === 'BUTTON' || tag === 'A'
+            || ['button', 'switch', 'checkbox', 'menuitem', 'tab', 'combobox'].includes(role)));
+          if (!isControl) {
+            e.preventDefault();
+            setActiveTool(toolKey);
+            return;
+          }
+        }
+      }
+      if (e.key === 'Escape') {
+        // Esc always returns to the Select tool, in addition to the existing
+        // deselect — unconditional (works with an empty selection too).
+        setActiveTool('select');
+        setSelectedIds([]);
+        return;
+      }
       if (selectedIds.length === 0) return;
       if (e.key === 'Delete' || e.key === 'Backspace') {
         e.preventDefault();
         // Guard the keyboard shortcut — a stray Delete/Backspace shouldn't
-        // silently drop a panel. (History-applied deletes skip this confirm.)
-        if (selectedIds.length === 1) {
-          if (window.confirm('Remove this panel from the canvas?')) {
-            removePanel.mutate({ panelId: selectedIds[0], record: true });
-          }
-        } else if (window.confirm(`Remove ${selectedIds.length} panels from the canvas?`)) {
-          // v1: one history entry per panel (acceptable per plan — a single
-          // combined multi-delete undo op is a possible follow-up).
-          for (const id of selectedIds) removePanel.mutate({ panelId: id, record: true });
-        }
-      } else if (e.key === 'Escape') {
-        setSelectedIds([]);
+        // silently drop a panel/annotation. (History-applied deletes skip
+        // this confirm.)
+        deleteSelected();
       } else if (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
         e.preventDefault();
         nudgeSelectedRef.current(e.key, e.shiftKey);
@@ -691,6 +802,181 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     onError: (e) => toast.error(e instanceof Error && e.message ? e.message : 'Could not update canvas'),
   });
 
+  // ── U8: annotations — whole-array replace (server sanitizes + 400s
+  // BAD_ANNOTATIONS on structural errors; the client mirrors the same clamps
+  // in annotations.ts for optimistic UX, but the server is the source of
+  // truth on conflict). Optimistic update + rollback, same shape as
+  // patchPanel; history is ONE whole-array snapshot per gesture (see
+  // canvasHistory.ts 'annotations-update'). ──
+  const patchAnnotations = useMutation({
+    // base_annotations_rev is read at request time (pre-increment server rev
+    // from the cache): the server 409s ANNOTATIONS_CONFLICT when another
+    // editor replaced the array since this client last loaded it, instead of
+    // silently destroying their objects (whole-array last-write-wins).
+    mutationFn: ({ data }: {
+      data: { annotations: CanvasAnnotation[] };
+      history?: { before: CanvasAnnotation[]; after: CanvasAnnotation[]; label: string };
+    }) => updateCanvas(canvasId, {
+      ...data,
+      base_annotations_rev: qc.getQueryData<CanvasDetail>(queryKey)?.annotations_rev,
+    }),
+    onMutate: async ({ data }) => {
+      await qc.cancelQueries({ queryKey });
+      const prev = qc.getQueryData<CanvasDetail>(queryKey);
+      qc.setQueryData<CanvasDetail>(queryKey, (old) => (old ? { ...old, annotations: data.annotations } : old));
+      return { prev };
+    },
+    onError: (e, _v, ctx) => {
+      if (ctx?.prev) qc.setQueryData(queryKey, ctx.prev);
+      if (e instanceof ApiError && e.status === 409) {
+        // Another editor changed the annotations — reload server truth; the
+        // local history entries recorded against the stale array may fail to
+        // apply, which surfaces as this same toast rather than clobbering.
+        void qc.invalidateQueries({ queryKey });
+        toast.error('Annotations were changed by another editor — reloaded; please redo your edit');
+        return;
+      }
+      toast.error('Could not update annotations');
+    },
+    onSuccess: (updated, vars) => {
+      qc.setQueryData<CanvasDetail>(queryKey, (old) => (old
+        ? { ...old, annotations: updated.annotations, annotations_rev: updated.annotations_rev }
+        : updated));
+      if (vars.history) {
+        historyRef.current?.record({
+          type: 'annotations-update',
+          before: vars.history.before,
+          after: vars.history.after,
+          label: vars.history.label,
+        });
+      }
+    },
+  });
+
+  // Any pending debounced inspector-field edit (see draftAnnotationField)
+  // MUST land before another annotation commit or an undo/redo application —
+  // same F10 rule the U7 nudge accumulator follows, and for the same reason
+  // (a stale trailing commit would otherwise fire later and revert it).
+  function flushAnnotationEdit(): void {
+    if (annoEditTimerRef.current) {
+      clearTimeout(annoEditTimerRef.current);
+      annoEditTimerRef.current = null;
+      commitPendingAnnotationEdit();
+    }
+  }
+  // Revert a drafted (uncommitted) inspector edit in the live cache back to
+  // its pre-edit-session value. Required before delete-on-empty-text: the
+  // delete's history `before` snapshots the LIVE cache, and a drafted-empty
+  // text: '' recorded there would make undoing that delete PATCH an array the
+  // server 400s on (BAD_ANNOTATIONS "requires non-empty text") — the failed
+  // op then re-pushes forever and wedges the whole undo stack.
+  function revertAnnotationDraft(accum: { id: string; before: CanvasAnnotation }): void {
+    qc.setQueryData<CanvasDetail>(queryKey, (old) => (old
+      ? { ...old, annotations: old.annotations.map((a) => (a.id === accum.id ? accum.before : a)) }
+      : old));
+  }
+  function commitPendingAnnotationEdit(): void {
+    const accum = annoEditAccumRef.current;
+    annoEditAccumRef.current = null;
+    if (!accum) return;
+    const live = qc.getQueryData<CanvasDetail>(queryKey)?.annotations ?? annotations;
+    const current = live.find((a) => a.id === accum.id);
+    // The backend REJECTS an empty/whitespace-only text string (400
+    // BAD_ANNOTATIONS) — if a debounced text edit landed on empty (e.g. the
+    // user select-alled to retype and paused >400ms before typing the
+    // replacement), delete the annotation instead of sending a PATCH the
+    // server would reject anyway. Restore the pre-draft value FIRST so the
+    // delete's history `before` stays server-valid (see revertAnnotationDraft).
+    if (current?.type === 'text' && !(current.text ?? '').trim()) {
+      revertAnnotationDraft(accum);
+      deleteAnnotationIds([accum.id]);
+      return;
+    }
+    const before = live.map((a) => (a.id === accum.id ? accum.before : a));
+    if (JSON.stringify(before) === JSON.stringify(live)) return; // no-op edit session
+    patchAnnotations.mutate({ data: { annotations: live }, history: { before, after: live, label: 'edit annotation' } });
+  }
+  /** Optimistic-only local patch (no server call, no history yet) — gives
+   * live canvas feedback while typing/dragging a slider; the actual PATCH +
+   * history entry is debounced 400ms after the last call for a given id. */
+  function draftAnnotationField(id: string, patch: Partial<CanvasAnnotation>) {
+    const live = qc.getQueryData<CanvasDetail>(queryKey)?.annotations ?? annotations;
+    const current = live.find((a) => a.id === id);
+    if (!current) return;
+    if (!annoEditAccumRef.current || annoEditAccumRef.current.id !== id) {
+      // Switching which annotation/field is being edited — flush whatever was
+      // pending so it gets its OWN correctly-scoped history entry instead of
+      // being silently folded into this one.
+      flushAnnotationEdit();
+      annoEditAccumRef.current = { id, before: current };
+    }
+    qc.setQueryData<CanvasDetail>(queryKey, (old) => (old
+      ? { ...old, annotations: old.annotations.map((a) => (a.id === id ? { ...a, ...patch } : a)) }
+      : old));
+    if (annoEditTimerRef.current) clearTimeout(annoEditTimerRef.current);
+    annoEditTimerRef.current = setTimeout(() => { annoEditTimerRef.current = null; commitPendingAnnotationEdit(); }, 400);
+  }
+  /** Canonical annotation commit primitive: flush any pending debounce, read
+   * the current live array, transform it, and commit ONE canvas PATCH + ONE
+   * history entry. Every annotation mutation (create/move/resize/endpoint-
+   * drag/inspector edit/delete/z-change) funnels through this. */
+  function commitAnnotations(buildNext: (current: CanvasAnnotation[]) => CanvasAnnotation[], label: string) {
+    flushAnnotationEdit();
+    const before = qc.getQueryData<CanvasDetail>(queryKey)?.annotations ?? annotations;
+    const after = buildNext(before);
+    if (JSON.stringify(before) === JSON.stringify(after)) return;
+    patchAnnotations.mutate({ data: { annotations: after }, history: { before, after, label } });
+  }
+  function deleteAnnotationIds(ids: string[]) {
+    if (ids.length === 0) return;
+    commitAnnotations((cur) => cur.filter((a) => !ids.includes(a.id)), 'delete');
+    setSelectedIds((cur) => cur.filter((id) => !ids.includes(id)));
+  }
+  function zBumpAnnotations(ids: string[], delta: number) {
+    if (ids.length === 0) return;
+    commitAnnotations((cur) => cur.map((a) => (ids.includes(a.id) ? { ...a, z: a.z + delta } : a)), delta > 0 ? 'bring forward' : 'send backward');
+  }
+  /** Inspector discrete-action commit (swatch pick, align, fill toggle, font
+   * size/stroke width on blur, text content on blur) — single id, immediate. */
+  function commitAnnotationField(id: string, patch: Partial<CanvasAnnotation>, label: string) {
+    // Same backend "text required" guard as commitPendingAnnotationEdit — the
+    // inspector's own text field can blur on an empty value too. Cancel the
+    // pending debounce (its flush inside commitAnnotations would race a
+    // second, still-corrupt delete) and restore the pre-draft value so the
+    // delete's history `before` stays server-valid.
+    if ('text' in patch && !(patch.text ?? '').trim()) {
+      if (annoEditTimerRef.current) {
+        clearTimeout(annoEditTimerRef.current);
+        annoEditTimerRef.current = null;
+      }
+      const accum = annoEditAccumRef.current;
+      annoEditAccumRef.current = null;
+      if (accum && accum.id === id) revertAnnotationDraft(accum);
+      deleteAnnotationIds([id]);
+      return;
+    }
+    commitAnnotations((cur) => cur.map((a) => (a.id === id ? { ...a, ...patch } : a)), label);
+  }
+  function getMeasuredTextMm(id: string) {
+    return measuredTextRef.current.get(id);
+  }
+  // Unified Delete/Backspace target: panels keep their existing per-panel
+  // confirm+mutate path (unchanged), annotations delete via ONE commit.
+  function deleteSelected() {
+    const selPanelIds = selectedIds.filter((id) => panels.some((p) => p.id === id));
+    const selAnnoIds = selectedIds.filter((id) => annotations.some((a) => a.id === id));
+    const count = selPanelIds.length + selAnnoIds.length;
+    if (count === 0) return;
+    const noun = selPanelIds.length && selAnnoIds.length ? 'item' : selAnnoIds.length ? 'annotation' : 'panel';
+    const prompt = count === 1 ? `Remove this ${noun} from the canvas?` : `Remove ${count} ${noun}s from the canvas?`;
+    if (!window.confirm(prompt)) return;
+    // v1: one history entry per panel + one combined entry for all
+    // annotations (acceptable per plan — a single fully-combined multi-delete
+    // undo op is a possible follow-up, same tradeoff U7 already accepted).
+    for (const id of selPanelIds) removePanel.mutate({ panelId: id, record: true });
+    if (selAnnoIds.length) deleteAnnotationIds(selAnnoIds);
+  }
+
   // ── undo/redo application ──
   // Re-create a deleted panel from its snapshot via the same addCanvasPanel
   // mutation (record omitted → not re-recorded), then remap the snapshot's old
@@ -718,6 +1004,7 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   async function applyHistory(direction: 'undo' | 'redo') {
     if (history.isApplying || applyingHistory) return;
     await flushNudge(); // pending nudge commits (and records) BEFORE we pop an op
+    flushAnnotationEdit(); // ditto for a pending debounced annotation-field edit
     const op = direction === 'undo' ? history.undo() : history.redo();
     if (!op) return;
     history.beginApply();
@@ -764,6 +1051,13 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
           await patchCanvas.mutateAsync({ data: direction === 'undo' ? op.before : op.after });
           break;
         }
+        case 'annotations-update': {
+          // No id remapping needed (unlike panels): annotation ids are
+          // client-generated uuids that persist unchanged across undo/redo —
+          // there's no server-assigned id swap to track.
+          await patchAnnotations.mutateAsync({ data: { annotations: direction === 'undo' ? op.before : op.after } });
+          break;
+        }
       }
       toast.success(`${direction === 'undo' ? 'Undid' : 'Redid'} ${op.label}`);
     } catch {
@@ -793,16 +1087,32 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     window.addEventListener('mouseup', onWinUp);
     return () => window.removeEventListener('mouseup', onWinUp);
   }, [marqueeActive]);
-  // F13: prune selection against the live panel list — a cross-tab delete
+  // U8: same window-mouseup-fallback pattern, for an in-progress shape/line/
+  // arrow creation drag.
+  useEffect(() => {
+    finalizeDrawingRef.current = finalizeDrawing;
+  });
+  const drawingActive = drawing !== null;
+  useEffect(() => {
+    if (!drawingActive) return;
+    const onWinUp = () => finalizeDrawingRef.current();
+    window.addEventListener('mouseup', onWinUp);
+    return () => window.removeEventListener('mouseup', onWinUp);
+  }, [drawingActive]);
+  // F13: prune selection against BOTH live item lists — a cross-tab delete
   // otherwise leaves ghost ids that wedge group-resize's arrival counter,
-  // no-op align, and mislead the "N panels selected" count.
+  // no-op align, and mislead the "N items selected" count. U8: annotations
+  // share selectedIds and MUST be kept here — `panels` gets a new identity on
+  // every optimistic panel patch (patchLocalPanel/patchPanel), which would
+  // otherwise strip annotation ids from a mixed selection right after the
+  // first panel-touching gesture (nudge, group drag, undo/redo).
   useEffect(() => {
     setSelectedIds((cur) => {
-      const next = cur.filter((id) => panels.some((p) => p.id === id));
+      const next = cur.filter((id) => panels.some((p) => p.id === id) || annotations.some((a) => a.id === id));
       return next.length === cur.length ? cur : next;
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [panels]);
+  }, [panels, annotations]);
 
   // ── export: compose the canvas into a vector file (SVG/PDF) and download it. ──
   const exportCanvas = useMutation({
@@ -815,22 +1125,83 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   });
 
   // U7 5a: apply the leader's post-snap delta to the rest of a multi-selection
-  // being dragged as a group. No-ops unless `panel` IS the gesture's leader
-  // (groupMoveRef is only set on that one panel's dragstart).
-  function applyGroupDragDelta(panel: CanvasPanel, node: Konva.Group) {
+  // being dragged as a group. No-ops unless `leaderId` IS the gesture's leader
+  // (groupMoveRef is only set on that one item's dragstart). U8: genericized
+  // to an id (was `panel: CanvasPanel`) so it works for annotation leaders too
+  // — it's pure node-translation and never needed panel fields.
+  function applyGroupDragDelta(leaderId: string, node: Konva.Group) {
     const group = groupMoveRef.current;
-    if (!group || group.leaderId !== panel.id) return;
-    const start = group.startPx.get(panel.id);
+    if (!group || group.leaderId !== leaderId) return;
+    const start = group.startPx.get(leaderId);
     if (!start) return;
     const dx = node.x() - start.x;
     const dy = node.y() - start.y;
     for (const [id, s] of group.startPx) {
-      if (id === panel.id) continue;
+      if (id === leaderId) continue;
       const sibling = nodeRefs.current.get(id);
       if (!sibling) continue;
       sibling.x(s.x + dx);
       sibling.y(s.y + dy);
     }
+  }
+
+  // U8: shared dragstart setup for BOTH panels and annotations — snapshots
+  // every selected node's start position (+ its current origin mm, for the
+  // eventual history "before") so handleDragMove/handleDragEnd can apply the
+  // leader's delta to the rest, regardless of item kind.
+  function beginGroupMove(leaderId: string) {
+    if (selectedIds.length > 1 && selectedIds.includes(leaderId)) {
+      const startPx = new Map<string, { x: number; y: number }>();
+      const beforeMm = new Map<string, { x_mm: number; y_mm: number }>();
+      for (const id of selectedIds) {
+        const node = nodeRefs.current.get(id);
+        if (node) startPx.set(id, { x: node.x(), y: node.y() });
+        const p = panels.find((pp) => pp.id === id);
+        if (p) { beforeMm.set(id, { x_mm: p.x_mm, y_mm: p.y_mm }); continue; }
+        const a = annotations.find((aa) => aa.id === id);
+        if (a) { const o = originMm(a); beforeMm.set(id, { x_mm: o.x, y_mm: o.y }); }
+      }
+      groupMoveRef.current = { leaderId, startPx, beforeMm };
+    } else {
+      groupMoveRef.current = null;
+    }
+  }
+
+  // U8: commit a completed group-move gesture (mixed panel+annotation
+  // selections included) — panels batch-commit via commitPanelsBatch
+  // (unchanged U7 path); annotations batch-commit as ONE canvas PATCH. A
+  // MIXED gesture therefore records TWO history entries (one per op type,
+  // per canvasHistory.ts's typed ops) rather than a single combined one —
+  // undo needs two Ctrl+Z presses to fully revert a mixed drag. Documented
+  // tradeoff, not a bug: keeps each op type's history shape simple.
+  function commitGroupMove(group: NonNullable<typeof groupMoveRef.current>) {
+    if (!canvas) return;
+    const panelItems: { panelId: string; before: PanelFields; after: PanelFields }[] = [];
+    const annoUpdates = new Map<string, CanvasAnnotation>();
+    for (const [id, before] of group.beforeMm) {
+      const n = nodeRefs.current.get(id);
+      if (!n) continue;
+      const p = panels.find((pp) => pp.id === id);
+      if (p) {
+        const x_mm = clampPosMm(pxToMm(n.x(), pxPerMm), p.width_mm, canvas.width_mm);
+        const y_mm = clampPosMm(pxToMm(n.y(), pxPerMm), p.height_mm, canvas.height_mm);
+        n.x(mmToPx(x_mm, pxPerMm));
+        n.y(mmToPx(y_mm, pxPerMm));
+        if (Math.abs(x_mm - before.x_mm) < EPS_MM && Math.abs(y_mm - before.y_mm) < EPS_MM) continue;
+        panelItems.push({ panelId: id, before: { x_mm: before.x_mm, y_mm: before.y_mm }, after: { x_mm, y_mm } });
+        continue;
+      }
+      const a = annotations.find((aa) => aa.id === id);
+      if (!a) continue;
+      const x_mm = roundMm(clampNum(pxToMm(n.x(), pxPerMm), -1000, 3000));
+      const y_mm = roundMm(clampNum(pxToMm(n.y(), pxPerMm), -1000, 3000));
+      n.x(mmToPx(x_mm, pxPerMm));
+      n.y(mmToPx(y_mm, pxPerMm));
+      if (Math.abs(x_mm - before.x_mm) < EPS_MM && Math.abs(y_mm - before.y_mm) < EPS_MM) continue;
+      annoUpdates.set(id, translateAnnotation(a, x_mm - before.x_mm, y_mm - before.y_mm));
+    }
+    if (panelItems.length) commitPanelsBatch(panelItems, 'move');
+    if (annoUpdates.size) commitAnnotations((cur) => cur.map((a) => annoUpdates.get(a.id) ?? a), 'move');
   }
 
   // ── move: convert node px → mm; position only (NO re-render) ──
@@ -840,7 +1211,7 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     // Alt/Option temporarily disables snapping for pixel-precise placement.
     if (e.evt.altKey) {
       setGuides({ x: null, y: null });
-      applyGroupDragDelta(panel, node);
+      applyGroupDragDelta(panel.id, node);
       return;
     }
     const thr = SNAP_PX / view.zoom;
@@ -852,15 +1223,22 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     let y = node.y();
 
     const others = panels.filter((p) => p.id !== panel.id);
+    // U8: annotation bounding boxes join the panel snap target set.
     const xTargets = [0, cw, cw / 2, ...others.flatMap((p) => {
       const px = mmToPx(p.x_mm, pxPerMm);
       const pw = mmToPx(p.width_mm, pxPerMm);
       return [px, px + pw, px + pw / 2];
+    }), ...annotations.flatMap((a) => {
+      const box = annotationBoxPx(a, pxPerMm, measuredTextRef.current.get(a.id));
+      return [box.x0, box.x1, (box.x0 + box.x1) / 2];
     })];
     const yTargets = [0, ch, ch / 2, ...others.flatMap((p) => {
       const py = mmToPx(p.y_mm, pxPerMm);
       const ph = mmToPx(p.height_mm, pxPerMm);
       return [py, py + ph, py + ph / 2];
+    }), ...annotations.flatMap((a) => {
+      const box = annotationBoxPx(a, pxPerMm, measuredTextRef.current.get(a.id));
+      return [box.y0, box.y1, (box.y0 + box.y1) / 2];
     })];
 
     let guideX: number | null = null;
@@ -890,7 +1268,7 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     setGuides({ x: guideX, y: guideY });
     // Group siblings follow the LEADER's post-snap position (snap only ever
     // applies to the dragged node, per U7 5a).
-    applyGroupDragDelta(panel, node);
+    applyGroupDragDelta(panel.id, node);
   }
 
   function handleDragEnd(panel: CanvasPanel, e: Konva.KonvaEventObject<DragEvent>) {
@@ -900,23 +1278,7 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     const group = groupMoveRef.current;
     if (group && group.leaderId === panel.id) {
       groupMoveRef.current = null;
-      const items: { panelId: string; before: PanelFields; after: PanelFields }[] = [];
-      for (const [id, before] of group.beforeMm) {
-        const p = panels.find((pp) => pp.id === id);
-        const n = nodeRefs.current.get(id);
-        if (!p || !n) continue;
-        const x_mm = clampPosMm(pxToMm(n.x(), pxPerMm), p.width_mm, canvas.width_mm);
-        const y_mm = clampPosMm(pxToMm(n.y(), pxPerMm), p.height_mm, canvas.height_mm);
-        // Always re-sync the node to its CLAMPED position first: an EPS-skipped
-        // member (clamp returned its pre-drag mm) got dragged visually but gets
-        // no cache/prop change, and react-konva only re-applies CHANGED props —
-        // without this it would stay rendered off-canvas indefinitely.
-        n.x(mmToPx(x_mm, pxPerMm));
-        n.y(mmToPx(y_mm, pxPerMm));
-        if (Math.abs(x_mm - before.x_mm) < EPS_MM && Math.abs(y_mm - before.y_mm) < EPS_MM) continue;
-        items.push({ panelId: id, before: { x_mm: before.x_mm, y_mm: before.y_mm }, after: { x_mm, y_mm } });
-      }
-      commitPanelsBatch(items, 'move');
+      commitGroupMove(group);
       return;
     }
     // Position clamp is [0, canvas − panel] (clampCanvasMm is a SIZE clamp
@@ -937,6 +1299,128 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
       data: { x_mm, y_mm }, // position only → no re-render
       history: { before: { x_mm: panel.x_mm, y_mm: panel.y_mm }, label: 'move' },
     });
+  }
+
+  // ── U8: annotation move — same alt-bypass + nearest-target snap shape as
+  // handleDragMove, but the snap target set is panels + every OTHER
+  // annotation (a panel drag's targets, symmetrically, now include every
+  // annotation — see handleDragMove above). ──
+  function handleAnnotationDragMove(ann: CanvasAnnotation, e: Konva.KonvaEventObject<DragEvent>) {
+    if (!canvas) return;
+    const node = e.target as Konva.Group;
+    if (e.evt.altKey) {
+      setGuides({ x: null, y: null });
+      applyGroupDragDelta(ann.id, node);
+      return;
+    }
+    const thr = SNAP_PX / view.zoom;
+    const selfSize = sizeMm(ann, measuredTextRef.current.get(ann.id));
+    const w = mmToPx(selfSize.w_mm, pxPerMm);
+    const h = mmToPx(selfSize.h_mm, pxPerMm);
+    const cw = mmToPx(canvas.width_mm, pxPerMm);
+    const ch = mmToPx(canvas.height_mm, pxPerMm);
+    let x = node.x();
+    let y = node.y();
+
+    const otherAnnos = annotations.filter((a) => a.id !== ann.id);
+    const xTargets = [0, cw, cw / 2, ...panels.flatMap((p) => {
+      const px = mmToPx(p.x_mm, pxPerMm);
+      const pw = mmToPx(p.width_mm, pxPerMm);
+      return [px, px + pw, px + pw / 2];
+    }), ...otherAnnos.flatMap((a) => {
+      const box = annotationBoxPx(a, pxPerMm, measuredTextRef.current.get(a.id));
+      return [box.x0, box.x1, (box.x0 + box.x1) / 2];
+    })];
+    const yTargets = [0, ch, ch / 2, ...panels.flatMap((p) => {
+      const py = mmToPx(p.y_mm, pxPerMm);
+      const ph = mmToPx(p.height_mm, pxPerMm);
+      return [py, py + ph, py + ph / 2];
+    }), ...otherAnnos.flatMap((a) => {
+      const box = annotationBoxPx(a, pxPerMm, measuredTextRef.current.get(a.id));
+      return [box.y0, box.y1, (box.y0 + box.y1) / 2];
+    })];
+
+    let guideX: number | null = null;
+    let guideY: number | null = null;
+    let bestX: { d: number; delta: number; t: number } | null = null;
+    for (const edge of [x, x + w, x + w / 2]) {
+      for (const t of xTargets) {
+        const d = Math.abs(edge - t);
+        if (d <= thr && (!bestX || d < bestX.d)) bestX = { d, delta: t - edge, t };
+      }
+    }
+    let bestY: { d: number; delta: number; t: number } | null = null;
+    for (const edge of [y, y + h, y + h / 2]) {
+      for (const t of yTargets) {
+        const d = Math.abs(edge - t);
+        if (d <= thr && (!bestY || d < bestY.d)) bestY = { d, delta: t - edge, t };
+      }
+    }
+    if (bestX) { x += bestX.delta; guideX = bestX.t; }
+    if (bestY) { y += bestY.delta; guideY = bestY.t; }
+    node.x(x);
+    node.y(y);
+    setGuides({ x: guideX, y: guideY });
+    applyGroupDragDelta(ann.id, node);
+  }
+
+  function handleAnnotationDragEnd(ann: CanvasAnnotation, e: Konva.KonvaEventObject<DragEvent>) {
+    setGuides({ x: null, y: null });
+    const node = e.target as Konva.Group;
+    const group = groupMoveRef.current;
+    if (group && group.leaderId === ann.id) {
+      groupMoveRef.current = null;
+      commitGroupMove(group);
+      return;
+    }
+    const origin = originMm(ann);
+    // Annotations aren't clamped to the canvas sheet like panels (a large
+    // arrow legitimately runs off-edge) — just the same generous sanity range
+    // the backend enforces server-side.
+    const x_mm = roundMm(clampNum(pxToMm(node.x(), pxPerMm), -1000, 3000));
+    const y_mm = roundMm(clampNum(pxToMm(node.y(), pxPerMm), -1000, 3000));
+    node.x(mmToPx(x_mm, pxPerMm));
+    node.y(mmToPx(y_mm, pxPerMm));
+    if (Math.abs(x_mm - origin.x) < EPS_MM && Math.abs(y_mm - origin.y) < EPS_MM) return;
+    const updated = translateAnnotation(ann, x_mm - origin.x, y_mm - origin.y);
+    commitAnnotations((cur) => cur.map((a) => (a.id === ann.id ? updated : a)), 'move');
+  }
+
+  // ── U8: line/arrow endpoint handles (excluded from the shared Transformer —
+  // see isTransformerEligible) — a small draggable circle per endpoint, shown
+  // only while that ONE line/arrow is the sole selection (rendered in the JSX
+  // below). `endpointDraft` gives live visual feedback during the drag
+  // (CanvasAnnotationNode renders whichever of {live annotation, draft} is
+  // current — see the `.map()` in the render section) without committing on
+  // every mousemove. ──
+  function handleEndpointDragMove(annId: string, which: 0 | 1, e: Konva.KonvaEventObject<DragEvent>) {
+    const ann = annotations.find((a) => a.id === annId);
+    if (!ann || !ann.points_mm) return;
+    const node = e.target;
+    const xMm = pxToMm(node.x(), pxPerMm);
+    const yMm = pxToMm(node.y(), pxPerMm);
+    const base = endpointDraft?.id === annId ? endpointDraft.points_mm : ann.points_mm;
+    const next: [number, number, number, number] = [...base] as [number, number, number, number];
+    next[which * 2] = xMm;
+    next[which * 2 + 1] = yMm;
+    setEndpointDraft({ id: annId, points_mm: next });
+  }
+  function handleEndpointDragEnd(annId: string, which: 0 | 1, e: Konva.KonvaEventObject<DragEvent>) {
+    setEndpointDraft(null);
+    const ann = annotations.find((a) => a.id === annId);
+    if (!ann || !ann.points_mm) return;
+    const node = e.target;
+    const xMm = roundMm(clampNum(pxToMm(node.x(), pxPerMm), -1000, 3000));
+    const yMm = roundMm(clampNum(pxToMm(node.y(), pxPerMm), -1000, 3000));
+    const before = ann.points_mm;
+    const next: [number, number, number, number] = [...before] as [number, number, number, number];
+    next[which * 2] = xMm;
+    next[which * 2 + 1] = yMm;
+    if (
+      Math.abs(next[0] - before[0]) < EPS_MM && Math.abs(next[1] - before[1]) < EPS_MM
+      && Math.abs(next[2] - before[2]) < EPS_MM && Math.abs(next[3] - before[3]) < EPS_MM
+    ) return;
+    commitAnnotations((cur) => cur.map((a) => (a.id === annId ? { ...a, points_mm: next } : a)), 'endpoint');
   }
 
   // ── resize = RE-LAYOUT: reset the transient Konva scale, commit new mm; the
@@ -974,12 +1458,18 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
         });
       }
       groupResizeSeenRef.current += 1;
-      if (groupResizeSeenRef.current >= selectedIds.length) {
+      if (groupResizeSeenRef.current >= groupResizeEligibleCountRef.current) {
         groupResizeActiveRef.current = false;
         const items = groupResizeItemsRef.current;
         groupResizeItemsRef.current = [];
+        const annoItems = groupResizeAnnotationItemsRef.current;
+        groupResizeAnnotationItemsRef.current = [];
         groupResizeSeenRef.current = 0;
-        commitPanelsBatch(items, 'resize');
+        if (items.length) commitPanelsBatch(items, 'resize');
+        if (annoItems.length) {
+          const byId = new Map(annoItems.map((it) => [it.id, it.after]));
+          commitAnnotations((cur) => cur.map((a) => byId.get(a.id) ?? a), 'resize');
+        }
       }
       return;
     }
@@ -997,6 +1487,56 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
         label: 'resize',
       },
     });
+  }
+
+  // ── U8: annotation resize — text gets WIDTH ONLY (font_pt/height untouched;
+  // enforced both here and via the text-only enabledAnchors set below), rect/
+  // ellipse get free width+height. line/arrow never attach to the Transformer
+  // (excluded from nodeRefs eligibility) so this never fires for them. ──
+  const ANNOTATION_MM_MIN = 2;
+  function handleAnnotationTransformEnd(ann: CanvasAnnotation, e: Konva.KonvaEventObject<Event>) {
+    setGuides({ x: null, y: null });
+    const node = e.target as Konva.Group;
+    const scaleX = node.scaleX();
+    const scaleY = node.scaleY();
+    const newWpx = Math.max(mmToPx(ANNOTATION_MM_MIN, pxPerMm), node.width() * scaleX);
+    const newHpx = Math.max(mmToPx(ANNOTATION_MM_MIN, pxPerMm), node.height() * scaleY);
+    node.scaleX(1);
+    node.scaleY(1);
+    const x_mm = roundMm(clampNum(pxToMm(node.x(), pxPerMm), -1000, 3000));
+    const y_mm = roundMm(clampNum(pxToMm(node.y(), pxPerMm), -1000, 3000));
+    const width_mm = roundMm(clampNum(pxToMm(newWpx, pxPerMm), 0.5, 2000));
+
+    let updated: CanvasAnnotation;
+    if (ann.type === 'text') {
+      updated = { ...ann, x_mm, y_mm, w_mm: width_mm };
+    } else {
+      const height_mm = roundMm(clampNum(pxToMm(newHpx, pxPerMm), 0.5, 2000));
+      updated = { ...ann, x_mm, y_mm, w_mm: width_mm, h_mm: height_mm };
+    }
+    const noChange = JSON.stringify(updated) === JSON.stringify(ann);
+
+    if (groupResizeActiveRef.current) {
+      if (!noChange) groupResizeAnnotationItemsRef.current.push({ id: ann.id, after: updated });
+      groupResizeSeenRef.current += 1;
+      if (groupResizeSeenRef.current >= groupResizeEligibleCountRef.current) {
+        groupResizeActiveRef.current = false;
+        const items = groupResizeItemsRef.current;
+        groupResizeItemsRef.current = [];
+        const annoItems = groupResizeAnnotationItemsRef.current;
+        groupResizeAnnotationItemsRef.current = [];
+        groupResizeSeenRef.current = 0;
+        if (items.length) commitPanelsBatch(items, 'resize');
+        if (annoItems.length) {
+          const byId = new Map(annoItems.map((it) => [it.id, it.after]));
+          commitAnnotations((cur) => cur.map((a) => byId.get(a.id) ?? a), 'resize');
+        }
+      }
+      return;
+    }
+
+    if (noChange) return;
+    commitAnnotations((cur) => cur.map((a) => (a.id === ann.id ? updated : a)), 'resize');
   }
 
   // ── z-order ──
@@ -1105,19 +1645,38 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     if (dx === 0 && dy === 0) return;
     for (const id of selectedIds) {
       const p = cv.panels.find((pp) => pp.id === id);
-      if (!p) continue;
-      const x_mm = clampPosMm(p.x_mm + dx, p.width_mm, cv.width_mm);
-      const y_mm = clampPosMm(p.y_mm + dy, p.height_mm, cv.height_mm);
-      if (Math.abs(x_mm - p.x_mm) < EPS_MM && Math.abs(y_mm - p.y_mm) < EPS_MM) continue;
-      patchLocalPanel(id, { x_mm, y_mm });
-      const existing = nudgeAccumRef.current.get(id);
-      nudgeAccumRef.current.set(id, {
-        before: existing ? existing.before : { x_mm: p.x_mm, y_mm: p.y_mm },
-        after: { x_mm, y_mm },
-      });
+      if (p) {
+        const x_mm = clampPosMm(p.x_mm + dx, p.width_mm, cv.width_mm);
+        const y_mm = clampPosMm(p.y_mm + dy, p.height_mm, cv.height_mm);
+        if (Math.abs(x_mm - p.x_mm) < EPS_MM && Math.abs(y_mm - p.y_mm) < EPS_MM) continue;
+        patchLocalPanel(id, { x_mm, y_mm });
+        const existing = nudgeAccumRef.current.get(id);
+        nudgeAccumRef.current.set(id, {
+          before: existing ? existing.before : { x_mm: p.x_mm, y_mm: p.y_mm },
+          after: { x_mm, y_mm },
+        });
+        continue;
+      }
+      // U8: same optimistic-local + accumulate pattern, for an annotation.
+      const a = (cv.annotations ?? []).find((aa) => aa.id === id);
+      if (!a) continue;
+      const translated = translateAnnotation(a, dx, dy);
+      if (!nudgeAnnotationAccumRef.current.has(id)) nudgeAnnotationAccumRef.current.set(id, a);
+      qc.setQueryData<CanvasDetail>(queryKey, (old) => (old
+        ? { ...old, annotations: old.annotations.map((aa) => (aa.id === id ? translated : aa)) }
+        : old));
     }
     if (nudgeTimerRef.current) clearTimeout(nudgeTimerRef.current);
     nudgeTimerRef.current = setTimeout(commitNudge, 400);
+  }
+  function commitAnnotationNudge(): void {
+    const beforeMap = nudgeAnnotationAccumRef.current;
+    nudgeAnnotationAccumRef.current = new Map();
+    if (beforeMap.size === 0) return;
+    const live = qc.getQueryData<CanvasDetail>(queryKey)?.annotations ?? annotations;
+    const before = live.map((a) => beforeMap.get(a.id) ?? a);
+    if (JSON.stringify(before) === JSON.stringify(live)) return;
+    patchAnnotations.mutate({ data: { annotations: live }, history: { before, after: live, label: 'nudge' } });
   }
   function commitNudge(): Promise<void> {
     nudgeTimerRef.current = null;
@@ -1125,6 +1684,7 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
       .filter(([, v]) => Math.abs(v.after.x_mm - v.before.x_mm) >= EPS_MM || Math.abs(v.after.y_mm - v.before.y_mm) >= EPS_MM)
       .map(([panelId, v]) => ({ panelId, before: v.before, after: v.after }));
     nudgeAccumRef.current.clear();
+    commitAnnotationNudge();
     return commitPanelsBatch(items, 'nudge');
   }
   // F10: a pending debounced nudge MUST land before any other gesture commits
@@ -1132,7 +1692,9 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   // later gesture and reverts it (and its record() would clear the redo stack
   // mid-undo).
   function flushNudge(): Promise<void> {
-    if (!nudgeTimerRef.current && nudgeAccumRef.current.size === 0) return Promise.resolve();
+    if (!nudgeTimerRef.current && nudgeAccumRef.current.size === 0 && nudgeAnnotationAccumRef.current.size === 0) {
+      return Promise.resolve();
+    }
     if (nudgeTimerRef.current) {
       clearTimeout(nudgeTimerRef.current);
       nudgeTimerRef.current = null;
@@ -1296,46 +1858,238 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     dragMovedRef.current = true;
     shiftDeferredRef.current = null; // a drag keeps shift-clicked membership
     void flushNudge(); // pending nudge must not fire mid-drag and revert it
-    // U7 5a: dragging a panel that's part of a multi-selection moves the whole
-    // group — snapshot every selected node's start position (+ its current mm,
-    // for the eventual history "before") so handleDragMove/handleDragEnd can
-    // apply the leader's delta to the rest.
-    if (selectedIds.length > 1 && selectedIds.includes(panel.id)) {
-      const startPx = new Map<string, { x: number; y: number }>();
-      const beforeMm = new Map<string, { x_mm: number; y_mm: number }>();
-      for (const id of selectedIds) {
-        const node = nodeRefs.current.get(id);
-        const p = panels.find((pp) => pp.id === id);
-        if (node) startPx.set(id, { x: node.x(), y: node.y() });
-        if (p) beforeMm.set(id, { x_mm: p.x_mm, y_mm: p.y_mm });
-      }
-      groupMoveRef.current = { leaderId: panel.id, startPx, beforeMm };
-    } else {
-      groupMoveRef.current = null;
+    // U7 5a / U8: dragging an item that's part of a multi-selection moves the
+    // whole group (now possibly mixed panels+annotations) — see beginGroupMove.
+    beginGroupMove(panel.id);
+  }
+
+  // ── U8: annotation selection — mirrors handlePanelMouseDown/Click/DragStart
+  // exactly (shared selectedIds, same shift-defer / group-move semantics). ──
+  function handleAnnotationMouseDown(ann: CanvasAnnotation, e: Konva.KonvaEventObject<MouseEvent | TouchEvent>) {
+    dragMovedRef.current = false;
+    const shift = 'shiftKey' in e.evt && e.evt.shiftKey;
+    if (shift) {
+      setSelectedIds((cur) => {
+        if (cur.includes(ann.id)) {
+          shiftDeferredRef.current = ann.id;
+          return cur;
+        }
+        shiftDeferredRef.current = null;
+        return [...cur, ann.id];
+      });
+      return;
     }
+    shiftDeferredRef.current = null;
+    setSelectedIds((cur) => (cur.includes(ann.id) && cur.length > 1 ? cur : [ann.id]));
+  }
+  function handleAnnotationClick(ann: CanvasAnnotation, e: Konva.KonvaEventObject<MouseEvent | TouchEvent>) {
+    if (dragMovedRef.current) {
+      dragMovedRef.current = false;
+      shiftDeferredRef.current = null;
+      return;
+    }
+    const shift = 'shiftKey' in e.evt && e.evt.shiftKey;
+    if (shift) {
+      if (shiftDeferredRef.current === ann.id) {
+        setSelectedIds((cur) => cur.filter((id) => id !== ann.id));
+      }
+      shiftDeferredRef.current = null;
+      return;
+    }
+    setSelectedIds([ann.id]);
+  }
+  function handleAnnotationDragStart(ann: CanvasAnnotation) {
+    dragMovedRef.current = true;
+    shiftDeferredRef.current = null;
+    void flushNudge();
+    flushAnnotationEdit();
+    beginGroupMove(ann.id);
+  }
+  function handleAnnotationDblClick(ann: CanvasAnnotation) {
+    if (ann.type !== 'text') return;
+    setSelectedIds([ann.id]);
+    textEditCancelRef.current = false; // disarm a leftover cancel flag (see ref docblock)
+    setTextEditing({ id: ann.id, value: ann.text ?? '' });
+  }
+  /** Escape-path discard. Unmounting the focused input fires NO blur (see
+   * textEditCancelRef docblock), so commitTextEditing's onBlur never runs
+   * once textEditing flips to null — everything must happen here, now. A
+   * fresh (local-only) annotation is removed outright; the server never saw
+   * it. */
+  function cancelTextEditing() {
+    const freshId = freshTextIdRef.current;
+    freshTextIdRef.current = null;
+    textEditCancelRef.current = true;
+    setTextEditing(null);
+    if (freshId) removeLocalAnnotation(freshId);
+  }
+  /** Remove a never-persisted (fresh, local-cache-only) annotation without
+   * any server call or history entry — the server never saw it. */
+  function removeLocalAnnotation(id: string) {
+    qc.setQueryData<CanvasDetail>(queryKey, (old) => (old
+      ? { ...old, annotations: old.annotations.filter((a) => a.id !== id) }
+      : old));
+    setSelectedIds((cur) => cur.filter((sel) => sel !== id));
+  }
+  function commitTextEditing() {
+    const freshId = freshTextIdRef.current;
+    freshTextIdRef.current = null;
+    if (textEditCancelRef.current) {
+      // Escape already discarded this session — ignore a possible stray
+      // blur from the input being unmounted while still focused. A FRESH
+      // annotation is local-only, so discarding means removing it outright.
+      textEditCancelRef.current = false;
+      setTextEditing(null);
+      if (freshId) removeLocalAnnotation(freshId);
+      return;
+    }
+    const te = textEditing;
+    setTextEditing(null);
+    if (!te) return;
+    const isFresh = freshId === te.id;
+    const ann = annotations.find((a) => a.id === te.id);
+    if (!ann) return;
+    const trimmed = sanitizeText(te.value).trim();
+    if (!trimmed) {
+      // An empty text box is pointless clutter (and fails the backend's
+      // "text required" validation). Fresh → pure local removal (nothing was
+      // ever persisted); existing → real delete commit.
+      if (isFresh) removeLocalAnnotation(te.id);
+      else deleteAnnotationIds([te.id]);
+      return;
+    }
+    const value = sanitizeText(te.value);
+    if (isFresh) {
+      // First commit of a freshly-placed text annotation: ONE history entry
+      // whose `before` is the pre-creation array, so a single Ctrl+Z removes
+      // the annotation entirely (not "revert to placeholder"). Bypasses
+      // commitAnnotations because the live cache already contains the fresh
+      // item — `before` must exclude it.
+      flushAnnotationEdit();
+      const live = qc.getQueryData<CanvasDetail>(queryKey)?.annotations ?? annotations;
+      const before = live.filter((a) => a.id !== te.id);
+      const after = live.map((a) => (a.id === te.id ? { ...a, text: value } : a));
+      patchAnnotations.mutate({ data: { annotations: after }, history: { before, after, label: 'add text' } });
+      return;
+    }
+    if (value === (ann.text ?? '')) return;
+    commitAnnotations((cur) => cur.map((a) => (a.id === te.id ? { ...a, text: value } : a)), 'edit text');
   }
 
   // ── U7 2: rubber-band select (replaces empty-drag pan; Space+drag or scroll
   // still pans — see the Stage's `draggable={spaceHeld}`). Marquee state is in
   // CANVAS ("fit px") coordinates, same space as panel x/y, for a plain AABB
-  // hit test against panels. ──
+  // hit test against panels (and, U8, annotations too). ──
   function updateMarquee(m: { x0: number; y0: number; x1: number; y1: number } | null) {
     marqueeRef.current = m;
     setMarquee(m);
   }
+
+  // ── U8: shape/line/arrow creation drag (same coordinate space + window-
+  // mouseup-fallback convention as the marquee above) and text-tool
+  // click-to-create. ──
+  function updateDrawing(d: typeof drawing) {
+    drawingRef.current = d;
+    setDrawing(d);
+  }
+  function createTextAt(xFit: number, yFit: number) {
+    const x_mm = roundMm(pxToMm(xFit, pxPerMm));
+    const y_mm = roundMm(pxToMm(yFit, pxPerMm));
+    const ann = createAnnotation('text', { x_mm, y_mm }, nextAnnotationZ(annotations));
+    // LOCAL-only optimistic insert — no PATCH, no history. The annotation is
+    // persisted as ONE 'add text' entry when the inline editor commits real
+    // text (see commitTextEditing), so a single undo removes it; Escape or
+    // an empty commit silently drops it without the server ever seeing it.
+    // Blur resolves the fresh state before any other gesture can commit (all
+    // other mutations fire on mouseup/dragend, after the input's blur).
+    flushAnnotationEdit();
+    // An in-flight refetch (e.g. the visibilitychange invalidate near the top
+    // of the component) would resolve over this local-only insert and wipe
+    // it — cancel it first, same guard patchAnnotations.onMutate uses.
+    void qc.cancelQueries({ queryKey });
+    textEditCancelRef.current = false; // disarm a leftover cancel flag (see ref docblock)
+    freshTextIdRef.current = ann.id;
+    qc.setQueryData<CanvasDetail>(queryKey, (old) => (old
+      ? { ...old, annotations: [...old.annotations, ann] }
+      : old));
+    setActiveTool('select');
+    setSelectedIds([ann.id]);
+    setTextEditing({ id: ann.id, value: '' });
+  }
+  function finalizeDrawing() {
+    const d = drawingRef.current;
+    updateDrawing(null);
+    if (!d || !canvas) return;
+    if (d.type === 'line' || d.type === 'arrow') {
+      const x1mm = pxToMm(d.x0, pxPerMm);
+      const y1mm = pxToMm(d.y0, pxPerMm);
+      const x2mm = pxToMm(d.x1, pxPerMm);
+      const y2mm = pxToMm(d.y1, pxPerMm);
+      // Straight-line distance, not the AABB box — a purely horizontal/
+      // vertical drag has a zero-height/width bbox and would always fail a
+      // box-based minimum check.
+      if (Math.hypot(x2mm - x1mm, y2mm - y1mm) < MIN_CREATE_DRAG_MM) return;
+      const ann = createAnnotation(d.type, {
+        x_mm: 0, y_mm: 0,
+        points_mm: [roundMm(x1mm), roundMm(y1mm), roundMm(x2mm), roundMm(y2mm)],
+      }, nextAnnotationZ(annotations));
+      commitAnnotations((cur) => [...cur, ann], `add ${ann.type}`);
+      setActiveTool('select');
+      setSelectedIds([ann.id]);
+      return;
+    }
+    const x0mm = pxToMm(Math.min(d.x0, d.x1), pxPerMm);
+    const y0mm = pxToMm(Math.min(d.y0, d.y1), pxPerMm);
+    const wmm = pxToMm(Math.abs(d.x1 - d.x0), pxPerMm);
+    const hmm = pxToMm(Math.abs(d.y1 - d.y0), pxPerMm);
+    if (wmm < MIN_CREATE_DRAG_MM || hmm < MIN_CREATE_DRAG_MM) return;
+    const ann = createAnnotation(d.type, {
+      x_mm: roundMm(x0mm), y_mm: roundMm(y0mm), w_mm: roundMm(wmm), h_mm: roundMm(hmm),
+    }, nextAnnotationZ(annotations));
+    commitAnnotations((cur) => [...cur, ann], `add ${ann.type}`);
+    setActiveTool('select');
+    setSelectedIds([ann.id]);
+  }
+
   function handleStageMouseDown(e: Konva.KonvaEventObject<MouseEvent>) {
     const stage = e.target.getStage();
-    if (!stage || e.target !== stage) return; // a panel handles its own selection
+    if (!stage || e.target !== stage) return; // a panel/annotation handles its own selection
     if (spaceHeld) return; // Stage is draggable (pan) instead in this mode
-    if (e.evt.button !== 0) return; // right/middle button must not arm a marquee
+    if (e.evt.button !== 0) return; // right/middle button must not arm a marquee/drawing
     const pointer = stage.getPointerPosition();
     if (!pointer) return;
+    const xFit = (pointer.x - view.x) / view.zoom;
+    const yFit = (pointer.y - view.y) / view.zoom;
+    if (activeTool === 'text') {
+      // The inline editor mounts+autofocuses DURING this mousedown dispatch;
+      // without this, the browser's mousedown DEFAULT action (moving focus to
+      // the click target / body) runs after the handler returns and instantly
+      // blurs the input — the empty-value blur commit then removes the fresh
+      // annotation before the user ever sees it.
+      e.evt.preventDefault();
+      createTextAt(xFit, yFit);
+      return;
+    }
+    if (activeTool !== 'select') {
+      updateDrawing({ type: activeTool, x0: xFit, y0: yFit, x1: xFit, y1: yFit });
+      return;
+    }
     marqueeShiftRef.current = e.evt.shiftKey;
-    const x = (pointer.x - view.x) / view.zoom;
-    const y = (pointer.y - view.y) / view.zoom;
-    updateMarquee({ x0: x, y0: y, x1: x, y1: y });
+    updateMarquee({ x0: xFit, y0: yFit, x1: xFit, y1: yFit });
   }
   function handleStageMouseMove(e: Konva.KonvaEventObject<MouseEvent>) {
+    if (drawingRef.current) {
+      // Missed release, same fallback as the marquee below.
+      if (e.evt.buttons === 0) { finalizeDrawing(); return; }
+      const stage = e.target.getStage();
+      if (!stage) return;
+      const pointer = stage.getPointerPosition();
+      if (!pointer) return;
+      const xFit = (pointer.x - view.x) / view.zoom;
+      const yFit = (pointer.y - view.y) / view.zoom;
+      updateDrawing(drawingRef.current ? { ...drawingRef.current, x1: xFit, y1: yFit } : null);
+      return;
+    }
     if (!marquee) return;
     // Missed release (mouseup landed outside the browser/stage): Konva only
     // delivers stage mouseup for in-stage releases, so treat a button-less
@@ -1368,7 +2122,7 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
       setSelectedIds([]);
       return;
     }
-    const hitIds = panels
+    const hitPanelIds = panels
       .filter((p) => {
         const px0 = mmToPx(p.x_mm, pxPerMm);
         const py0 = mmToPx(p.y_mm, pxPerMm);
@@ -1377,9 +2131,18 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
         return px0 < x1 && px1 > x0 && py0 < y1 && py1 > y0;
       })
       .map((p) => p.id);
+    // U8: annotations join the marquee hit test using their bounding box.
+    const hitAnnoIds = annotations
+      .filter((a) => {
+        const box = annotationBoxPx(a, pxPerMm, measuredTextRef.current.get(a.id));
+        return box.x0 < x1 && box.x1 > x0 && box.y0 < y1 && box.y1 > y0;
+      })
+      .map((a) => a.id);
+    const hitIds = [...hitPanelIds, ...hitAnnoIds];
     setSelectedIds((cur) => (marqueeShiftRef.current ? Array.from(new Set([...cur, ...hitIds])) : hitIds));
   }
   function handleStageMouseUp() {
+    if (drawingRef.current) { finalizeDrawing(); return; }
     finalizeMarquee();
   }
   function handleStageDragEnd(e: Konva.KonvaEventObject<DragEvent>) {
@@ -1387,6 +2150,40 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     const stage = e.target.getStage();
     if (e.target !== stage || !stage) return;
     setView((v) => ({ ...v, x: stage.x(), y: stage.y() }));
+  }
+
+  // U8: a panel is always Transformer-eligible; an annotation is eligible
+  // unless it's a line/arrow (those get draggable endpoint handles instead —
+  // see the Circle handles rendered near the Transformer in the JSX below).
+  function isTransformerEligible(id: string): boolean {
+    if (panels.some((p) => p.id === id)) return true;
+    const a = annotations.find((aa) => aa.id === id);
+    return Boolean(a && a.type !== 'line' && a.type !== 'arrow');
+  }
+
+  // ── U8: simpler resize bound box for any selection touching an annotation —
+  // deliberately WITHOUT the panel path's snap-to-target machinery (kept
+  // isolated below to avoid entangling the two): just a size floor, plus a
+  // locked height for an all-text selection (text resizes WIDTH only). ──
+  function annotationResizeBoundBox(
+    oldBox: { x: number; y: number; width: number; height: number; rotation: number },
+    newBox: { x: number; y: number; width: number; height: number; rotation: number },
+    eligibleIds: string[],
+  ): { x: number; y: number; width: number; height: number; rotation: number } {
+    if (guides.x !== null || guides.y !== null) setGuides({ x: null, y: null });
+    const minPx = mmToPx(ANNOTATION_MM_MIN, pxPerMm) * view.zoom;
+    const allText = eligibleIds.length > 0
+      && eligibleIds.every((id) => annotations.find((a) => a.id === id)?.type === 'text');
+    if (allText) {
+      // Width-only: lock the box's height/y to whatever they were before this
+      // transform frame regardless of which anchor fired (enabledAnchors
+      // already restricts to middle-left/right for an all-text selection —
+      // this is a defensive backstop against float drift).
+      const width = Math.max(newBox.width, minPx);
+      return { ...newBox, width, height: oldBox.height, y: oldBox.y };
+    }
+    if (newBox.width < minPx || newBox.height < minPx) return oldBox;
+    return newBox;
   }
 
   // ── U7 6: resize snap guides — same target set + threshold as drag-move,
@@ -1398,6 +2195,10 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     oldBox: { x: number; y: number; width: number; height: number; rotation: number },
     newBox: { x: number; y: number; width: number; height: number; rotation: number },
   ): { x: number; y: number; width: number; height: number; rotation: number } {
+    const eligibleIds = selectedIds.filter(isTransformerEligible);
+    if (eligibleIds.some((id) => annotations.some((a) => a.id === id))) {
+      return annotationResizeBoundBox(oldBox, newBox, eligibleIds);
+    }
     // F4: for group transforms the floor is the union box at which the
     // smallest member reaches PANEL_MM_MIN (captured per-gesture), not the
     // flat single-panel minimum.
@@ -1502,14 +2303,25 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   // transform gesture — see the accumulation logic in handleTransformEnd.
   function handleTransformStart() {
     void flushNudge();
-    groupResizeActiveRef.current = selectedIds.length > 1;
+    flushAnnotationEdit();
+    // U8: the real "last one in" threshold is the ELIGIBLE count — line/arrow
+    // annotations never attach to the Transformer, so selectedIds.length would
+    // overcount and the group commit would wait forever for a transformend
+    // that never fires.
+    const eligibleIds = selectedIds.filter(isTransformerEligible);
+    groupResizeActiveRef.current = eligibleIds.length > 1;
     groupResizeItemsRef.current = [];
+    groupResizeAnnotationItemsRef.current = [];
+    groupResizeEligibleCountRef.current = eligibleIds.length;
     groupResizeSeenRef.current = 0;
     // F4: the union min-size floor for a group resize must scale so the
     // SMALLEST member never squeezes below PANEL_MM_MIN (a flat union floor
     // lets individual panels go sub-minimum and commit mismatched geometry).
-    if (selectedIds.length > 1) {
-      const sel = selectedIds.map((id) => panels.find((p) => p.id === id)).filter((p): p is CanvasPanel => Boolean(p));
+    // (Only meaningful for an all-panel group — a group touching an
+    // annotation routes through annotationResizeBoundBox instead, which
+    // never reads groupMinBoxRef.)
+    if (eligibleIds.length > 1) {
+      const sel = eligibleIds.map((id) => panels.find((p) => p.id === id)).filter((p): p is CanvasPanel => Boolean(p));
       if (sel.length > 1) {
         const minX = Math.min(...sel.map((p) => p.x_mm));
         const maxX = Math.max(...sel.map((p) => p.x_mm + p.width_mm));
@@ -1577,6 +2389,40 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
         width: mmToPx(selectedPanel.width_mm, pxPerMm) * view.zoom,
         height: mmToPx(selectedPanel.height_mm, pxPerMm) * view.zoom,
       }
+    : null;
+
+  // U8: selection composition drives the toolbar/sidebar below.
+  const isAnnotationOnlySelection = selectedAnnotationIds.length > 0 && selectedPanelIds.length === 0;
+  const isMixedSelection = selectedPanelIds.length > 0 && selectedAnnotationIds.length > 0;
+  // Text-only selection (single or multi) resizes WIDTH only via the shared
+  // Transformer — everything else keeps the full 8-anchor set.
+  const transformEligibleIds = selectedIds.filter((id) => panels.some((p) => p.id === id)
+    || annotations.some((a) => a.id === id && a.type !== 'line' && a.type !== 'arrow'));
+  const textOnlyTransform = transformEligibleIds.length > 0
+    && transformEligibleIds.every((id) => annotations.find((a) => a.id === id)?.type === 'text');
+  const transformerAnchors: string[] = textOnlyTransform
+    ? ['middle-left', 'middle-right']
+    : ['top-left', 'top-right', 'bottom-left', 'bottom-right', 'middle-left', 'middle-right', 'top-center', 'bottom-center'];
+
+  // Sole-selected line/arrow annotation → render draggable endpoint handles
+  // instead of the Transformer (which excludes them — see isTransformerEligible).
+  const soleLineLikeAnnotation = selectedIds.length === 1
+    ? annotations.find((a) => a.id === selectedIds[0] && (a.type === 'line' || a.type === 'arrow'))
+    : undefined;
+
+  // Inline text-edit overlay: screen-space position over the annotation being edited.
+  const textEditingAnn = textEditing ? annotations.find((a) => a.id === textEditing.id) : null;
+  const textEditRect = textEditingAnn
+    ? (() => {
+        const o = originMm(textEditingAnn);
+        const s = sizeMm(textEditingAnn, measuredTextRef.current.get(textEditingAnn.id));
+        return {
+          left: view.x + mmToPx(o.x, pxPerMm) * view.zoom,
+          top: view.y + mmToPx(o.y, pxPerMm) * view.zoom,
+          width: Math.max(mmToPx(s.w_mm, pxPerMm) * view.zoom, 60),
+          fontSizePx: Math.max(10, annPtToMm(textEditingAnn.font_pt ?? ANN_FONT_PT_DEFAULT) * pxPerMm * view.zoom),
+        };
+      })()
     : null;
 
   return (
@@ -1825,8 +2671,11 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
       )}
 
       {/* U7 5c: align/distribute toolbar — replaces the single-panel toolbar
-          once 2+ panels are selected. */}
-      {selectedIds.length >= 2 && (
+          once 2+ panels are selected. U8: scoped to a PURE panel multi-
+          selection (a mixed panel+annotation selection shows the minimal
+          strip below instead — align/distribute don't have an obvious
+          meaning once annotations are mixed in). */}
+      {selectedPanelIds.length >= 2 && selectedAnnotationIds.length === 0 && (
         <div className="flex flex-wrap items-center gap-2 border-b bg-muted/40 px-4 py-1.5 text-sm">
           <span className="text-xs text-muted-foreground">{selectedIds.length} panels selected</span>
           <div className="flex items-center gap-0.5">
@@ -1878,12 +2727,38 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
         </div>
       )}
 
+      {/* U8: mixed panel+annotation selection — a minimal strip (no
+          align/distribute, no per-type property editing; the inspector on
+          the right only opens for a PURE annotation selection). */}
+      {isMixedSelection && (
+        <div className="flex flex-wrap items-center gap-2 border-b bg-muted/40 px-4 py-1.5 text-sm">
+          <span className="text-xs text-muted-foreground">
+            {selectedIds.length} items selected ({selectedPanelIds.length} panel{selectedPanelIds.length === 1 ? '' : 's'}, {selectedAnnotationIds.length} annotation{selectedAnnotationIds.length === 1 ? '' : 's'})
+          </span>
+          <Button
+            type="button"
+            size="xs"
+            variant="ghost"
+            className="text-destructive"
+            title="Remove the selected items from the canvas"
+            onClick={() => deleteSelected()}
+          >
+            <Trash2 className="h-3.5 w-3.5" /> Delete
+          </Button>
+        </div>
+      )}
+
       {/* one-time gesture hints (empty canvases are guided by the empty state) */}
       <CanvasHintsBar show={panels.length > 0} />
 
       {/* stage + color editor sidebar */}
       <div className="flex flex-1 overflow-hidden" style={{ minHeight: 480 }}>
-      <div ref={setContainerRef} className="relative flex-1 overflow-hidden bg-muted/30" style={spaceHeld ? { cursor: 'grab' } : undefined}>
+      <div
+        ref={setContainerRef}
+        className="relative flex-1 overflow-hidden bg-muted/30"
+        style={spaceHeld ? { cursor: 'grab' } : activeTool !== 'select' ? { cursor: 'crosshair' } : undefined}
+      >
+        <CanvasAnnotationToolbar active={activeTool} onSelect={setActiveTool} />
         {viewport.w > 0 && viewport.h > 0 && (
           <Stage
             width={viewport.w}
@@ -1924,6 +2799,10 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
                   panel={panel}
                   pxPerMm={pxPerMm}
                   draggableEnabled={!spaceHeld}
+                  // U8: unlistenable while a creation tool is active, so a
+                  // shape/text drag can start ON TOP of an existing panel
+                  // instead of the panel intercepting the mousedown.
+                  listening={activeTool === 'select'}
                   selected={selectedIds.includes(panel.id)}
                   transparent={transparent}
                   registerNode={registerNode}
@@ -1935,6 +2814,73 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
                   onTransformEnd={handleTransformEnd}
                 />
               ))}
+              {/* U8: annotations paint ABOVE panels, sorted by z (the `annotations`
+                  memo is already z-sorted). A sole-selected line/arrow gets
+                  draggable endpoint handles instead of the shared Transformer. */}
+              {annotations.map((ann) => {
+                const effective = endpointDraft?.id === ann.id ? { ...ann, points_mm: endpointDraft.points_mm } : ann;
+                return (
+                  <CanvasAnnotationNode
+                    key={ann.id}
+                    annotation={effective}
+                    pxPerMm={pxPerMm}
+                    draggableEnabled={!spaceHeld}
+                    listening={activeTool === 'select'}
+                    selected={selectedIds.includes(ann.id)}
+                    measuredTextMm={getMeasuredTextMm(ann.id)}
+                    registerNode={registerNode}
+                    onMeasured={(id, size) => { measuredTextRef.current.set(id, size); bumpMeasure((v) => v + 1); }}
+                    onMouseDown={handleAnnotationMouseDown}
+                    onClick={handleAnnotationClick}
+                    onDblClick={handleAnnotationDblClick}
+                    onDragStart={handleAnnotationDragStart}
+                    onDragMove={handleAnnotationDragMove}
+                    onDragEnd={handleAnnotationDragEnd}
+                    onTransformEnd={handleAnnotationTransformEnd}
+                  />
+                );
+              })}
+              {/* U8: in-progress shape/line/arrow creation drag preview */}
+              {drawing && (drawing.type === 'rect' || drawing.type === 'ellipse') && (
+                <Rect
+                  x={Math.min(drawing.x0, drawing.x1)}
+                  y={Math.min(drawing.y0, drawing.y1)}
+                  width={Math.abs(drawing.x1 - drawing.x0)}
+                  height={Math.abs(drawing.y1 - drawing.y0)}
+                  stroke="#2563EB"
+                  strokeWidth={1 / view.zoom}
+                  dash={[4 / view.zoom]}
+                  listening={false}
+                />
+              )}
+              {drawing && (drawing.type === 'line' || drawing.type === 'arrow') && (
+                <Line
+                  points={[drawing.x0, drawing.y0, drawing.x1, drawing.y1]}
+                  stroke="#2563EB"
+                  strokeWidth={1 / view.zoom}
+                  dash={[4 / view.zoom]}
+                  listening={false}
+                />
+              )}
+              {/* U8: line/arrow endpoint handles — only while that ONE
+                  line/arrow is the sole selection (Transformer excludes them). */}
+              {soleLineLikeAnnotation && (() => {
+                const effective = endpointDraft?.id === soleLineLikeAnnotation.id ? endpointDraft.points_mm : (soleLineLikeAnnotation.points_mm ?? [0, 0, 0, 0]);
+                return ([0, 1] as const).map((which) => (
+                  <Circle
+                    key={which}
+                    x={mmToPx(effective[which * 2], pxPerMm)}
+                    y={mmToPx(effective[which * 2 + 1], pxPerMm)}
+                    radius={6 / view.zoom}
+                    fill="#ffffff"
+                    stroke="#2563EB"
+                    strokeWidth={1.5 / view.zoom}
+                    draggable={!spaceHeld}
+                    onDragMove={(e) => handleEndpointDragMove(soleLineLikeAnnotation.id, which, e)}
+                    onDragEnd={(e) => handleEndpointDragEnd(soleLineLikeAnnotation.id, which, e)}
+                  />
+                ));
+              })()}
               {/* alignment guides */}
               {guides.x !== null && (
                 <Line points={[guides.x, 0, guides.x, canvasHpx]} stroke="#2563EB" strokeWidth={1 / view.zoom} dash={[4 / view.zoom, 4 / view.zoom]} listening={false} />
@@ -1960,10 +2906,7 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
                 ref={trRef}
                 rotateEnabled={false}
                 keepRatio={lockAspect}
-                enabledAnchors={[
-                  'top-left', 'top-right', 'bottom-left', 'bottom-right',
-                  'middle-left', 'middle-right', 'top-center', 'bottom-center',
-                ]}
+                enabledAnchors={transformerAnchors}
                 anchorSize={8}
                 borderStroke="#2563EB"
                 anchorStroke="#2563EB"
@@ -1980,6 +2923,27 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
             </p>
           </div>
         )}
+        {/* U8: inline text-edit overlay — opened immediately on text-tool
+            creation and on dblclick of an existing text annotation. */}
+        {textEditing && textEditRect && containerEl && createPortal(
+          <input
+            autoFocus
+            aria-label="Annotation text"
+            className="absolute z-30 rounded border border-primary bg-white px-1.5 py-0.5 shadow-md outline-none"
+            style={{ left: textEditRect.left, top: textEditRect.top, minWidth: textEditRect.width, fontSize: textEditRect.fontSizePx }}
+            value={textEditing.value}
+            maxLength={500}
+            placeholder="Empty text is removed on blur"
+            onChange={(e) => setTextEditing((s) => (s ? { ...s, value: sanitizeText(e.target.value) } : s))}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+              else if (e.key === 'Escape') cancelTextEditing(); // discard, not commit
+              e.stopPropagation();
+            }}
+            onBlur={commitTextEditing}
+          />,
+          containerEl,
+        )}
         </div>
 
         {selectedPanel && (
@@ -1990,6 +2954,16 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
             canvasName={canvas.name}
             containerEl={containerEl}
             overlayRect={overlayRect}
+          />
+        )}
+        {isAnnotationOnlySelection && (
+          <CanvasAnnotationInspector
+            selected={selectedAnnotations}
+            onDraft={draftAnnotationField}
+            onCommit={commitAnnotationField}
+            onBringForward={(ids) => zBumpAnnotations(ids, 1)}
+            onSendBackward={(ids) => zBumpAnnotations(ids, -1)}
+            onDelete={deleteAnnotationIds}
           />
         )}
       </div>

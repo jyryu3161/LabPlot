@@ -604,6 +604,36 @@ export interface CanvasPanel {
   created_at: string;
   updated_at: string;
 }
+// U8: text/shape annotation objects layered above panels. Mirrors the backend
+// contract exactly (canvases/service.py sanitizer) — mm coords, absolute-pt
+// fonts (font_pt * 25.4/72 = mm, same invariance rule as panel figures).
+export type AnnotationType = 'text' | 'arrow' | 'line' | 'rect' | 'ellipse';
+export interface CanvasAnnotation {
+  id: string;
+  type: AnnotationType;
+  /** Top-left anchor (text/rect/ellipse). Ignored by arrow/line (see points_mm). */
+  x_mm: number;
+  y_mm: number;
+  /** rect/ellipse REQUIRED; text OPTIONAL (absent = auto width from content). */
+  w_mm?: number;
+  h_mm?: number;
+  /** arrow/line REQUIRED: absolute canvas mm [x1,y1,x2,y2]; arrow head at (x2,y2). */
+  points_mm?: [number, number, number, number];
+  /** text REQUIRED: single-line, <=500 chars. */
+  text?: string;
+  /** text only; default 10; clamp 4..72. */
+  font_pt?: number;
+  /** text only; default 'left'. */
+  align?: 'left' | 'center' | 'right';
+  /** '#rrggbb'; default '#000000' (outline for shapes, glyph color for text). */
+  stroke_hex?: string;
+  /** default 1; clamp 0.25..10; ignored for text. */
+  stroke_pt?: number;
+  /** rect/ellipse interior fill; null/absent = none. */
+  fill_hex?: string | null;
+  /** integer ordering AMONG annotations; annotations always paint above panels. */
+  z: number;
+}
 export interface Canvas {
   id: string;
   owner_id: string;
@@ -615,6 +645,10 @@ export interface Canvas {
   preset?: string | null;
   background: string;
   export_snapshot?: Record<string, string> | null;
+  annotations: CanvasAnnotation[];
+  // Server-incremented on every annotations replace; echo it back as
+  // base_annotations_rev so concurrent editors 409 instead of clobbering.
+  annotations_rev: number;
   created_at: string;
   updated_at: string;
 }

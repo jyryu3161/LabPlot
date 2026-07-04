@@ -580,6 +580,13 @@ export async function getCanvas(id: string): Promise<import('./types').CanvasDet
 export async function updateCanvas(id: string, data: {
   name?: string; description?: string; preset?: string; width_mm?: number; height_mm?: number; background?: string;
   project_id?: string | null; // owner-only: attach/move/detach (null detaches)
+  // U8: whole-array replace. Server sanitizes (type whitelist, mm/pt clamps,
+  // hex validation, 200-item cap) and 400s BAD_ANNOTATIONS on structural errors.
+  annotations?: import('./types').CanvasAnnotation[];
+  // Optimistic-concurrency token: the annotations_rev this edit was based on.
+  // Server 409s (ANNOTATIONS_CONFLICT) when it no longer matches, instead of
+  // silently overwriting another editor's annotations.
+  base_annotations_rev?: number;
 }): Promise<import('./types').CanvasDetail> {
   return fetcher(`/api/canvases/${id}`, { method: 'PATCH', body: JSON.stringify(data) });
 }

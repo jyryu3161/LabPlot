@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -370,6 +371,8 @@ def _canvas_detail(db: Session, canvas: Canvas) -> dict:
         "created_at": canvas.created_at,
         "updated_at": canvas.updated_at,
         "panels": [_panel_response(p, current_map, native_map) for p in panels],
+        "annotations": canvas.annotations or [],
+        "annotations_rev": canvas.annotations_rev or 0,
     }
 
 
@@ -445,13 +448,37 @@ def update_canvas(db: Session, canvas_id: uuid.UUID, owner_id: uuid.UUID, data: 
         # Owner-only (grilling Q6): attach/move/detach all change which team
         # can see the canvas — an editor could otherwise privatize it.
         if canvas.owner_id != owner_id:
-            raise AppError("Only the canvas owner can move it between projects",
-                           status_code=403, error_code="OWNER_ONLY")
+            # NOTE: AppError's signature is (status_code, detail, error_code) —
+            # detail must not be passed positionally first (raises TypeError
+            # at raise time -> 500 instead of the intended status).
+            raise AppError(status_code=403,
+                           detail="Only the canvas owner can move it between projects",
+                           error_code="OWNER_ONLY")
         new_project_id = data["project_id"]
         if new_project_id is not None:
             from app.projects import service as project_service
             project_service.require_project_write(db, new_project_id, owner_id)
         canvas.project_id = new_project_id
+    # U8: None (absent OR explicit null) = leave unchanged; [] = clear all.
+    # Any editor with write access (same permission model as panels — write=True
+    # above already required it) may edit annotations.
+    if data.get("annotations") is not None:
+        # Optimistic-concurrency guard (mirrors figures RerenderRequest.
+        # base_version_id -> 409 VERSION_CONFLICT): annotations are replaced
+        # whole-array, so two concurrent editors would otherwise silently
+        # last-write-wins each other's objects. When the client supplies the
+        # rev it based its edit on and it no longer matches, 409 instead of
+        # destroying the other editor's work. Omitted (None) keeps legacy
+        # last-write-wins for direct API callers.
+        base_rev = data.get("base_annotations_rev")
+        if base_rev is not None and base_rev != (canvas.annotations_rev or 0):
+            raise AppError(
+                status_code=409,
+                detail="Canvas annotations were modified by another editor; reload and retry",
+                error_code="ANNOTATIONS_CONFLICT",
+            )
+        canvas.annotations = _sanitize_annotations(data["annotations"], canvas.width_mm, canvas.height_mm)
+        canvas.annotations_rev = (canvas.annotations_rev or 0) + 1
     db.commit()
     return canvas_detail(db, canvas_id, owner_id)
 
@@ -460,6 +487,194 @@ def delete_canvas(db: Session, canvas_id: uuid.UUID, owner_id: uuid.UUID) -> Non
     canvas = get_canvas(db, canvas_id, owner_id, write=True)
     db.delete(canvas)  # FK ON DELETE CASCADE + orm cascade removes panels
     db.commit()
+
+
+# ---------------------------------------------------------------- annotations
+# U8 — canvas text/shape annotation objects. Structural violations (bad type,
+# a required-by-type field missing, a malformed id, or >200 items) fail fast
+# with BAD_ANNOTATIONS; numeric ranges are CLAMPED rather than rejected; a
+# malformed hex string IS rejected (format error, not an out-of-range number);
+# unknown keys are dropped silently by construction (only known keys are ever
+# copied into the sanitized entry). Font sizes are absolute pt everywhere
+# (design §5) — converted to mm at export time via the existing _PT_TO_MM.
+_ANNOTATION_TYPES = {"text", "arrow", "line", "rect", "ellipse"}
+_ANNOTATION_MAX_ITEMS = 200
+_ANNOTATION_ID_MAX = 64
+_ANNOTATION_TEXT_MAX = 500
+_ANNOTATION_MM_MIN = -1000.0
+_ANNOTATION_MM_MAX = 3000.0
+_ANNOTATION_WH_MIN = 0.5
+_ANNOTATION_WH_MAX = 2000.0
+_ANNOTATION_FONT_MIN = 4.0
+_ANNOTATION_FONT_MAX = 72.0
+_ANNOTATION_STROKE_MIN = 0.25
+_ANNOTATION_STROKE_MAX = 10.0
+_ANNOTATION_ALIGN = {"left", "center", "right"}
+_ANNOTATION_HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+# XML 1.0 valid char set (minus surrogates): anything outside it (NUL, other
+# C0/C1 controls, U+FFFE/U+FFFF, lone surrogates) is stripped from text/id —
+# a NUL would 500 the jsonb write (PostgreSQL rejects \\u0000) and any other
+# XML-invalid char permanently breaks _compose_canvas_svg exports (libxml2
+# refuses the composite SVG).
+_ANNOTATION_XML_INVALID_RE = re.compile(
+    "[^\x09\x0a\x0d\x20-퟿-�\U00010000-\U0010ffff]"
+)
+
+
+def _ann_float(value) -> float | None:
+    """Best-effort numeric coercion; None for anything non-numeric/non-finite
+    (bool is deliberately excluded — True/False are not annotation numbers)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    return num if math.isfinite(num) else None
+
+
+def _ann_hex(value, *, field: str) -> str:
+    """Validate a required '#rrggbb' hex string; malformed input is a FORMAT
+    error (rejected, not clamped) per the U8 validation contract. fullmatch,
+    not match: a $-anchored match still accepts a trailing newline."""
+    if not isinstance(value, str) or not _ANNOTATION_HEX_RE.fullmatch(value):
+        raise BadRequestError(f"annotation {field} must be a '#rrggbb' hex string", error_code="BAD_ANNOTATIONS")
+    return value
+
+
+def _sanitize_annotations(items: list, canvas_w_mm: float, canvas_h_mm: float) -> list[dict]:
+    """Validate + sanitize the ``canvas.annotations`` list (U8 contract).
+
+    ``canvas_w_mm``/``canvas_h_mm`` are accepted for signature parity with the
+    design contract but intentionally do NOT clamp coordinates to the sheet —
+    an annotation (e.g. a callout arrow) may legitimately extend past the
+    sheet edge, same as panel placement already allows (see add_panel's
+    x_mm/y_mm comment: "envelope, not canvas-size"). The wide [-1000, 3000] mm
+    envelope is the only bound enforced.
+    """
+    if not isinstance(items, list):
+        raise BadRequestError("annotations must be a list", error_code="BAD_ANNOTATIONS")
+    if len(items) > _ANNOTATION_MAX_ITEMS:
+        raise BadRequestError(
+            f"annotations exceeds max of {_ANNOTATION_MAX_ITEMS} items", error_code="BAD_ANNOTATIONS"
+        )
+
+    out: list[dict] = []
+    seen_ids: set[str] = set()
+    for raw in items:
+        if not isinstance(raw, dict):
+            raise BadRequestError("each annotation must be an object", error_code="BAD_ANNOTATIONS")
+
+        ann_type = raw.get("type")
+        if ann_type not in _ANNOTATION_TYPES:
+            raise BadRequestError(f"invalid annotation type: {ann_type!r}", error_code="BAD_ANNOTATIONS")
+
+        ann_id = raw.get("id")
+        if not isinstance(ann_id, str):
+            raise BadRequestError(
+                "annotation id must be a non-empty string <=64 chars", error_code="BAD_ANNOTATIONS"
+            )
+        ann_id = _ANNOTATION_XML_INVALID_RE.sub("", ann_id)
+        if not ann_id or len(ann_id) > _ANNOTATION_ID_MAX:
+            raise BadRequestError(
+                "annotation id must be a non-empty string <=64 chars", error_code="BAD_ANNOTATIONS"
+            )
+        if ann_id in seen_ids:
+            # Duplicate ids corrupt every id-keyed consumer (selection, drag,
+            # inspector, undo) for all editors of this canvas — structural
+            # violation, fail fast.
+            raise BadRequestError(f"duplicate annotation id: {ann_id!r}", error_code="BAD_ANNOTATIONS")
+        seen_ids.add(ann_id)
+
+        entry: dict = {"id": ann_id, "type": ann_type}
+
+        try:
+            entry["z"] = int(raw.get("z", 0))
+        except (TypeError, ValueError):
+            entry["z"] = 0
+
+        if ann_type in ("text", "rect", "ellipse"):
+            x_mm = _ann_float(raw.get("x_mm"))
+            y_mm = _ann_float(raw.get("y_mm"))
+            if x_mm is None or y_mm is None:
+                raise BadRequestError(
+                    f"{ann_type} annotation requires numeric x_mm/y_mm", error_code="BAD_ANNOTATIONS"
+                )
+            entry["x_mm"] = _clamp(x_mm, _ANNOTATION_MM_MIN, _ANNOTATION_MM_MAX)
+            entry["y_mm"] = _clamp(y_mm, _ANNOTATION_MM_MIN, _ANNOTATION_MM_MAX)
+
+        if ann_type in ("rect", "ellipse"):
+            w_mm = _ann_float(raw.get("w_mm"))
+            h_mm = _ann_float(raw.get("h_mm"))
+            if w_mm is None or h_mm is None:
+                raise BadRequestError(
+                    f"{ann_type} annotation requires numeric w_mm/h_mm", error_code="BAD_ANNOTATIONS"
+                )
+            entry["w_mm"] = _clamp(w_mm, _ANNOTATION_WH_MIN, _ANNOTATION_WH_MAX)
+            entry["h_mm"] = _clamp(h_mm, _ANNOTATION_WH_MIN, _ANNOTATION_WH_MAX)
+        elif ann_type == "text":
+            # Optional for text: absence means auto-width in the editor.
+            if raw.get("w_mm") is not None:
+                w_mm = _ann_float(raw.get("w_mm"))
+                if w_mm is not None:
+                    entry["w_mm"] = _clamp(w_mm, _ANNOTATION_WH_MIN, _ANNOTATION_WH_MAX)
+            if raw.get("h_mm") is not None:
+                h_mm = _ann_float(raw.get("h_mm"))
+                if h_mm is not None:
+                    entry["h_mm"] = _clamp(h_mm, _ANNOTATION_WH_MIN, _ANNOTATION_WH_MAX)
+
+        if ann_type in ("arrow", "line"):
+            pts = raw.get("points_mm")
+            if not isinstance(pts, list) or len(pts) != 4:
+                raise BadRequestError(
+                    f"{ann_type} annotation requires points_mm [x1,y1,x2,y2]", error_code="BAD_ANNOTATIONS"
+                )
+            coerced: list[float] = []
+            for p in pts:
+                pv = _ann_float(p)
+                if pv is None:
+                    raise BadRequestError(
+                        f"{ann_type} annotation points_mm must be numeric", error_code="BAD_ANNOTATIONS"
+                    )
+                coerced.append(_clamp(pv, _ANNOTATION_MM_MIN, _ANNOTATION_MM_MAX))
+            entry["points_mm"] = coerced
+
+        if ann_type == "text":
+            text_val = raw.get("text")
+            if not isinstance(text_val, str):
+                raise BadRequestError("text annotation requires a 'text' string", error_code="BAD_ANNOTATIONS")
+            single_line = _ANNOTATION_XML_INVALID_RE.sub("", " ".join(text_val.splitlines())).strip()
+            if not single_line:
+                raise BadRequestError("text annotation requires non-empty text", error_code="BAD_ANNOTATIONS")
+            entry["text"] = single_line[:_ANNOTATION_TEXT_MAX]
+
+            font_pt = _ann_float(raw.get("font_pt")) if raw.get("font_pt") is not None else None
+            entry["font_pt"] = (
+                _clamp(font_pt, _ANNOTATION_FONT_MIN, _ANNOTATION_FONT_MAX) if font_pt is not None else 10.0
+            )
+
+            align = raw.get("align")
+            entry["align"] = align if align in _ANNOTATION_ALIGN else "left"
+
+            fill_hex = raw.get("fill_hex")
+            entry["fill_hex"] = _ann_hex(fill_hex, field="fill_hex") if fill_hex is not None else "#000000"
+        else:
+            stroke_hex = raw.get("stroke_hex")
+            entry["stroke_hex"] = _ann_hex(stroke_hex, field="stroke_hex") if stroke_hex is not None else "#000000"
+
+            stroke_pt = _ann_float(raw.get("stroke_pt")) if raw.get("stroke_pt") is not None else None
+            entry["stroke_pt"] = (
+                _clamp(stroke_pt, _ANNOTATION_STROKE_MIN, _ANNOTATION_STROKE_MAX)
+                if stroke_pt is not None else 1.0
+            )
+
+            if ann_type in ("rect", "ellipse"):
+                fill_hex = raw.get("fill_hex")
+                entry["fill_hex"] = _ann_hex(fill_hex, field="fill_hex") if fill_hex is not None else None
+
+        out.append(entry)
+
+    return out
 
 
 # ---------------------------------------------------------------- panels
@@ -665,6 +880,103 @@ def _prefix_svg_ids(inner: str, prefix: str) -> str:
     return inner
 
 
+_ANNOTATION_ALIGN_ANCHOR = {"left": "start", "center": "middle", "right": "end"}
+
+
+def _annotation_svg(ann: dict) -> str | None:
+    """Render one annotation as an SVG vector primitive in the canvas's mm
+    coordinate space (export parity, U8). Returns None for anything malformed
+    instead of raising — a stray/legacy annotation must never fail an export
+    (§ export parity mandate: "skip, do not crash on malformed legacy items").
+
+    Deliberately re-derives defaults defensively (rather than trusting that
+    every stored item passed through ``_sanitize_annotations``) since rows can
+    predate a schema tightening or be hand-edited.
+    """
+    if not isinstance(ann, dict):
+        return None
+    ann_type = ann.get("type")
+    try:
+        if ann_type == "text":
+            x_mm = float(ann["x_mm"])
+            y_mm = float(ann["y_mm"])
+            text_val = ann.get("text")
+            if not isinstance(text_val, str) or not text_val:
+                return None
+            font_pt = float(ann.get("font_pt") or 10.0)
+            font_mm = font_pt * _PT_TO_MM
+            fill_hex = ann.get("fill_hex") or "#000000"
+            align = ann.get("align") if ann.get("align") in _ANNOTATION_ALIGN_ANCHOR else "left"
+            anchor = "start"
+            tx = x_mm
+            w_mm = ann.get("w_mm")
+            if align != "left" and isinstance(w_mm, (int, float)):
+                anchor = _ANNOTATION_ALIGN_ANCHOR[align]
+                tx = x_mm + (float(w_mm) / 2.0 if align == "center" else float(w_mm))
+            ty = y_mm + 0.8 * font_mm
+            return (
+                f'<text x="{_num(tx)}" y="{_num(ty)}" '
+                f'font-family="Helvetica, Arial, sans-serif" font-size="{_num(font_mm)}" '
+                f'fill="{_xml_escape(fill_hex)}" text-anchor="{anchor}">{_xml_escape(text_val)}</text>'
+            )
+
+        if ann_type in ("line", "arrow"):
+            pts = ann.get("points_mm")
+            if not isinstance(pts, list) or len(pts) != 4:
+                return None
+            x1, y1, x2, y2 = (float(p) for p in pts)
+            stroke_hex = ann.get("stroke_hex") or "#000000"
+            stroke_pt = float(ann.get("stroke_pt") or 1.0)
+            stroke_mm = stroke_pt * _PT_TO_MM
+            markup = (
+                f'<line x1="{_num(x1)}" y1="{_num(y1)}" x2="{_num(x2)}" y2="{_num(y2)}" '
+                f'stroke="{_xml_escape(stroke_hex)}" stroke-width="{_num(stroke_mm)}" stroke-linecap="round"/>'
+            )
+            if ann_type == "arrow":
+                dx, dy = x2 - x1, y2 - y1
+                length = math.hypot(dx, dy)
+                if length > 1e-6:
+                    # No <marker> defs (design §U8): id collisions with the
+                    # prefixed panel <defs> and rsvg marker-rendering quirks.
+                    head_len = max(2.5 * stroke_mm, 2.0)
+                    half_w = 0.6 * head_len
+                    ux, uy = dx / length, dy / length
+                    px, py = -uy, ux  # unit perpendicular
+                    back_x, back_y = x2 - ux * head_len, y2 - uy * head_len
+                    p1x, p1y = back_x + px * half_w, back_y + py * half_w
+                    p2x, p2y = back_x - px * half_w, back_y - py * half_w
+                    markup += (
+                        f'<polygon points="{_num(x2)},{_num(y2)} {_num(p1x)},{_num(p1y)} '
+                        f'{_num(p2x)},{_num(p2y)}" fill="{_xml_escape(stroke_hex)}"/>'
+                    )
+            return markup
+
+        if ann_type in ("rect", "ellipse"):
+            x_mm = float(ann["x_mm"])
+            y_mm = float(ann["y_mm"])
+            w_mm = float(ann["w_mm"])
+            h_mm = float(ann["h_mm"])
+            stroke_hex = ann.get("stroke_hex") or "#000000"
+            stroke_pt = float(ann.get("stroke_pt") or 1.0)
+            stroke_mm = stroke_pt * _PT_TO_MM
+            fill_hex = ann.get("fill_hex")
+            fill = _xml_escape(fill_hex) if isinstance(fill_hex, str) and fill_hex else "none"
+            if ann_type == "rect":
+                return (
+                    f'<rect x="{_num(x_mm)}" y="{_num(y_mm)}" width="{_num(w_mm)}" height="{_num(h_mm)}" '
+                    f'stroke="{_xml_escape(stroke_hex)}" stroke-width="{_num(stroke_mm)}" fill="{fill}"/>'
+                )
+            cx, cy = x_mm + w_mm / 2.0, y_mm + h_mm / 2.0
+            rx, ry = w_mm / 2.0, h_mm / 2.0
+            return (
+                f'<ellipse cx="{_num(cx)}" cy="{_num(cy)}" rx="{_num(rx)}" ry="{_num(ry)}" '
+                f'stroke="{_xml_escape(stroke_hex)}" stroke-width="{_num(stroke_mm)}" fill="{fill}"/>'
+            )
+    except (KeyError, TypeError, ValueError):
+        return None
+    return None
+
+
 def _compose_canvas_svg(db: Session, owner_id: uuid.UUID, canvas: Canvas) -> tuple[str, dict[str, str]]:
     """Build the composite canvas SVG by nesting each panel's vector render.
 
@@ -741,6 +1053,17 @@ def _compose_canvas_svg(db: Session, owner_id: uuid.UUID, canvas: Canvas) -> tup
             )
 
         snapshot[str(panel.id)] = str(effective)
+
+    # U8: annotations are emitted AFTER every panel — they always paint ABOVE
+    # panels (V1) — sorted by (z, id) for stable, deterministic paint order.
+    annotations = sorted(
+        (a for a in (canvas.annotations or []) if isinstance(a, dict)),
+        key=lambda a: (a.get("z", 0) if isinstance(a.get("z"), (int, float)) else 0, str(a.get("id", ""))),
+    )
+    for ann in annotations:
+        markup = _annotation_svg(ann)
+        if markup:
+            parts.append(markup)
 
     parts.append("</svg>")
     return "\n".join(parts), snapshot

@@ -24,7 +24,15 @@
  *   8. undo (delete)          → POST returns "P3" → remap("P2","P3");
  *                                the alias chain updates "P1"→"P3" too, so
  *                                even entry (2) still resolves correctly.
+ *
+ * U8 annotations: unlike panels, annotations have no server-assigned id (the
+ * client generates the uuid) and no per-item CRUD endpoint — the whole array
+ * round-trips in one `updateCanvas({ annotations })` PATCH. That sidesteps id
+ * remapping entirely, so 'annotations-update' just snapshots the full
+ * before/after array (capped at 200 small items — cheap to store whole).
  */
+
+import type { CanvasAnnotation } from '@/lib/types';
 
 /** Fields of a panel that `updateCanvasPanel` can patch. */
 export type PanelFields = Partial<{
@@ -72,7 +80,11 @@ export type HistoryOp =
   /** Panel deleted. Undo → addCanvasPanel(snapshot) + remap; redo → deleteCanvasPanel(mapped id). */
   | { type: 'panel-delete'; snapshot: PanelSnapshot; label: string }
   /** Canvas physical size change. Undo/redo via updateCanvas. */
-  | { type: 'canvas-size'; before: CanvasSize; after: CanvasSize; label: string };
+  | { type: 'canvas-size'; before: CanvasSize; after: CanvasSize; label: string }
+  /** U8: annotation create/move/resize/endpoint-drag/inspector-edit/delete/
+   *  z-change. Whole-array snapshot; undo → updateCanvas({annotations: before}),
+   *  redo → …after. */
+  | { type: 'annotations-update'; before: CanvasAnnotation[]; after: CanvasAnnotation[]; label: string };
 
 export const HISTORY_CAP = 50;
 

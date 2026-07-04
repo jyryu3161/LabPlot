@@ -62,6 +62,7 @@ export function CanvasHelpPopover() {
             <li>Arrow keys nudge 1mm (Shift = 5mm)</li>
             <li>Delete removes the selected panel(s)</li>
             <li>Ctrl/Cmd+Z undo · Ctrl/Cmd+Shift+Z redo</li>
+            <li>Left toolbar: add text/arrow/line/rectangle/ellipse annotations (V/T/A/L/R/O) — drag to draw, click to place text, Esc back to Select</li>
           </ul>
         </div>
       )}
@@ -98,7 +99,7 @@ export function CanvasHintsBar({ show }: { show: boolean }) {
 
   return (
     <div className="flex items-center gap-2 border-b bg-muted/40 px-4 py-1 text-xs text-muted-foreground">
-      <span>Drag to move · corners/edges to resize · Space+drag or scroll to pan · Ctrl/Cmd+scroll to zoom · click a panel to edit · arrow keys nudge 1mm (Shift=5mm)</span>
+      <span>Drag to move · corners/edges to resize · Space+drag or scroll to pan · Ctrl/Cmd+scroll to zoom · click a panel to edit · arrow keys nudge 1mm (Shift=5mm) · left toolbar adds text/shape annotations (V/T/A/L/R/O)</span>
       <button
         type="button"
         className="ml-auto rounded p-0.5 hover:bg-muted hover:text-foreground"

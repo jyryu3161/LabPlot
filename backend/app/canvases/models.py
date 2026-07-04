@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import relationship
 
@@ -25,6 +25,13 @@ class Canvas(Base):
     preset = Column(String(40), nullable=True)  # journal preset key (e.g. nature_single)
     background = Column(String(20), nullable=False, default="white")  # white | transparent
     export_snapshot = Column(JSONB, nullable=True)  # {panel_id: version_id} from last export
+    # U8: text/arrow/line/rect/ellipse annotation objects, painted ABOVE every
+    # panel. Server-validated shape lives in service._sanitize_annotations.
+    annotations = Column(JSONB, nullable=False, server_default=text("'[]'::jsonb"), default=list)
+    # Server-incremented on every annotations replace — the optimistic-
+    # concurrency token for the whole-array PATCH (409 ANNOTATIONS_CONFLICT
+    # when a client's base_annotations_rev no longer matches).
+    annotations_rev = Column(Integer, nullable=False, server_default=text("0"), default=0)
     created_at = Column(DateTime(timezone=True), default=_now)
     updated_at = Column(DateTime(timezone=True), default=_now, onupdate=_now)
 

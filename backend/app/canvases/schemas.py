@@ -32,6 +32,16 @@ class CanvasUpdate(BaseModel):
     # service restricts ALL project_id changes to the canvas OWNER — a
     # non-owner editor could otherwise privatize a shared canvas.
     project_id: uuid.UUID | None = None
+    # U8: text/arrow/line/rect/ellipse annotation objects. None = leave
+    # unchanged (the key can still be *absent* from the request entirely, or
+    # explicitly sent as null — both are no-ops); [] = clear all annotations.
+    # Sanitized server-side by service._sanitize_annotations before persisting.
+    annotations: list[dict[str, Any]] | None = None
+    # Optimistic-concurrency guard for the whole-array annotations replace
+    # (mirrors figures RerenderRequest.base_version_id): when supplied, the
+    # replace only proceeds if the stored annotations_rev still matches.
+    # Mismatch -> 409 ANNOTATIONS_CONFLICT. Omitted keeps last-write-wins.
+    base_annotations_rev: int | None = None
 
 
 class PanelCreate(BaseModel):
@@ -104,6 +114,10 @@ class CanvasDetail(BaseModel):
     created_at: datetime
     updated_at: datetime
     panels: list[CanvasPanel] = Field(default_factory=list)
+    # U8: sanitized text/arrow/line/rect/ellipse annotation objects, always
+    # painted above every panel (V1).
+    annotations: list[dict[str, Any]] = Field(default_factory=list)
+    annotations_rev: int = 0
 
 
 class PreviewOptionsOverlay(BaseModel):
