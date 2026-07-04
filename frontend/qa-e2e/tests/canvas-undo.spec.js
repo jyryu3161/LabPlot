@@ -48,8 +48,20 @@ test.describe('canvas undo/redo + hints', () => {
     // 2) Rename the auto-selected panel -> records a panel-update.
     const labelInput = page.getByRole('textbox', { name: 'Panel label' });
     await expect(labelInput).toBeVisible();
+    // The rename's history entry is recorded in the label PATCH's onSuccess
+    // (server-accepted-first model, CanvasEditor patchPanel). Wait for that
+    // PATCH response before touching Undo: otherwise, under full-suite network
+    // load, an Undo click can land in the window where the server already has
+    // 'Z' (so the firstLabel poll passes) but the client hasn't recorded the
+    // rename op yet — the click then no-ops or pops the wrong entry (the
+    // long-standing intermittent failure of this test).
+    const renamePatch = page.waitForResponse(
+      (r) => /\/canvases\/[^/]+\/panels\//.test(r.url()) && r.request().method() === 'PATCH' && r.ok(),
+      { timeout: 15000 },
+    );
     await labelInput.fill('Z');
     await labelInput.press('Enter');
+    await renamePatch;
     await expect.poll(firstLabel, { timeout: 15000 }).toBe('Z');
 
     // Undo the rename -> label reverts (panel stays).
@@ -71,6 +83,14 @@ test.describe('canvas undo/redo + hints', () => {
     // Redo the rename -> only lands if the idMap remapped to the new id.
     await redoBtn.click();
     await expect.poll(firstLabel, { timeout: 15000 }).toBe('Z');
+    // redoBtn.click() only dispatches the click; applyHistory('redo') then runs
+    // async and holds the reentrancy lock (history.isApplying) until it fully
+    // settles in the browser. Server truth (label=Z) can arrive while that op
+    // is still in flight, so an immediate Ctrl+Z would be correctly rejected
+    // as reentrant. Wait for the redo to fully settle — the Redo button goes
+    // disabled once its stack empties AND applyingHistory clears — before the
+    // keyboard undo.
+    await expect(redoBtn).toBeDisabled();
 
     // Ctrl+Z undoes the rename again (keyboard path; focus is on the Redo
     // button, not an input, so the editor's input-focus guard lets it through).

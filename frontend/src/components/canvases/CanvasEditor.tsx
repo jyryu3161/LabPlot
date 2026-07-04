@@ -1148,7 +1148,14 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   }
 
   async function applyHistory(direction: 'undo' | 'redo') {
-    if (history.isApplying || applyingHistory) return;
+    // Reentrancy guard must be SYNCHRONOUS: history.isApplying is set/cleared
+    // synchronously inside begin/endApply, whereas `applyingHistory` is React
+    // state whose reset lags a render. Two ops fired within one render cycle
+    // (rapid Ctrl+Z / Ctrl+Shift+Z, or a redo immediately followed by an
+    // undo) would read a stale applyingHistory=true and the SECOND op would be
+    // silently dropped. `applyingHistory` remains only for the buttons'
+    // disabled styling.
+    if (history.isApplying) return;
     await flushNudge(); // pending nudge commits (and records) BEFORE we pop an op
     flushAnnotationEdit(); // ditto for a pending debounced annotation-field edit
     const op = direction === 'undo' ? history.undo() : history.redo();
