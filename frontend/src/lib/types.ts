@@ -408,6 +408,14 @@ export interface Review {
   created_at: string;
 }
 
+// Parts of an improve request the AI reported it could NOT express as a
+// supported param_patch (U10b). Same list repeated on every Improvement
+// returned from the same /improve call.
+export interface UnsupportedRequestItem {
+  request: string;
+  reason: string;
+}
+
 export interface Improvement {
   id: string;
   figure_version_id: string;
@@ -419,7 +427,36 @@ export interface Improvement {
   applied: boolean;
   // Dotted paths this suggestion proposed that were dropped by sanitization.
   skipped?: string[];
+  unsupported?: UnsupportedRequestItem[];
   created_at: string;
+}
+
+// (U10b) {key, from, to} for a patch key that visibly changed the render.
+export interface AppliedChangeItem {
+  key: string;
+  from: unknown;
+  to: unknown;
+}
+
+// (U10c) Self-verify loop outcome, present only when the apply call opted in
+// with verify=true and a non-empty original_request.
+export interface VerificationResult {
+  attempts: number;
+  satisfied: boolean;
+  feedback: string;
+  // Machine-readable reason verification could not run (AI_QUOTA_EXCEEDED,
+  // AI_API_ERROR, NO_IMAGE, ...). Null/absent when it ran normally.
+  skipped?: string | null;
+}
+
+// Response shape for both apply endpoints (U10b/U10c). Wraps FigureVersion
+// instead of extending it so existing FigureVersion consumers (rerender,
+// svg-edit, ...) are unaffected.
+export interface ImprovementApplyResult {
+  version: FigureVersion;
+  applied_changes: AppliedChangeItem[];
+  dropped_keys: string[];
+  verification?: VerificationResult | null;
 }
 
 export interface MethodsTextResponse { methods_text: string; }

@@ -30,7 +30,9 @@ from app.figures.schemas import (
     FigureTemplateFavoriteItem,
     FigureUpdate,
     GalleryFigureItem,
+    ImprovementApplyOneRequest,
     ImprovementApplyRequest,
+    ImprovementApplyResponse,
     ImprovementRequest,
     ImprovementResponse,
     LegendRequest,
@@ -389,14 +391,52 @@ def list_improvements(figure_id: uuid.UUID, version_id: uuid.UUID, db: Session =
     return service.list_improvements(db, figure_id, version_id, current_user.id)
 
 
-@router.post("/{figure_id}/improvements/apply", response_model=VersionResponse)
-def apply_improvements(figure_id: uuid.UUID, data: ImprovementApplyRequest, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    return service.apply_improvements(db, figure_id, data.improvement_ids, current_user.id)
+def _log_verify_retry(request: Request, db: Session, current_user: User, figure_id: uuid.UUID, result: dict) -> None:
+    """(U10c) Audit-log an automatic verification retry, following the same
+    audit_service.log_event pattern used by the other figure endpoints in this
+    router."""
+    verification = result.get("verification")
+    if not verification or verification.get("attempts", 1) < 2:
+        return
+    audit_service.log_event(
+        db,
+        actor_id=current_user.id,
+        action="figure.ai_edit_verify_retry",
+        target_type="figure",
+        target_id=figure_id,
+        metadata={
+            "version_id": result["version"]["id"],
+            "satisfied": verification.get("satisfied"),
+        },
+        request=request,
+    )
+    db.commit()
 
 
-@router.post("/{figure_id}/improvements/{improvement_id}/apply", response_model=VersionResponse)
-def apply_improvement(figure_id: uuid.UUID, improvement_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    return service.apply_improvement(db, figure_id, improvement_id, current_user.id)
+@router.post("/{figure_id}/improvements/apply", response_model=ImprovementApplyResponse,
+             dependencies=[Depends(rate_limit("ai_apply", 60, 3600))])
+def apply_improvements(figure_id: uuid.UUID, data: ImprovementApplyRequest, request: Request,
+                       db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    result = service.apply_improvements(
+        db, figure_id, data.improvement_ids, current_user.id,
+        verify=data.verify, original_request=data.original_request, allow_retry=data.retry,
+    )
+    _log_verify_retry(request, db, current_user, figure_id, result)
+    return result
+
+
+@router.post("/{figure_id}/improvements/{improvement_id}/apply", response_model=ImprovementApplyResponse,
+             dependencies=[Depends(rate_limit("ai_apply", 60, 3600))])
+def apply_improvement(figure_id: uuid.UUID, improvement_id: uuid.UUID, request: Request,
+                      data: ImprovementApplyOneRequest | None = None,
+                      db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    req = data or ImprovementApplyOneRequest()
+    result = service.apply_improvement(
+        db, figure_id, improvement_id, current_user.id,
+        verify=req.verify, original_request=req.original_request, allow_retry=req.retry,
+    )
+    _log_verify_retry(request, db, current_user, figure_id, result)
+    return result
 
 
 @router.get("/{figure_id}/versions/{version_id}/export")

@@ -1,22 +1,75 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState, type PointerEvent } from 'react';
-import { ArrowRight, CheckCircle2, Eraser, Loader2, MessageSquareText, MousePointer2, SquareDashedMousePointer, Trash2, Wand2 } from 'lucide-react';
+import { ArrowRight, CheckCircle2, Eraser, Loader2, MessageSquareText, MousePointer2, ShieldCheck, SquareDashedMousePointer, Trash2, Wand2 } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
-import type { Improvement } from '@/lib/types';
+import type { AppliedChangeItem, Improvement, UnsupportedRequestItem, VerificationResult } from '@/lib/types';
 
 type AnnotationTool = 'select' | 'region' | 'arrow' | 'note';
 type AnnotationType = Exclude<AnnotationTool, 'select'>;
 
-interface AiEditPayload {
+// Persisted default-ON toggle (U10c): send verify + the original request text
+// on apply so the backend runs the self-verify (+ single retry) loop.
+const VERIFY_STORAGE_KEY = 'labplot.ai-editor.verify-enabled';
+
+function loadVerifyPreference(): boolean {
+  if (typeof window === 'undefined') return true;
+  try {
+    const raw = window.localStorage.getItem(VERIFY_STORAGE_KEY);
+    return raw === null ? true : raw === '1';
+  } catch {
+    return true;
+  }
+}
+
+export interface AiEditPayload {
   prompt: string;
   annotated_image?: string;
+  verify: boolean;
+}
+
+// Chips shown after an apply action (U10b applied_changes/unsupported/dropped
+// + U10c verification outcome). Built by the page from the apply response and
+// the improve response's `unsupported` field.
+export interface AiEditOutcome {
+  appliedChanges: AppliedChangeItem[];
+  unsupported: UnsupportedRequestItem[];
+  droppedKeys: string[];
+  verification?: VerificationResult | null;
+}
+
+function formatDottedKey(key: string): string {
+  const idx = key.lastIndexOf('.');
+  return idx >= 0 ? key.slice(idx + 1) : key;
+}
+
+// Zero-patch rows (the U10b "Unsupported request" carrier) are informational
+// only - the backend also rejects applying them (NOTHING_TO_APPLY).
+function hasApplicablePatch(imp: Improvement): boolean {
+  return Boolean(imp.param_patch && Object.keys(imp.param_patch).length > 0);
+}
+
+// What the verifier should judge for the suggestion-apply paths: the text of
+// the suggestions actually being applied, NOT the whole prompt box - the user
+// may deliberately apply only a subset of what they asked for.
+function suggestionRequestText(items: Improvement[]): string {
+  return items
+    .map((imp) => (imp.recommended || imp.suggestion_type || '').trim())
+    .filter(Boolean)
+    .join('\n');
+}
+
+function formatValue(value: unknown): string {
+  if (value === null || value === undefined || value === '') return '(unset)';
+  if (typeof value === 'object') return JSON.stringify(value);
+  return String(value);
 }
 
 interface Annotation {
@@ -51,11 +104,14 @@ interface AiFigureEditorProps {
   isApplyingPrompt?: boolean;
   isApplyingSuggestion?: boolean;
   canEdit?: boolean;
+  // Chips for the most recent apply action on this version, or null before any
+  // apply / after the version changes.
+  lastOutcome?: AiEditOutcome | null;
   onPromptChange: (value: string) => void;
   onSuggest: (request: AiEditPayload) => void;
   onApplyPrompt: (request: AiEditPayload) => void;
-  onApplySuggestion: (improvementId: string) => void;
-  onApplySuggestions: (improvementIds: string[]) => void;
+  onApplySuggestion: (improvementId: string, verify: boolean, originalRequest: string) => void;
+  onApplySuggestions: (improvementIds: string[], verify: boolean, originalRequest: string) => void;
 }
 
 function clampPercent(value: number): number {
@@ -308,6 +364,7 @@ export function AiFigureEditor({
   isApplyingPrompt = false,
   isApplyingSuggestion = false,
   canEdit = true,
+  lastOutcome = null,
   onPromptChange,
   onSuggest,
   onApplyPrompt,
@@ -323,12 +380,13 @@ export function AiFigureEditor({
   const [selectedImprovementIds, setSelectedImprovementIds] = useState<string[]>([]);
   const [isPreparingImage, setIsPreparingImage] = useState(false);
   const [drag, setDrag] = useState<DraftDrag | null>(null);
+  const [verifyEnabled, setVerifyEnabled] = useState<boolean>(loadVerifyPreference);
 
   const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const hasAnnotations = annotations.length > 0;
   const hasMarkedInstructions = annotations.some((annotation) => annotation.text.trim());
   const selectableImprovementIds = useMemo(
-    () => (improvements ?? []).filter((imp) => !imp.applied).map((imp) => imp.id),
+    () => (improvements ?? []).filter((imp) => !imp.applied && hasApplicablePatch(imp)).map((imp) => imp.id),
     [improvements],
   );
   const validSelectedImprovementIds = useMemo(
@@ -520,8 +578,17 @@ export function AiFigureEditor({
     removeAnnotations(selectedIds);
   }
 
+  function toggleVerify(checked: boolean) {
+    setVerifyEnabled(checked);
+    try {
+      window.localStorage.setItem(VERIFY_STORAGE_KEY, checked ? '1' : '0');
+    } catch {
+      // localStorage unavailable - the toggle still works for this session.
+    }
+  }
+
   async function buildEditPayload(): Promise<AiEditPayload> {
-    const payload: AiEditPayload = { prompt: combinedPrompt };
+    const payload: AiEditPayload = { prompt: combinedPrompt, verify: verifyEnabled };
     if (hasAnnotations) {
       try {
         const annotatedImage = await renderAnnotatedImage(imageUrl, annotations);
@@ -772,7 +839,69 @@ export function AiFigureEditor({
                   </Button>
                 </div>
               </div>
+              <div className="mt-3 flex items-center gap-2 border-t pt-3">
+                <Switch
+                  id="ai-editor-verify"
+                  size="sm"
+                  checked={verifyEnabled}
+                  onCheckedChange={toggleVerify}
+                  aria-label="Verify the applied result against the request with a second AI check"
+                />
+                <Label htmlFor="ai-editor-verify" className="cursor-pointer text-xs text-muted-foreground">
+                  Verify result (AI): after applying, check the edit against this request and retry once if it does not match.
+                </Label>
+              </div>
             </div>
+
+            {(lastOutcome && (lastOutcome.appliedChanges.length > 0 || lastOutcome.unsupported.length > 0
+              || lastOutcome.droppedKeys.length > 0 || lastOutcome.verification)) && (
+              <div className="flex flex-wrap gap-1.5">
+                {lastOutcome.verification && (() => {
+                  const v = lastOutcome.verification;
+                  if (v.skipped) {
+                    return (
+                      <Badge variant="outline" className="text-muted-foreground">
+                        Verification unavailable ({v.skipped === 'AI_QUOTA_EXCEEDED' ? 'monthly AI quota reached' : v.skipped})
+                      </Badge>
+                    );
+                  }
+                  if (!v.satisfied) {
+                    return (
+                      <Badge variant="outline" className="border-amber-300 bg-amber-50 text-amber-700">
+                        Not fully satisfied: {v.feedback || 'the AI edit did not fully match the request.'}
+                      </Badge>
+                    );
+                  }
+                  if (v.attempts >= 2) {
+                    return (
+                      <Badge variant="outline" className="border-green-300 bg-green-50 text-green-700">
+                        Retried once — {v.feedback || 'now matches the request.'}
+                      </Badge>
+                    );
+                  }
+                  return (
+                    <Badge variant="outline" className="border-green-300 bg-green-50 text-green-700">
+                      <ShieldCheck className="h-3 w-3" /> Verified
+                    </Badge>
+                  );
+                })()}
+                {lastOutcome.appliedChanges.map((change, index) => (
+                  <Badge key={`applied-${index}`} variant="outline" className="border-green-300 bg-green-50 text-green-700">
+                    Applied: {formatDottedKey(change.key)} {formatValue(change.from)}→{formatValue(change.to)}
+                  </Badge>
+                ))}
+                {lastOutcome.unsupported.map((item, index) => (
+                  <Badge key={`unsupported-${index}`} variant="outline" className="border-amber-300 bg-amber-50 text-amber-700">
+                    Not applied: &ldquo;{item.request}&rdquo; — {item.reason}
+                  </Badge>
+                ))}
+                {lastOutcome.droppedKeys.map((key, index) => (
+                  <Badge key={`dropped-${index}`} variant="outline" className="border-amber-300 bg-amber-50 text-amber-700">
+                    Not applied: {formatDottedKey(key)} had no visible effect
+                  </Badge>
+                ))}
+              </div>
+            )}
           </>
         )}
 
@@ -796,7 +925,11 @@ export function AiFigureEditor({
                 <Button
                   type="button"
                   size="sm"
-                  onClick={() => onApplySuggestions(validSelectedImprovementIds)}
+                  onClick={() => onApplySuggestions(
+                    validSelectedImprovementIds,
+                    verifyEnabled,
+                    suggestionRequestText((improvements ?? []).filter((imp) => selectedImprovementIdSet.has(imp.id))),
+                  )}
                   disabled={!canEdit || !validSelectedImprovementIds.length || isApplyingSuggestion}
                 >
                   {isApplyingSuggestion ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="mr-1 h-3.5 w-3.5" />}
@@ -805,35 +938,42 @@ export function AiFigureEditor({
               </div>
             </div>
             <div className="space-y-2">
-              {improvements.map((imp) => (
-                <div key={imp.id} className={`rounded border p-2 text-sm ${selectedImprovementIdSet.has(imp.id) ? 'border-primary bg-primary/5' : ''}`}>
-                  <div className="grid gap-2 sm:grid-cols-[auto_1fr_auto] sm:items-start">
-                    <Checkbox
-                      checked={selectedImprovementIdSet.has(imp.id)}
-                      onCheckedChange={(checked) => toggleSuggestion(imp.id, Boolean(checked))}
-                      disabled={imp.applied || isApplyingSuggestion}
-                      aria-label={`Select suggestion ${imp.suggestion_type ?? 'AI edit'}`}
-                      className="mt-0.5"
-                    />
-                    <div>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="font-medium">{imp.suggestion_type || 'AI edit'}</span>
-                        {imp.priority && <Badge variant="outline" className="text-xs">{imp.priority}</Badge>}
-                        {imp.applied && <Badge variant="secondary" className="text-xs">Applied</Badge>}
+              {improvements.map((imp) => {
+                const applicable = hasApplicablePatch(imp);
+                return (
+                  <div key={imp.id} className={`rounded border p-2 text-sm ${selectedImprovementIdSet.has(imp.id) ? 'border-primary bg-primary/5' : ''}`}>
+                    <div className="grid gap-2 sm:grid-cols-[auto_1fr_auto] sm:items-start">
+                      <Checkbox
+                        checked={selectedImprovementIdSet.has(imp.id)}
+                        onCheckedChange={(checked) => toggleSuggestion(imp.id, Boolean(checked))}
+                        disabled={imp.applied || isApplyingSuggestion || !applicable}
+                        aria-label={`Select suggestion ${imp.suggestion_type ?? 'AI edit'}`}
+                        className="mt-0.5"
+                      />
+                      <div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-medium">{imp.suggestion_type || 'AI edit'}</span>
+                          {imp.priority && <Badge variant="outline" className="text-xs">{imp.priority}</Badge>}
+                          {imp.applied && <Badge variant="secondary" className="text-xs">Applied</Badge>}
+                        </div>
+                        {imp.recommended && <p className="mt-1 text-xs text-muted-foreground">{imp.recommended}</p>}
                       </div>
-                      {imp.recommended && <p className="mt-1 text-xs text-muted-foreground">{imp.recommended}</p>}
+                      {applicable ? (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => onApplySuggestion(imp.id, verifyEnabled, suggestionRequestText([imp]))}
+                          disabled={!canEdit || isApplyingSuggestion || imp.applied}
+                        >
+                          Apply only this
+                        </Button>
+                      ) : (
+                        <Badge variant="outline" className="mt-1 text-xs text-muted-foreground">Informational</Badge>
+                      )}
                     </div>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => onApplySuggestion(imp.id)}
-                      disabled={!canEdit || isApplyingSuggestion || imp.applied}
-                    >
-                      Apply only this
-                    </Button>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         )}

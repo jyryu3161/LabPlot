@@ -133,6 +133,23 @@ class ImprovementRequest(BaseModel):
 
 class ImprovementApplyRequest(BaseModel):
     improvement_ids: list[uuid.UUID] = Field(..., min_length=1, max_length=20)
+    # U10c self-verify loop, opt-in per apply call. Both must be set (verify
+    # true AND a non-empty original_request) for verification to run.
+    verify: bool = False
+    # Advisory (verification-only): verify_edit truncates to 4000 chars itself,
+    # so the cap here is a generous abuse backstop rather than a hard 422 on a
+    # long combined prompt (the client also truncates to 4000).
+    original_request: str | None = Field(default=None, max_length=20_000)
+    # When False (the suggestion-apply UI paths), an unsatisfied verdict is
+    # reported as-is - the auto-retry never creates a version the user did not
+    # explicitly select. Defaults True for the direct "Apply edit" path.
+    retry: bool = True
+
+
+class ImprovementApplyOneRequest(BaseModel):
+    verify: bool = False
+    original_request: str | None = Field(default=None, max_length=20_000)
+    retry: bool = True
 
 
 class VersionResponse(BaseModel):
@@ -158,6 +175,41 @@ class VersionResponse(BaseModel):
     # plain rerenders / manual edits. Lets the UI show "N of M changes applied".
     applied: list[str] = Field(default_factory=list)
     skipped: list[str] = Field(default_factory=list)
+
+
+class AppliedChangeItem(BaseModel):
+    # Dotted path: "style_preset", "mapping.<key>", or "options.<key>".
+    key: str
+    from_value: Any = Field(default=None, alias="from")
+    to: Any = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class VerificationResult(BaseModel):
+    # U10c: number of verify_edit calls made (1, or 2 when a retry happened;
+    # 0 when verification was requested but could not run - see `skipped`).
+    attempts: int
+    satisfied: bool
+    feedback: str
+    # Machine-readable reason verification could not run (e.g.
+    # AI_QUOTA_EXCEEDED, AI_API_ERROR, NO_IMAGE). None when it ran normally.
+    skipped: str | None = None
+
+
+class ImprovementApplyResponse(BaseModel):
+    """Wraps VersionResponse instead of extending it (U10b/U10c), so existing
+    VersionResponse consumers (rerender, svg-edit, ...) are unaffected; only
+    the two apply endpoints return this shape."""
+    version: VersionResponse
+    # (U10b) {key, from, to} for patch keys that visibly changed the render.
+    applied_changes: list[AppliedChangeItem] = Field(default_factory=list)
+    # (U10b) Patch keys that sanitize_options removed, or that provably
+    # changed nothing versus the pre-apply state.
+    dropped_keys: list[str] = Field(default_factory=list)
+    # (U10c) Present only when the caller opted in with verify=true AND a
+    # non-empty original_request.
+    verification: VerificationResult | None = None
 
 
 class FigureListItem(BaseModel):
@@ -268,6 +320,11 @@ class ReviewResponse(BaseModel):
     created_at: datetime
 
 
+class UnsupportedRequestItem(BaseModel):
+    request: str
+    reason: str
+
+
 class ImprovementResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -283,6 +340,12 @@ class ImprovementResponse(BaseModel):
     # Dotted paths the AI proposed for this suggestion that were dropped by
     # sanitization (unsupported key, wrong type, or unknown column).
     skipped: list[str] = Field(default_factory=list)
+    # Parts of the improve request the AI reported it could NOT express as a
+    # supported param_patch (U10b). Property of the whole improve_version call
+    # this suggestion came from, not of this suggestion alone - the same list
+    # is repeated on every ImprovementResponse from that call so the client
+    # can read it off any one of them.
+    unsupported: list[UnsupportedRequestItem] = Field(default_factory=list)
 
 
 class RecommendationItem(BaseModel):

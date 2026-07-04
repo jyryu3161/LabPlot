@@ -24,6 +24,11 @@ RUN apt-get update \
  && fc-cache -f \
  && rm -rf /var/lib/apt/lists/*
 
+# Pillow for bounded-size AI vision inputs (ai/client._bounded_image downscales
+# huge renders before verify_edit/improve calls). Separate late layer so the
+# slow r-viz solve above stays cached.
+RUN pixi run python -m pip install --no-cache-dir "pillow>=10"
+
 # replace AL application code with LabPlot's
 RUN rm -rf backend
 RUN groupadd --gid 1000 labplot \

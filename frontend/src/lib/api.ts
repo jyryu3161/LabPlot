@@ -1,7 +1,7 @@
 import type {
   User, TokenResponse, LoginRequest, RegisterRequest,
   DatasetIngestOptions, DatasetListItem, DatasetDetail, DatasetPreview, ChartSuggestion, PlotTypeDef, StyleDef, ColumnValues,
-  FigureListItem, FigureDetail, FigureVersion, Review, Improvement, MethodsTextResponse, AltTextResponse, AdminUser, AIConfig, GalleryFigureItem, AuditLogItem,
+  FigureListItem, FigureDetail, FigureVersion, Review, Improvement, ImprovementApplyResult, MethodsTextResponse, AltTextResponse, AdminUser, AIConfig, GalleryFigureItem, AuditLogItem,
   ClientErrorItem, Project, ProjectListItem, EmailDeliveryStatus, FigureTemplateFavoriteItem,
   MembershipItem, MyOrganizationItem, OrganizationAIConfig, OrganizationItem, OrganizationSearchItem, OrganizationUsageSummary, OrganizationUserSearchItem,
   ProjectCollaborator, ProjectInvitation, ProjectUserSearchItem, GalleryTemplate, RecommendationCache,
@@ -452,13 +452,38 @@ export async function improveVersion(figureId: string, versionId: string, reques
 export async function listImprovements(figureId: string, versionId: string): Promise<Improvement[]> {
   return fetcher(`/api/figures/${figureId}/versions/${versionId}/improvements`);
 }
-export async function applyImprovement(figureId: string, improvementId: string): Promise<FigureVersion> {
-  return fetcher(`/api/figures/${figureId}/improvements/${improvementId}/apply`, { method: 'POST' });
+// (U10c) verify + original_request are opt-in: only pass verify=true together
+// with a non-empty original_request to run the self-verify loop server-side.
+// retry=false (suggestion-apply paths) reports the verdict without the
+// auto-retry, so no version the user did not select is ever created.
+export interface ApplyImprovementOptions {
+  verify?: boolean;
+  original_request?: string;
+  retry?: boolean;
 }
-export async function applyImprovements(figureId: string, improvementIds: string[]): Promise<FigureVersion> {
+// original_request is advisory (verification-only) and the backend truncates
+// it to 4000 chars inside verify_edit - truncate here too so a long combined
+// prompt can never 422 the whole apply.
+function trimOriginalRequest(value?: string): string | undefined {
+  return value?.trim().slice(0, 4000) || undefined;
+}
+export async function applyImprovement(figureId: string, improvementId: string, options?: ApplyImprovementOptions): Promise<ImprovementApplyResult> {
+  const body = options?.verify || options?.original_request ? JSON.stringify({
+    verify: options?.verify ?? false,
+    original_request: trimOriginalRequest(options?.original_request),
+    retry: options?.retry ?? true,
+  }) : undefined;
+  return fetcher(`/api/figures/${figureId}/improvements/${improvementId}/apply`, { method: 'POST', body });
+}
+export async function applyImprovements(figureId: string, improvementIds: string[], options?: ApplyImprovementOptions): Promise<ImprovementApplyResult> {
   return fetcher(`/api/figures/${figureId}/improvements/apply`, {
     method: 'POST',
-    body: JSON.stringify({ improvement_ids: improvementIds }),
+    body: JSON.stringify({
+      improvement_ids: improvementIds,
+      verify: options?.verify ?? false,
+      original_request: trimOriginalRequest(options?.original_request),
+      retry: options?.retry ?? true,
+    }),
   });
 }
 export function exportUrl(figureId: string, versionId: string, fmt: string): string {

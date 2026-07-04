@@ -29,6 +29,7 @@ from app.datasets.models import Dataset
 from app.datasets import service as ds_service
 from app.figures import codegen
 from app.figures.models import Figure, FigureCodeArtifact, FigureComment, FigureTemplateFavorite, FigureVersion, Improvement, Recommendation, Review
+from app.figures.option_metadata import _BOOL_OPTIONS, _NUMBER_OPTIONS, _OPTION_CHOICES, _UNIVERSAL_OPTION_KEYS
 from app.palettes import service as palette_service
 from app.projects.models import Project
 from app.r_engine import renderer
@@ -36,102 +37,10 @@ from app.r_engine.presets import PRESETS, journal_spec
 from app.r_engine.templates import PLOT_TYPES, PLOT_TYPE_KEYS, rq
 
 _STATIC_ROOT = os.path.dirname(settings.figures_dir.rstrip("/"))
-_UNIVERSAL_OPTION_KEYS = {
-    "palette_name", "size", "width_in", "height_in", "color_mode", "font_scale", "base_size", "dpi",
-    "title", "subtitle", "x_label", "y_label", "legend_title",
-    "hide_legend", "log_x", "log_y", "flip_coords", "x_text_angle", "legend_position",
-    "x_min", "x_max", "y_min", "y_max",
-    "custom_palette_values", "custom_palette_label", "category_colors",
-    # New visual/layout options (contract with the R-engine agent). Universal so
-    # they pass the allow-list for any plot type that renders them; unused keys
-    # are simply ignored by templates that do not consume them.
-    "fill_alpha", "point_alpha", "error_type", "color_midpoint", "level_order",
-    "facet_by", "facet_scales", "hline_at", "vline_at", "font_family", "transparent_background",
-    # Gates the self-contained interactive plotly HTML export (bool).
-    "interactive_html",
-    # Statistical-annotation / model-fit options (contract with the plot-types
-    # agent in templates.py). Universal so they pass the allow-list for any plot
-    # type that renders them; unused keys are ignored by templates that do not.
-    "fit_model", "show_n", "show_significance", "show_fit_stats",
-    # Secondary-axis options (contract with the plot-types agent in
-    # templates.py): y2_column must reference a real dataset column and
-    # y2_label is a plain axis-label string.
-    "y2_column", "y2_label",
-    # Data-label / axis-tick / legend-layout options (contract with the
-    # templates.py & presets.py agents). Universal so they pass the allow-list
-    # for any plot type; unused keys are ignored by templates that do not render
-    # them. Bool/number/choice shapes are enforced in _sanitize_option.
-    "show_data_labels", "data_label_format",
-    "reverse_x", "reverse_y", "x_breaks", "y_breaks",
-    "x_tick_format", "y_tick_format",
-    "legend_key_size", "legend_ncol",
-    # Structured overlays (custom-sanitized to shape-safe dicts/lists below):
-    # free-form annotations and per-series style overrides.
-    "annotations", "series_styles",
-    # Axis-type / date-formatting / axis-break options (contract with the
-    # templates.py agent + frontend). x_axis_type/date_format are choice-shaped;
-    # axis_break_x/axis_break_y are 2-element [from,to] float lists validated in
-    # _sanitize_option.
-    "x_axis_type", "date_format", "axis_break_x", "axis_break_y",
-}
-_OPTION_CHOICES = {
-    "palette_name": {"preset", "journal_muted", "okabe_ito", "tol_bright", "set2", "npg", "tableau10"},
-    "size": {"single_column", "wide", "double_column", "square", "custom"},
-    "color_mode": {"color", "grayscale"},
-    "stat": {"mean", "sum", "count"},
-    "palette": {"blue_red", "viridis", "magma", "inferno", "plasma", "cividis"},
-    "corr_method": {"pearson", "spearman"},
-    "layout": {"fr", "kk", "circle", "stress"},
-    "legend_position": {"right", "bottom", "none"},
-    "line_type": {"solid", "dashed", "dotted", "dotdash", "longdash"},
-    "point_shape": {"circle", "square", "triangle", "diamond", "none"},
-    "error_type": {"sd", "se", "ci95"},
-    "facet_scales": {"fixed", "free", "free_x", "free_y"},
-    # Superset of the base families plus the extra families the presets agent
-    # adds; unknown values are dropped by the membership check.
-    "font_family": {"sans", "serif", "mono", "helvetica", "arial", "times", "noto_sans", "noto_serif"},
-    # Number formatting for on-plot data labels and axis ticks.
-    "data_label_format": {"number", "percent", "comma"},
-    "x_tick_format": {"number", "comma", "percent", "scientific"},
-    "y_tick_format": {"number", "comma", "percent", "scientific"},
-    # Curve-fit model for regression/dose-response templates (default "linear"
-    # applied by the template; invalid values are dropped so the render falls
-    # back to that default).
-    "fit_model": {"linear", "4pl", "mm", "exponential", "logistic"},
-    # Stacked-area stacking mode.
-    "stack_mode": {"stack", "fill"},
-    # Axis-scale interpretation for the x axis (unknown values dropped so the
-    # template falls back to auto-detection).
-    "x_axis_type": {"auto", "number", "date", "datetime"},
-    # Allow-listed strftime formats for date/datetime axes. Arbitrary format
-    # strings are rejected so nothing outside this set reaches the R generator.
-    "date_format": {
-        "%Y-%m-%d", "%Y/%m/%d", "%Y-%m", "%b %Y", "%Y",
-        "%m/%d", "%d %b", "%b %d", "%H:%M", "%m-%d", "%b",
-    },
-}
-_BOOL_OPTIONS = {
-    "show_points", "show_box", "error_bars", "scale_rows", "add_smooth", "show_density", "show_rug",
-    "show_values", "hide_legend", "log_x", "log_y", "flip_coords", "connect_points", "show_contour_lines",
-    "cluster_rows", "cluster_cols", "show_row_names", "show_labels", "color_bars", "paired_rows_only",
-    "transparent_background",
-    "show_n", "show_significance", "show_fit_stats",
-    # Per-type toggles for the new plot types (sina/qq/forest/dot_plot/lollipop/embedding).
-    "show_violin", "show_line", "sort_by_estimate", "sort_desc", "show_cluster_labels",
-    # Data-label toggle and axis reversal.
-    "show_data_labels", "reverse_x", "reverse_y",
-    # Gates the self-contained interactive plotly HTML export.
-    "interactive_html",
-}
-_NUMBER_OPTIONS = {
-    "fc_threshold", "p_threshold", "label_top", "font_scale", "base_size", "dpi", "width_in", "height_in",
-    "bins", "sig_threshold", "bar_alpha", "bar_width", "x_text_angle", "x_min", "x_max", "y_min", "y_max",
-    "fill_alpha", "point_alpha", "color_midpoint", "hline_at", "vline_at",
-    # Forest reference line + ridgeline overlap factor (new plot types).
-    "ref_line", "overlap",
-    # Axis tick-count hints and legend layout sizing (clamped in _sanitize_option).
-    "x_breaks", "y_breaks", "legend_key_size", "legend_ncol",
-}
+# _UNIVERSAL_OPTION_KEYS / _OPTION_CHOICES / _BOOL_OPTIONS / _NUMBER_OPTIONS now
+# live in app.figures.option_metadata (see that module's docstring for why:
+# app.ai.options_schema needs the same authoritative sets without creating a
+# circular import through app.ai.client).
 _COLOR_WORDS = {
     "blue": "#2563EB",
     "파란": "#2563EB",
@@ -1188,7 +1097,10 @@ def _auto_quality_correct_initial_figure(db: Session, owner_id: uuid.UUID, ds: D
             "mapping_keys": [r["key"] for r in pdef["required"]] + [o["key"] for o in pdef.get("optional", [])],
             "dataset_columns": _dataset_columns_for_ai(ds),
         }
-        suggestions = ai_client.improve_figure(
+        # Best-effort automatic pass: `unsupported` reasons aren't user-facing
+        # here (there is no interactive editor UI at figure-creation time), so
+        # they are dropped intentionally rather than surfaced.
+        suggestions, _unsupported = ai_client.improve_figure(
             db,
             plot_type,
             mapping or {},
@@ -1981,7 +1893,7 @@ def improve_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, ow
         png_path = storage.materialize(v.png_path, suffix=".png")
         with open(png_path, "rb") as f:
             image_payload = (f.read(), "image/png")
-    suggestions = ai_client.improve_figure(
+    suggestions, unsupported = ai_client.improve_figure(
         db, fig.plot_type, v.mapping or {}, v.options or {}, fig.style_preset,
         last_review.payload if last_review else None, [available],
         project_context=_project_context(db, fig.project_id), user_id=owner_id,
@@ -2042,14 +1954,43 @@ def improve_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, ow
         db.add(imp)
         rows.append(imp)
         skipped_lists.append([])
+    if not rows and unsupported:
+        # (U10b) The request produced no applicable patch at all, but the model
+        # reported specific unsupported parts - do not drop them silently.
+        # Carry them on a zero-patch informational row instead of an empty []
+        # response. The reasons are folded into `recommended` so they survive
+        # later fetches (`.unsupported` is a transient attribute, not a DB
+        # column); applying this row is rejected server-side (NOTHING_TO_APPLY
+        # in apply_improvement/apply_improvements) and the frontend hides its
+        # apply controls for zero-patch rows.
+        reason_text = "; ".join(
+            f"“{(u.get('request') or '').strip()}” — {(u.get('reason') or '').strip()}"
+            for u in unsupported[:5]
+        )
+        imp = Improvement(
+            figure_version_id=version_id,
+            suggestion_type="Unsupported request",
+            current_state="No part of this request maps to a supported parameter change.",
+            recommended=(f"Cannot be applied as-is: {reason_text}")[:1000],
+            param_patch={},
+            priority="low",
+        )
+        db.add(imp)
+        rows.append(imp)
+        skipped_lists.append([])
     if not rows:
         return []
     db.commit()
     for r in rows:
         db.refresh(r)
     # Attach the per-suggestion dropped-key summary AFTER refresh so it survives.
+    # `unsupported` (U10b) is a property of this whole improve_figure call, not
+    # of any one suggestion - the same normalized list is attached to every row
+    # from this call (transient attribute, not a DB column, same pattern as
+    # `.skipped` above) so the client can read it off any/all of them.
     for r, sk in zip(rows, skipped_lists):
         r.skipped = sk
+        r.unsupported = unsupported
     return rows
 
 
@@ -2060,7 +2001,211 @@ def list_improvements(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, 
             .order_by(Improvement.created_at.desc()).all())
 
 
-def apply_improvement(db: Session, figure_id: uuid.UUID, improvement_id: uuid.UUID, owner_id: uuid.UUID) -> dict:
+def _merge_touched_patch(dst: dict[str, Any], patch: dict[str, Any]) -> None:
+    """Union-merge `patch`'s touched style_preset/mapping/options keys into
+    `dst` (last-write-wins on overlap) - the same shape used to build the
+    rendered mapping/options, kept separately so apply diagnostics (U10b) can
+    report {key, from, to} without needing every raw per-suggestion patch."""
+    if patch.get("style_preset"):
+        dst["style_preset"] = patch["style_preset"]
+    if patch.get("mapping"):
+        dst.setdefault("mapping", {}).update(patch["mapping"])
+    if patch.get("options"):
+        dst.setdefault("options", {}).update(patch["options"])
+
+
+def _apply_diagnostics(touched_patch: dict[str, Any], base_mapping: dict[str, Any], base_options: dict[str, Any],
+                       base_style_preset: str | None, new_version: FigureVersion) -> tuple[list[dict[str, Any]], list[str]]:
+    """(U10b) Per-key diff between the pre-apply state (base_*) and the
+    actually-rendered new_version, restricted to the keys `touched_patch`
+    tried to change. A key is a dropped_keys entry when rerender's re-sanitize
+    pass removed it entirely, or when the rendered value provably equals the
+    pre-apply value (a no-op); otherwise it is an applied_changes entry
+    {"key", "from", "to"}. `touched_patch` may be a single suggestion's
+    already-sanitized param_patch, or a union of several (see
+    _merge_touched_patch) - only which keys it touches matters here, not its
+    values."""
+    applied: list[dict[str, Any]] = []
+    dropped: list[str] = []
+    if touched_patch.get("style_preset"):
+        before, after = base_style_preset, new_version.style_preset
+        if _values_match(before, after):
+            dropped.append("style_preset")
+        else:
+            applied.append({"key": "style_preset", "from": before, "to": after})
+    new_mapping = new_version.mapping or {}
+    for key in (touched_patch.get("mapping") or {}):
+        before, after = base_mapping.get(key), new_mapping.get(key)
+        if after is None or _values_match(before, after):
+            dropped.append(f"mapping.{key}")
+        else:
+            applied.append({"key": f"mapping.{key}", "from": before, "to": after})
+    new_options = new_version.options or {}
+    for key in (touched_patch.get("options") or {}):
+        before, after = base_options.get(key), new_options.get(key)
+        if after is None or _values_match(before, after):
+            dropped.append(f"options.{key}")
+        else:
+            applied.append({"key": f"options.{key}", "from": before, "to": after})
+    return applied, dropped
+
+
+def _best_sanitized_patch(suggestions: list[dict], pdef: dict, base_mapping: dict[str, Any],
+                          valid_columns: set[str] | None) -> dict[str, Any] | None:
+    """Pick the highest-priority suggestion (high > medium > low > unranked)
+    whose param_patch survives sanitization, for the U10c retry step ("apply
+    the best suggestion's patch on top")."""
+    by_priority: dict[str, list[dict]] = {"high": [], "medium": [], "low": [], None: []}
+    for s in suggestions or []:
+        by_priority.setdefault(s.get("priority"), by_priority[None]).append(s)
+    for priority in ("high", "medium", "low", None):
+        for s in by_priority.get(priority, []):
+            clean = _sanitize_param_patch(s.get("param_patch", {}), pdef, base_mapping, valid_columns)
+            if clean:
+                return clean
+    return None
+
+
+def _run_verification(db: Session, fig: Figure, owner_id: uuid.UUID, original_base: FigureVersion,
+                      applied_version: FigureVersion, touched_patch: dict[str, Any],
+                      original_request: str, allow_retry: bool = True) -> dict[str, Any]:
+    """(U10c) Self-verify loop, opt-in per apply call. Sends the pre-edit and
+    post-edit renders plus the original request and applied changes to the AI;
+    on an unsatisfied verdict, retries ONCE (a fresh improve_figure call with
+    the feedback appended, applying only its best suggestion on top, producing
+    a second new version), then verifies again to report the final verdict.
+    `allow_retry=False` (the suggestion-apply paths) reports the verdict only,
+    never creating a version the user did not select. At most 2 verify_edit
+    calls + 1 retry improve_figure call (<=3 AI calls total) - every AI call
+    goes through ai_client._run_logged, which already calls enforce_ai_quota
+    before each one. Best-effort: an error before any verdict exists degrades
+    to verification={skipped: <reason>}; an error after verify #1 salvages
+    that verdict instead of discarding it. The apply itself never fails here."""
+    final_version = applied_version
+    final_patch = dict(touched_patch)
+    verdict: dict[str, Any] | None = None
+    attempts = 0
+
+    def _result(verification: dict[str, Any] | None) -> dict[str, Any]:
+        applied_changes, dropped_keys = _apply_diagnostics(
+            final_patch, original_base.mapping or {}, original_base.options or {}, original_base.style_preset, final_version
+        )
+        return {"version": final_version, "applied_changes": applied_changes,
+                "dropped_keys": dropped_keys, "verification": verification}
+
+    def _skipped(reason: str) -> dict[str, Any]:
+        return {"attempts": attempts, "satisfied": False, "feedback": "", "skipped": reason[:100]}
+
+    try:
+        if (not original_base.png_path or not applied_version.png_path
+                or not storage.exists(original_base.png_path) or not storage.exists(applied_version.png_path)):
+            return _result(_skipped("NO_IMAGE"))
+        before_path = storage.materialize(original_base.png_path, suffix=".png")
+        after_path = storage.materialize(applied_version.png_path, suffix=".png")
+        applied_changes, _dropped = _apply_diagnostics(
+            touched_patch, original_base.mapping or {}, original_base.options or {}, original_base.style_preset, applied_version
+        )
+        verdict = ai_client.verify_edit(db, before_path, after_path, original_request, applied_changes, user_id=owner_id)
+        attempts = 1
+        if allow_retry and not verdict.get("satisfied"):
+            retry_request = (
+                original_request.strip()
+                + "\n\n[Automatic verification retry] A previous attempt at this exact request did not fully "
+                  "satisfy it. Reviewer feedback on the previous attempt: " + (verdict.get("feedback") or "")
+            )
+            ds = ds_service.get_dataset(db, fig.dataset_id, owner_id)
+            cols = _dataset_column_names(ds)
+            pdef = _plot_def(fig.plot_type)
+            available = {
+                "options": pdef.get("options", []),
+                "mapping_keys": [r["key"] for r in pdef["required"]] + [o["key"] for o in pdef.get("optional", [])],
+                "dataset_columns": _dataset_columns_for_ai(ds),
+            }
+            with open(after_path, "rb") as f:
+                retry_image = (f.read(), "image/png")
+            suggestions, _unsupported = ai_client.improve_figure(
+                db, fig.plot_type, applied_version.mapping or {}, applied_version.options or {},
+                applied_version.style_preset, None, [available],
+                project_context=_project_context(db, fig.project_id), user_id=owner_id,
+                user_request=retry_request, rendered_image=retry_image, r_code=applied_version.r_code,
+            )
+            best_patch = _best_sanitized_patch(suggestions, pdef, applied_version.mapping or {}, cols)
+            if best_patch:
+                retry_mapping = {**(applied_version.mapping or {}), **(best_patch.get("mapping") or {})}
+                retry_options = {**(applied_version.options or {}), **(best_patch.get("options") or {})}
+                retry_preset = best_patch.get("style_preset") or applied_version.style_preset
+
+                class _RetryReq:
+                    mapping = retry_mapping
+                    options = retry_options
+                    style_preset = retry_preset
+                    change_note = f"AI edit retry after verification feedback (from v{applied_version.version_number})"
+
+                retry_result = rerender(db, fig.id, owner_id, _RetryReq())
+                final_version = db.query(FigureVersion).filter(FigureVersion.id == retry_result["id"]).first() or applied_version
+                _merge_touched_patch(final_patch, best_patch)
+                if final_version.png_path and storage.exists(final_version.png_path):
+                    after_path_2 = storage.materialize(final_version.png_path, suffix=".png")
+                    final_changes, _dropped2 = _apply_diagnostics(
+                        final_patch, original_base.mapping or {}, original_base.options or {},
+                        original_base.style_preset, final_version,
+                    )
+                    verdict = ai_client.verify_edit(db, before_path, after_path_2, original_request, final_changes, user_id=owner_id)
+                    attempts = 2
+        return _result({
+            "attempts": attempts,
+            "satisfied": bool(verdict.get("satisfied")),
+            "feedback": verdict.get("feedback", ""),
+        })
+    except Exception as exc:
+        note = f"AI edit verification interrupted: {type(exc).__name__}: {str(exc)[:300]}"
+        final_version.render_log = ((final_version.render_log or "").rstrip() + "\n" + note).strip()
+        db.commit()
+        if verdict is not None:
+            # Verify #1 completed but the retry leg failed - report the verdict
+            # we already paid for instead of discarding it (its feedback
+            # describes the pre-retry render, which is still the version
+            # returned unless the retry rerender itself completed).
+            return _result({
+                "attempts": attempts,
+                "satisfied": bool(verdict.get("satisfied")),
+                "feedback": str(verdict.get("feedback") or ""),
+            })
+        code = getattr(exc, "error_code", None) or type(exc).__name__
+        return _result(_skipped(str(code)))
+
+
+def _finalize_apply_response(db: Session, fig: Figure, owner_id: uuid.UUID, base: FigureVersion,
+                             new_version: FigureVersion | None, touched_patch: dict[str, Any],
+                             version_result: dict, verify: bool, original_request: str | None,
+                             allow_retry: bool = True) -> dict:
+    """Shared tail of apply_improvement/apply_improvements (U10b/U10c): compute
+    the sanitize-based applied_changes/dropped_keys diagnostic, and - only when
+    the caller opted in with both verify=true and a non-empty original_request
+    - run the self-verify (+ single retry) loop, swapping in its final version
+    when a retry produced a second one."""
+    if verify and original_request and original_request.strip() and new_version is not None:
+        outcome = _run_verification(db, fig, owner_id, base, new_version, touched_patch,
+                                    original_request.strip(), allow_retry=allow_retry)
+        final_version = outcome["version"]
+        result = version_result if final_version.id == new_version.id else version_response(final_version)
+        return {
+            "version": result,
+            "applied_changes": outcome["applied_changes"],
+            "dropped_keys": outcome["dropped_keys"],
+            "verification": outcome["verification"],
+        }
+    applied_changes: list[dict[str, Any]] = []
+    dropped_keys: list[str] = []
+    if new_version is not None:
+        applied_changes, dropped_keys = _apply_diagnostics(
+            touched_patch, base.mapping or {}, base.options or {}, base.style_preset, new_version
+        )
+    return {"version": version_result, "applied_changes": applied_changes, "dropped_keys": dropped_keys, "verification": None}
+
+
+def apply_improvement(db: Session, figure_id: uuid.UUID, improvement_id: uuid.UUID, owner_id: uuid.UUID,
+                      verify: bool = False, original_request: str | None = None, allow_retry: bool = True) -> dict:
     fig = get_figure(db, figure_id, owner_id, write=True)
     version_ids = {v.id for v in fig.versions}
     imp = db.query(Improvement).filter(Improvement.id == improvement_id).first()
@@ -2069,6 +2214,12 @@ def apply_improvement(db: Session, figure_id: uuid.UUID, improvement_id: uuid.UU
 
     base = get_version(fig, imp.figure_version_id)
     patch = imp.param_patch or {}
+    if not (patch.get("mapping") or patch.get("options") or patch.get("style_preset")):
+        # Zero-patch rows (e.g. the U10b "Unsupported request" carrier) are
+        # informational only - applying them would burn render quota on a
+        # byte-identical version and, with verify on, could trigger an
+        # unapproved retry edit.
+        raise BadRequestError("This suggestion has no applicable parameter change.", error_code="NOTHING_TO_APPLY")
     new_mapping = {**(base.mapping or {}), **(patch.get("mapping") or {})}
     new_options = {**(base.options or {}), **(patch.get("options") or {})}
     new_preset = patch.get("style_preset") or base.style_preset or fig.style_preset
@@ -2091,10 +2242,12 @@ def apply_improvement(db: Session, figure_id: uuid.UUID, improvement_id: uuid.UU
     db.commit()
     result["applied"] = applied_paths
     result["skipped"] = skipped_paths
-    return result
+    return _finalize_apply_response(db, fig, owner_id, base, new_version, patch, result, verify, original_request,
+                                    allow_retry=allow_retry)
 
 
-def apply_improvements(db: Session, figure_id: uuid.UUID, improvement_ids: list[uuid.UUID], owner_id: uuid.UUID) -> dict:
+def apply_improvements(db: Session, figure_id: uuid.UUID, improvement_ids: list[uuid.UUID], owner_id: uuid.UUID,
+                       verify: bool = False, original_request: str | None = None, allow_retry: bool = True) -> dict:
     if not improvement_ids:
         raise BadRequestError("Select at least one AI suggestion to apply.", error_code="NO_IMPROVEMENTS_SELECTED")
     if len(improvement_ids) > 20:
@@ -2117,13 +2270,20 @@ def apply_improvements(db: Session, figure_id: uuid.UUID, improvement_ids: list[
     new_options = dict(base.options or {})
     new_preset = base.style_preset or fig.style_preset
     labels = []
+    combined_patch: dict[str, Any] = {}
     for imp in ordered:
         patch = imp.param_patch or {}
         new_mapping.update(patch.get("mapping") or {})
         new_options.update(patch.get("options") or {})
         new_preset = patch.get("style_preset") or new_preset
+        _merge_touched_patch(combined_patch, patch)
         if imp.suggestion_type:
             labels.append(str(imp.suggestion_type))
+
+    if not (combined_patch.get("mapping") or combined_patch.get("options") or combined_patch.get("style_preset")):
+        # Same guard as apply_improvement: a selection made up entirely of
+        # zero-patch informational rows must not render a no-op version.
+        raise BadRequestError("The selected suggestions have no applicable parameter changes.", error_code="NOTHING_TO_APPLY")
 
     class _Req:
         mapping = new_mapping
@@ -2148,7 +2308,8 @@ def apply_improvements(db: Session, figure_id: uuid.UUID, improvement_ids: list[
     db.commit()
     result["applied"] = applied_paths
     result["skipped"] = skipped_paths
-    return result
+    return _finalize_apply_response(db, fig, owner_id, base, new_version, combined_patch, result, verify, original_request,
+                                    allow_retry=allow_retry)
 
 
 def _known_mapping_values(mapping: dict[str, Any]) -> set[str]:

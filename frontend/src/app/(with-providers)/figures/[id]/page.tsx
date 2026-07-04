@@ -14,7 +14,8 @@ import {
   getColumnValues, getMethodsText, getAltText, ApiError,
 } from '@/lib/api';
 import type { ImproveVersionRequest } from '@/lib/api';
-import type { FigureVersion, Review, Improvement, PlotTypeDef, ColumnProfile, PaletteDef, FigureAnnotation, SeriesStyle } from '@/lib/types';
+import type { FigureVersion, Review, Improvement, PlotTypeDef, ColumnProfile, PaletteDef, FigureAnnotation, SeriesStyle, UnsupportedRequestItem } from '@/lib/types';
+import type { AiEditOutcome, AiEditPayload } from '@/components/figures/AiFigureEditor';
 import { formatStylePreset } from '@/lib/style-presets';
 import { AiFigureEditor } from '@/components/figures/AiFigureEditor';
 import { FigureCodeExport } from '@/components/figures/FigureCodeExport';
@@ -226,6 +227,8 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
   const [selectedVid, setSelectedVid] = useState<string | null>(null);
   const [review, setReview] = useState<Review | null>(null);
   const [improvements, setImprovements] = useState<Improvement[] | null>(null);
+  // Chips shown in AiFigureEditor for the most recent apply action (U10b/U10c).
+  const [aiEditOutcome, setAiEditOutcome] = useState<AiEditOutcome | null>(null);
 
   // edit panel
   const [plotType, setPlotType] = useState<string | null>(null);
@@ -328,7 +331,7 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
       change_note: 'Edited in figure editor',
       base_version_id: version?.id && version.id === fig?.current_version_id ? version.id : undefined,
     }),
-    onSuccess: (v) => { toast.success(`Re-rendered (v${v.version_number})`); setSelectedVid(v.id); setReview(null); setImprovements(null); resetEditDrafts(); qc.invalidateQueries({ queryKey: ['figure', id] }); qc.invalidateQueries({ queryKey: ['figures'] }); },
+    onSuccess: (v) => { toast.success(`Re-rendered (v${v.version_number})`); setSelectedVid(v.id); setReview(null); setImprovements(null); setAiEditOutcome(null); resetEditDrafts(); qc.invalidateQueries({ queryKey: ['figure', id] }); qc.invalidateQueries({ queryKey: ['figures'] }); },
     onError: (e) => {
       if (e instanceof ApiError && e.status === 409) {
         toast.error('This figure changed elsewhere — review the latest version, then apply again.');
@@ -337,7 +340,7 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
         // this the guard was one-shot — the stale pin made the next Apply
         // omit base_version_id and silently supersede the other tab's work.
         setSelectedVid(null);
-        setReview(null); setImprovements(null);
+        setReview(null); setImprovements(null); setAiEditOutcome(null);
         qc.invalidateQueries({ queryKey: ['figure', id] });
         return;
       }
@@ -350,7 +353,7 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
   const livePreviewMut = useMutation({
     mutationFn: () => rerenderFigure(id, { plot_type: effectivePlotType, mapping: effectiveMapping, options: effectiveOptions, style_preset: effectiveStyle, change_note: 'Live preview' }),
     onSuccess: (v) => {
-      setSelectedVid(v.id); setReview(null); setImprovements(null);
+      setSelectedVid(v.id); setReview(null); setImprovements(null); setAiEditOutcome(null);
       qc.invalidateQueries({ queryKey: ['figure', id] });
       qc.invalidateQueries({ queryKey: ['figures'] });
       if (renderStartSigRef.current === editSignatureRef.current) resetEditDrafts();
@@ -377,7 +380,17 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
       effectiveSelectedVid!,
       request ?? { prompt: improvePrompt },
     ),
-    onSuccess: (l) => { setImprovements(l); toast.success(`${l.length} suggestions`); },
+    onSuccess: (l) => {
+      setImprovements(l);
+      // (U10b) Surface the unsupported reasons on Suggest too - they arrive on
+      // every row of this improve call; without this the carrier row's "cannot
+      // be applied" card would point at reasons rendered nowhere.
+      const unsupported = dedupeUnsupported(l[0]?.unsupported ?? []);
+      setAiEditOutcome(unsupported.length
+        ? { appliedChanges: [], droppedKeys: [], unsupported, verification: null }
+        : null);
+      toast.success(`${l.length} suggestions`);
+    },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Improve failed'),
   });
   function toastAppliedSkipped(v: FigureVersion, successMsg: string) {
@@ -389,38 +402,83 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
       toast.success(successMsg);
     }
   }
+  // Same {request, reason} pair can repeat across every Improvement in one
+  // /improve batch (server-side, U10b) - collapse to unique entries for chips.
+  function dedupeUnsupported(items: UnsupportedRequestItem[]): UnsupportedRequestItem[] {
+    const seen = new Set<string>();
+    const out: UnsupportedRequestItem[] = [];
+    for (const item of items) {
+      const key = `${item.request}::${item.reason}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(item);
+    }
+    return out;
+  }
   const applyImp = useMutation({
-    mutationFn: (impId: string) => applyImprovement(id, impId),
-    onSuccess: (v) => { toastAppliedSkipped(v, `Applied as v${v.version_number}; R script regenerated`); setSelectedVid(v.id); setReview(null); setImprovements(null); resetEditDrafts(); qc.invalidateQueries({ queryKey: ['figure', id] }); },
+    // retry:false - the user picked this exact suggestion; verification may
+    // report an unsatisfied verdict but must never auto-apply another edit.
+    mutationFn: ({ improvementId, verify, originalRequest }: { improvementId: string; verify: boolean; originalRequest: string }) =>
+      applyImprovement(id, improvementId, { verify, original_request: originalRequest, retry: false }),
+    onSuccess: (result, { improvementId }) => {
+      toastAppliedSkipped(result.version, `Applied as v${result.version.version_number}; R script regenerated`);
+      const unsupported = dedupeUnsupported(improvements?.find((item) => item.id === improvementId)?.unsupported ?? []);
+      setAiEditOutcome({ appliedChanges: result.applied_changes, droppedKeys: result.dropped_keys, unsupported, verification: result.verification ?? null });
+      setSelectedVid(result.version.id); setReview(null); setImprovements(null); resetEditDrafts(); qc.invalidateQueries({ queryKey: ['figure', id] });
+    },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Apply failed'),
   });
   const applyImps = useMutation({
-    mutationFn: (impIds: string[]) => applyImprovements(id, impIds),
-    onSuccess: (v) => { toastAppliedSkipped(v, `Applied checked suggestions as v${v.version_number}; R script regenerated`); setSelectedVid(v.id); setReview(null); setImprovements(null); resetEditDrafts(); qc.invalidateQueries({ queryKey: ['figure', id] }); qc.invalidateQueries({ queryKey: ['figures'] }); },
+    // retry:false for the same reason as applyImp above.
+    mutationFn: ({ improvementIds, verify, originalRequest }: { improvementIds: string[]; verify: boolean; originalRequest: string }) =>
+      applyImprovements(id, improvementIds, { verify, original_request: originalRequest, retry: false }),
+    onSuccess: (result, { improvementIds }) => {
+      toastAppliedSkipped(result.version, `Applied checked suggestions as v${result.version.version_number}; R script regenerated`);
+      const unsupported = dedupeUnsupported(
+        (improvements ?? []).filter((item) => improvementIds.includes(item.id)).flatMap((item) => item.unsupported ?? []),
+      );
+      setAiEditOutcome({ appliedChanges: result.applied_changes, droppedKeys: result.dropped_keys, unsupported, verification: result.verification ?? null });
+      setSelectedVid(result.version.id); setReview(null); setImprovements(null); resetEditDrafts(); qc.invalidateQueries({ queryKey: ['figure', id] }); qc.invalidateQueries({ queryKey: ['figures'] });
+    },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Apply failed'),
   });
   const directAiEdit = useMutation({
-    mutationFn: async (request?: ImproveVersionRequest) => {
+    mutationFn: async (request?: AiEditPayload) => {
       const prompt = (request?.prompt ?? improvePrompt).trim();
       if (!prompt) throw new Error('Describe the edit you want first');
       if (!effectiveSelectedVid) throw new Error('No figure version selected');
+      const verify = request?.verify ?? true;
       const suggestions = await improveVersion(id, effectiveSelectedVid, {
         prompt,
         annotated_image: request?.annotated_image,
       });
       const applicable = suggestions.filter((item) => item.param_patch && Object.keys(item.param_patch).length > 0);
-      if (!applicable.length) throw new Error('AI did not return an applicable visual edit');
+      if (!applicable.length) {
+        // (U10b) Nothing was applicable, but the AI may still have reported
+        // WHY in `unsupported` - surface that instead of only an error toast.
+        return { suggestions, appliedIds: [] as string[], result: null };
+      }
       const appliedIds = applicable.map((item) => item.id);
-      const version = appliedIds.length === 1
-        ? await applyImprovement(id, appliedIds[0])
-        : await applyImprovements(id, appliedIds);
-      return { suggestions, appliedIds, version };
+      const result = appliedIds.length === 1
+        ? await applyImprovement(id, appliedIds[0], { verify, original_request: prompt })
+        : await applyImprovements(id, appliedIds, { verify, original_request: prompt });
+      return { suggestions, appliedIds, result };
     },
-    onSuccess: ({ suggestions, appliedIds, version }) => {
-      toastAppliedSkipped(version, `AI edit applied as v${version.version_number}; R script regenerated`);
+    onSuccess: ({ suggestions, appliedIds, result }) => {
+      const unsupported = dedupeUnsupported(suggestions[0]?.unsupported ?? []);
+      if (!result) {
+        setImprovements(suggestions);
+        setAiEditOutcome({ appliedChanges: [], droppedKeys: [], unsupported, verification: null });
+        toast[unsupported.length ? 'warning' : 'error'](
+          unsupported.length ? 'AI did not return an applicable visual edit; see the reasons below.' : 'AI did not return an applicable visual edit',
+        );
+        return;
+      }
+      toastAppliedSkipped(result.version, `AI edit applied as v${result.version.version_number}; R script regenerated`);
       const applied = new Set(appliedIds);
       setImprovements(suggestions.map((item) => applied.has(item.id) ? { ...item, applied: true } : item));
-      setSelectedVid(version.id);
+      setAiEditOutcome({ appliedChanges: result.applied_changes, droppedKeys: result.dropped_keys, unsupported, verification: result.verification ?? null });
+      setSelectedVid(result.version.id);
       setReview(null);
       resetEditDrafts();
       qc.invalidateQueries({ queryKey: ['figure', id] });
@@ -465,6 +523,7 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
         setSelectedVid(updated.current_version_id ?? updated.versions[updated.versions.length - 1]?.id ?? null);
         setReview(null);
         setImprovements(null);
+        setAiEditOutcome(null);
       }
     },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Version delete failed'),
@@ -933,11 +992,12 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
               isSuggesting={runImprove.isPending}
               isApplyingPrompt={directAiEdit.isPending}
               isApplyingSuggestion={applyImp.isPending || applyImps.isPending}
+              lastOutcome={aiEditOutcome}
               onPromptChange={setImprovePrompt}
               onSuggest={(request) => runImprove.mutate(request)}
               onApplyPrompt={(request) => directAiEdit.mutate(request)}
-              onApplySuggestion={(improvementId) => applyImp.mutate(improvementId)}
-              onApplySuggestions={(improvementIds) => applyImps.mutate(improvementIds)}
+              onApplySuggestion={(improvementId, verify, originalRequest) => applyImp.mutate({ improvementId, verify, originalRequest })}
+              onApplySuggestions={(improvementIds, verify, originalRequest) => applyImps.mutate({ improvementIds, verify, originalRequest })}
             />
 
             <Card>
@@ -1520,7 +1580,7 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
                 {fig.versions.slice().reverse().map((v) => (
                   <div key={v.id}
                     className={`flex w-full items-center gap-1 rounded px-2 py-1.5 text-xs ${v.id === effectiveSelectedVid ? 'bg-muted font-medium' : 'hover:bg-muted/50'}`}>
-                    <button type="button" onClick={() => { setSelectedVid(v.id); setReview(null); setImprovements(null); }}
+                    <button type="button" onClick={() => { setSelectedVid(v.id); setReview(null); setImprovements(null); setAiEditOutcome(null); }}
                       className="min-w-0 flex-1 truncate text-left">
                       v{v.version_number} · {formatStylePreset(v.style_preset)} · {v.change_note || ''}
                     </button>
