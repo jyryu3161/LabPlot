@@ -62,6 +62,11 @@ export type HistoryOp =
   /** Move / resize / z-order / label / label_visible / pin change.
    *  Undo → updateCanvasPanel(mapId(panelId), before); redo → …(after). */
   | { type: 'panel-update'; panelId: string; before: PanelFields; after: PanelFields; label: string }
+  /** Multi-panel batch (U7 group move / align / distribute / group resize / nudge).
+   *  One entry covers every panel touched by a single gesture. Undo applies each
+   *  item's `before`, redo applies each item's `after` — both mapId()-remapped,
+   *  same as `panel-update`. */
+  | { type: 'panels-update'; items: { panelId: string; before: PanelFields; after: PanelFields }[]; label: string }
   /** Panel added. Undo → deleteCanvasPanel (no confirm); redo → addCanvasPanel(snapshot) + remap. */
   | { type: 'panel-add'; snapshot: PanelSnapshot; label: string }
   /** Panel deleted. Undo → addCanvasPanel(snapshot) + remap; redo → deleteCanvasPanel(mapped id). */

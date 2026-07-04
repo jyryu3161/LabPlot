@@ -54,11 +54,13 @@ export function CanvasHelpPopover() {
           <p className="mb-2 text-xs font-semibold">Gestures & shortcuts</p>
           <ul className="list-disc space-y-1 pl-4 text-xs text-muted-foreground">
             <li>Drag a panel to move it — hold Alt to disable snapping</li>
-            <li>Drag its corners to resize</li>
+            <li>Drag its corners or edges to resize — snaps to nearby panels too</li>
             <li>Scroll to pan · pinch or Ctrl/Cmd+scroll to zoom</li>
-            <li>Drag empty space to pan</li>
+            <li>Drag empty space to select · Space+drag or scroll to pan</li>
+            <li>Shift+click a panel to add or remove it from the selection</li>
             <li>Click a panel to edit colors · click its title/axis labels to edit text</li>
-            <li>Delete removes the selected panel</li>
+            <li>Arrow keys nudge 1mm (Shift = 5mm)</li>
+            <li>Delete removes the selected panel(s)</li>
             <li>Ctrl/Cmd+Z undo · Ctrl/Cmd+Shift+Z redo</li>
           </ul>
         </div>
@@ -96,7 +98,7 @@ export function CanvasHintsBar({ show }: { show: boolean }) {
 
   return (
     <div className="flex items-center gap-2 border-b bg-muted/40 px-4 py-1 text-xs text-muted-foreground">
-      <span>Drag to move · corners to resize · scroll to pan · Ctrl/Cmd+scroll to zoom · click a panel to edit</span>
+      <span>Drag to move · corners/edges to resize · Space+drag or scroll to pan · Ctrl/Cmd+scroll to zoom · click a panel to edit · arrow keys nudge 1mm (Shift=5mm)</span>
       <button
         type="button"
         className="ml-auto rounded p-0.5 hover:bg-muted hover:text-foreground"
