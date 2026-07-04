@@ -63,6 +63,9 @@ export function CanvasHelpPopover() {
             <li>Delete removes the selected panel(s)</li>
             <li>Ctrl/Cmd+Z undo · Ctrl/Cmd+Shift+Z redo</li>
             <li>Left toolbar: add text/arrow/line/rectangle/ellipse annotations (V/T/A/L/R/O) — drag to draw, click to place text, Esc back to Select</li>
+            <li>1 = zoom 100% · Shift+1 = fit to view · Shift+2 = zoom to selection</li>
+            <li>mm rulers along the top/left edges track the current zoom and pan</li>
+            <li>Toggle the grid and grid-snap from the toolbar (5mm lines, 10mm accent)</li>
           </ul>
         </div>
       )}
@@ -99,7 +102,7 @@ export function CanvasHintsBar({ show }: { show: boolean }) {
 
   return (
     <div className="flex items-center gap-2 border-b bg-muted/40 px-4 py-1 text-xs text-muted-foreground">
-      <span>Drag to move · corners/edges to resize · Space+drag or scroll to pan · Ctrl/Cmd+scroll to zoom · click a panel to edit · arrow keys nudge 1mm (Shift=5mm) · left toolbar adds text/shape annotations (V/T/A/L/R/O)</span>
+      <span>Drag to move · corners/edges to resize · Space+drag or scroll to pan · Ctrl/Cmd+scroll to zoom (1=100%, Shift+1=fit, Shift+2=zoom to selection) · click a panel to edit · arrow keys nudge 1mm (Shift=5mm) · left toolbar adds text/shape annotations (V/T/A/L/R/O) · grid/grid-snap toggles in the toolbar</span>
       <button
         type="button"
         className="ml-auto rounded p-0.5 hover:bg-muted hover:text-foreground"

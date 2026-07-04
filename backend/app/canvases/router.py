@@ -112,6 +112,33 @@ def delete_canvas(canvas_id: uuid.UUID, request: Request, db: Session = Depends(
     db.commit()
 
 
+# -------- duplicate (U9 §3) --------
+# Only READ access to the source is required (service.duplicate_canvas uses
+# get_canvas without write=True) — any project member who can view a shared
+# canvas can take a personal copy of it. The copy is always owned by the
+# caller; project_id only carries over when the caller has write access to
+# that project (else the copy is personal).
+@router.post("/{canvas_id}/duplicate", response_model=CanvasDetail, status_code=201,
+             dependencies=[Depends(rate_limit("canvas_duplicate", 60, 3600))])
+def duplicate_canvas(canvas_id: uuid.UUID, request: Request, db: Session = Depends(get_db),
+                     current_user: User = Depends(get_current_user)):
+    detail = service.duplicate_canvas(db, canvas_id, current_user.id)
+    audit_service.log_event(
+        db,
+        actor_id=current_user.id,
+        action="canvas.duplicate",
+        target_type="canvas",
+        target_id=detail["id"],
+        metadata={
+            "source_canvas_id": str(canvas_id),
+            "project_id": str(detail["project_id"]) if detail["project_id"] else None,
+        },
+        request=request,
+    )
+    db.commit()
+    return detail
+
+
 # -------- panels (M2 CRUD) --------
 @router.post("/{canvas_id}/panels", response_model=CanvasPanel, status_code=201,
              dependencies=[Depends(rate_limit("canvas_panel_add", 120, 3600))])
@@ -165,21 +192,23 @@ def remove_panel(canvas_id: uuid.UUID, panel_id: uuid.UUID, request: Request,
     db.commit()
 
 
-# -------- export (M4, vector composition) --------
-# Composes every panel as VECTOR (nested SVG); PDF via rsvg-convert (librsvg).
-# NEVER bitmap-stretches. Snapshots {panel_id: version_id} for reproducibility.
+# -------- export (M4, vector composition; U9 §2 adds png/tiff raster) --------
+# Composes every panel as VECTOR (nested SVG); PDF/PNG/TIFF via rsvg-convert
+# (librsvg) — PNG/TIFF rasterize the SAME composite at `dpi` (300/600), never
+# a per-panel bitmap stretch. Snapshots {panel_id: version_id} for
+# reproducibility, for every format.
 @router.post("/{canvas_id}/export", response_model=CanvasExportResponse,
              dependencies=[Depends(rate_limit("canvas_export", 30, 3600))])
 def export_canvas(canvas_id: uuid.UUID, data: CanvasExportRequest, request: Request,
                   db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    result = service.export_canvas(db, canvas_id, current_user.id, data.format)
+    result = service.export_canvas(db, canvas_id, current_user.id, data.format, data.dpi)
     audit_service.log_event(
         db,
         actor_id=current_user.id,
         action="canvas.export",
         target_type="canvas",
         target_id=canvas_id,
-        metadata={"format": result["format"], "panels": len(result["snapshot"])},
+        metadata={"format": result["format"], "dpi": result.get("dpi"), "panels": len(result["snapshot"])},
         request=request,
     )
     db.commit()

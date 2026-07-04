@@ -593,6 +593,10 @@ export async function updateCanvas(id: string, data: {
 export async function deleteCanvas(id: string): Promise<void> {
   return fetcher(`/api/canvases/${id}`, { method: 'DELETE' });
 }
+// U9: deep copy (panels + annotations) of an existing canvas, named "<name> (copy)".
+export async function duplicateCanvas(id: string): Promise<import('./types').CanvasDetail> {
+  return fetcher(`/api/canvases/${id}/duplicate`, { method: 'POST' });
+}
 export async function getCanvasPresets(): Promise<import('./types').CanvasPreset[]> {
   return fetcher('/api/canvases/presets');
 }
@@ -618,11 +622,13 @@ export async function renderCanvasPreview(req: {
   return fetcher('/api/canvases/preview', { method: 'POST', body: JSON.stringify(req) });
 }
 
-export async function exportCanvasFile(id: string, format: 'svg' | 'pdf'): Promise<import('./types').CanvasExportResult> {
-  return fetcher(`/api/canvases/${id}/export`, { method: 'POST', body: JSON.stringify({ format }) });
+// U9: png/tiff add a `dpi` (300|600, default 300 server-side) alongside the
+// existing vector svg/pdf formats — same endpoint, same request shape.
+export async function exportCanvasFile(id: string, format: 'svg' | 'pdf' | 'png' | 'tiff', dpi?: 300 | 600): Promise<import('./types').CanvasExportResult> {
+  return fetcher(`/api/canvases/${id}/export`, { method: 'POST', body: JSON.stringify(dpi != null ? { format, dpi } : { format }) });
 }
-export async function downloadCanvasExport(id: string, format: 'svg' | 'pdf', filename: string): Promise<void> {
-  const { url } = await exportCanvasFile(id, format);
+export async function downloadCanvasExport(id: string, format: 'svg' | 'pdf' | 'png' | 'tiff', filename: string, dpi?: 300 | 600): Promise<void> {
+  const { url } = await exportCanvasFile(id, format, dpi);
   const headers: Record<string, string> = {};
   const token = getAccessToken();
   if (token) headers['Authorization'] = `Bearer ${token}`;

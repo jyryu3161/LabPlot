@@ -32,7 +32,9 @@ export function CanvasAnnotationToolbar({ active, onSelect }: { active: ToolId; 
       role="toolbar"
       aria-label="Annotation tools"
       aria-orientation="vertical"
-      className="absolute left-2 top-2 z-10 flex flex-col gap-0.5 rounded-lg border bg-background/95 p-1 shadow-md backdrop-blur-sm"
+      // U9: inset past the mm rulers (RULER_PX = 22px, CanvasRulers.tsx) so
+      // the toolbar never sits under the ruler ink/corner swatch.
+      className="absolute left-[30px] top-[30px] z-10 flex flex-col gap-0.5 rounded-lg border bg-background/95 p-1 shadow-md backdrop-blur-sm"
     >
       {TOOLS.map(({ id, label, shortcut, Icon }) => (
         <button

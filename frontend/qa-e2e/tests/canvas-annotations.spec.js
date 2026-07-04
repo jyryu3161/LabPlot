@@ -76,7 +76,8 @@ test.describe('canvas annotations (U8)', () => {
 
     await page.getByRole('button', { name: 'Text tool (T)' }).click();
     // Center of the sheet — comfortably clear of the tool palette pinned at
-    // the top-left corner (left-2 top-2 in CanvasAnnotationToolbar.tsx).
+    // the top-left corner (left-[30px] top-[30px] in CanvasAnnotationToolbar.tsx,
+    // inset past the U9 mm rulers) and of the rulers themselves.
     const clickX = origin.x + 90 * origin.pxPerMm;
     const clickY = origin.y + 60 * origin.pxPerMm;
     await page.mouse.click(clickX, clickY);

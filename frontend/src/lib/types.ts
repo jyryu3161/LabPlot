@@ -678,7 +678,7 @@ export interface CanvasPreviewResult {
 
 export interface CanvasExportResult {
   url: string;
-  format: 'svg' | 'pdf';
+  format: 'svg' | 'pdf' | 'png' | 'tiff';
   snapshot: Record<string, string>;
 }
 export interface CanvasApplyStyleResult {

@@ -136,15 +136,22 @@ class PreviewRenderRequest(BaseModel):
 
 # ---------------------------------------------------------------- M4 export
 class CanvasExportRequest(BaseModel):
-    # Vector composition only (design §1: never bitmap-stretch). SVG nests each
-    # panel's physical-size vector render; PDF converts that composite via
-    # rsvg-convert (librsvg) — a pure vector SVG→PDF, fonts preserved as text.
-    format: Literal["svg", "pdf"] = "svg"
+    # svg/pdf: vector composition only (design §1: never bitmap-stretch). SVG
+    # nests each panel's physical-size vector render; PDF converts that
+    # composite via rsvg-convert (librsvg) — a pure vector SVG→PDF, fonts
+    # preserved as text. png/tiff (U9 §2) RASTERIZE that same composite via
+    # rsvg-convert at `dpi`; tiff is LZW-compressed and derived from the png.
+    format: Literal["svg", "pdf", "png", "tiff"] = "svg"
+    # Raster DPI — png/tiff only, ignored for svg/pdf. Output pixel size is
+    # ceil(mm / 25.4 * dpi) (verified against the installed rsvg-convert).
+    dpi: Literal[300, 600] = 300
 
 
 class CanvasExportResponse(BaseModel):
     url: str
-    format: Literal["svg", "pdf"]
+    format: Literal["svg", "pdf", "png", "tiff"]
+    # Set for png/tiff exports only; None for svg/pdf.
+    dpi: int | None = None
     # {panel_id: version_id} snapshot recorded for reproducibility (design §5).
     snapshot: dict[str, str] = Field(default_factory=dict)
 

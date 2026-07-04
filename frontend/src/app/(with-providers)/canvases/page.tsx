@@ -4,7 +4,7 @@ import { useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { deleteCanvas, listCanvases, listProjects } from '@/lib/api';
+import { deleteCanvas, duplicateCanvas, listCanvases, listProjects } from '@/lib/api';
 import { AppHeader } from '@/components/layout/AppHeader';
 import { NewCanvasDialog } from '@/components/canvases/NewCanvasDialog';
 import { Card, CardContent } from '@/components/ui/card';
@@ -12,7 +12,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { AlertTriangle, FlaskConical, LayoutGrid, Layers, Loader2, Plus, RotateCcw, Search, SearchX, Trash2 } from 'lucide-react';
+import { AlertTriangle, Copy, FlaskConical, LayoutGrid, Layers, Loader2, Plus, RotateCcw, Search, SearchX, Trash2 } from 'lucide-react';
 
 function formatUpdated(iso: string): string {
   const d = new Date(iso);
@@ -48,6 +48,11 @@ export default function CanvasesPage() {
     mutationFn: deleteCanvas,
     onSuccess: () => { toast.success('Canvas deleted'); qc.invalidateQueries({ queryKey: ['canvases'] }); },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Delete failed'),
+  });
+  const duplicate = useMutation({
+    mutationFn: duplicateCanvas,
+    onSuccess: () => { toast.success('Canvas duplicated'); qc.invalidateQueries({ queryKey: ['canvases'] }); },
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Duplicate failed'),
   });
 
   return (
@@ -106,16 +111,29 @@ export default function CanvasesPage() {
                             {c.width_mm} × {c.height_mm} mm
                           </p>
                         </button>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          aria-label={`Delete canvas ${c.name}`}
-                          onClick={() => { if (confirm(`Delete canvas "${c.name}"?`)) del.mutate(c.id); }}
-                          disabled={del.isPending}
-                        >
-                          <Trash2 className="h-4 w-4 text-muted-foreground" />
-                        </Button>
+                        <div className="flex items-center gap-0.5">
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            aria-label={`Duplicate canvas ${c.name}`}
+                            title="Duplicate this canvas (panels, annotations included)"
+                            onClick={() => duplicate.mutate(c.id)}
+                            disabled={duplicate.isPending}
+                          >
+                            <Copy className="h-4 w-4 text-muted-foreground" />
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            aria-label={`Delete canvas ${c.name}`}
+                            onClick={() => { if (confirm(`Delete canvas "${c.name}"?`)) del.mutate(c.id); }}
+                            disabled={del.isPending}
+                          >
+                            <Trash2 className="h-4 w-4 text-muted-foreground" />
+                          </Button>
+                        </div>
                       </div>
                       <button
                         type="button"

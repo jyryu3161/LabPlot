@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import copy
 import hashlib
+import io
 import json
 import math
 import os
@@ -299,12 +301,29 @@ def _get_panel(canvas: Canvas, panel_id: uuid.UUID) -> CanvasPanel:
     raise NotFoundError("CanvasPanel", str(panel_id))
 
 
-def _figure_current_versions(db: Session, figure_ids: list[uuid.UUID]) -> dict[uuid.UUID, uuid.UUID | None]:
-    """Map figure_id -> figure.current_version_id for follow-latest resolution."""
+def _figure_current_versions(db: Session, figure_ids: list[uuid.UUID],
+                             owner_id: uuid.UUID) -> dict[uuid.UUID, uuid.UUID | None]:
+    """Map figure_id -> figure.current_version_id for follow-latest resolution.
+
+    Filtered to figures the CALLER can access (same predicate as
+    figures_service.get_figure: owner match OR accessible project): a figure
+    ABSENT from the map is inaccessible and must fail closed
+    (effective_version_id=None, no native size in _panel_response) — a
+    caller-owned canvas (e.g. a U9 duplicate of a project canvas) would
+    otherwise keep resolving live version ids/metadata of figures the caller
+    can't, or can no longer, access."""
+    from app.projects import service as project_service
+
     ids = list({fid for fid in figure_ids if fid is not None})
     if not ids:
         return {}
-    rows = db.query(Figure.id, Figure.current_version_id).filter(Figure.id.in_(ids)).all()
+    accessible = project_service.accessible_project_ids(db, owner_id)
+    rows = (
+        db.query(Figure.id, Figure.current_version_id)
+        .filter(Figure.id.in_(ids),
+                or_(Figure.owner_id == owner_id, Figure.project_id.in_(accessible)))
+        .all()
+    )
     return {fid: cvid for fid, cvid in rows}
 
 
@@ -327,7 +346,13 @@ def _panel_response(panel: CanvasPanel, current_map: dict[uuid.UUID, uuid.UUID |
     # version (None if the figure has no version yet). Resolved here so the
     # editor needs no extra round-trip. render_url is the committed derived-cache
     # artifact (§4), populated by later milestones; None for pure CRUD.
-    effective = panel.pinned_version_id or current_map.get(panel.figure_id)
+    # ABSENCE from current_map means the figure is INACCESSIBLE to the caller
+    # (see _figure_current_versions) — fail closed, including the pin, so no
+    # version id or native-size metadata of an unreadable figure leaks.
+    if panel.figure_id not in current_map:
+        effective = None
+    else:
+        effective = panel.pinned_version_id or current_map.get(panel.figure_id)
     native = (native_map or {}).get(effective) if effective else None
     nw, nh = native if native else (None, None)
     return {
@@ -351,8 +376,8 @@ def _panel_response(panel: CanvasPanel, current_map: dict[uuid.UUID, uuid.UUID |
     }
 
 
-def _canvas_detail(db: Session, canvas: Canvas) -> dict:
-    current_map = _figure_current_versions(db, [p.figure_id for p in canvas.panels])
+def _canvas_detail(db: Session, canvas: Canvas, owner_id: uuid.UUID) -> dict:
+    current_map = _figure_current_versions(db, [p.figure_id for p in canvas.panels], owner_id)
     native_map = _version_native_sizes(
         db, [p.pinned_version_id or current_map.get(p.figure_id) for p in canvas.panels])
     # Ordered by z_order; ties broken by id for stable paint order (§2).
@@ -427,7 +452,7 @@ def create_canvas(db: Session, owner_id: uuid.UUID, data: CanvasCreate) -> dict:
 
 def canvas_detail(db: Session, canvas_id: uuid.UUID, owner_id: uuid.UUID) -> dict:
     canvas = get_canvas(db, canvas_id, owner_id)
-    return _canvas_detail(db, canvas)
+    return _canvas_detail(db, canvas, owner_id)
 
 
 def update_canvas(db: Session, canvas_id: uuid.UUID, owner_id: uuid.UUID, data: dict) -> dict:
@@ -487,6 +512,69 @@ def delete_canvas(db: Session, canvas_id: uuid.UUID, owner_id: uuid.UUID) -> Non
     canvas = get_canvas(db, canvas_id, owner_id, write=True)
     db.delete(canvas)  # FK ON DELETE CASCADE + orm cascade removes panels
     db.commit()
+
+
+def duplicate_canvas(db: Session, canvas_id: uuid.UUID, owner_id: uuid.UUID) -> dict:
+    """Deep-copy a canvas (+ panels + annotations) into a new canvas owned by
+    the CALLER (U9 §3).
+
+    Unlike figures.duplicate_figure (which requires WRITE on the source figure
+    to duplicate at all), only READ access to the source canvas is required
+    here — get_canvas(write=False) — so any project member who can merely VIEW
+    a shared canvas can still take a personal working copy of it.
+
+    project_id only carries over when the caller ALSO has write access to that
+    project (mirrors figure duplicate's "you can only land a copy somewhere you
+    could yourself edit"); otherwise the copy is personal (project_id=None)
+    rather than silently (re-)sharing it into a project the caller can't edit.
+
+    Panels reference the SAME source figures (figure_id/pinned_version_id
+    copied as-is) — no figure is duplicated, so the new canvas renders
+    identically to the source immediately. Annotation ids are preserved
+    verbatim (they are only unique per-canvas, §U8) but deep-copied so
+    mutating one canvas's annotations list can never alias the other's.
+    """
+    from app.projects import service as project_service
+
+    src = get_canvas(db, canvas_id, owner_id)  # read access is sufficient
+
+    new_project_id = None
+    if src.project_id is not None and project_service.can_write_project(db, src.project_id, owner_id):
+        new_project_id = src.project_id
+
+    copy_name = (src.name or "Canvas")[: 255 - len(" (copy)")] + " (copy)"
+
+    new_canvas_id = uuid.uuid4()
+    canvas = Canvas(
+        id=new_canvas_id,
+        owner_id=owner_id,
+        project_id=new_project_id,
+        name=copy_name,
+        description=src.description,
+        width_mm=src.width_mm,
+        height_mm=src.height_mm,
+        preset=src.preset,
+        background=src.background,
+        annotations=copy.deepcopy(src.annotations) if src.annotations else [],
+        annotations_rev=0,
+    )
+    db.add(canvas)
+
+    for p in src.panels:
+        db.add(CanvasPanel(
+            canvas_id=new_canvas_id,
+            figure_id=p.figure_id,
+            pinned_version_id=p.pinned_version_id,
+            x_mm=p.x_mm,
+            y_mm=p.y_mm,
+            width_mm=p.width_mm,
+            height_mm=p.height_mm,
+            z_order=p.z_order,
+            label=p.label,
+            label_visible=p.label_visible,
+        ))
+    db.commit()
+    return canvas_detail(db, new_canvas_id, owner_id)
 
 
 # ---------------------------------------------------------------- annotations
@@ -717,7 +805,7 @@ def add_panel(db: Session, canvas_id: uuid.UUID, owner_id: uuid.UUID, data: Pane
     db.add(panel)
     db.commit()
     db.refresh(panel)
-    current_map = _figure_current_versions(db, [panel.figure_id])
+    current_map = _figure_current_versions(db, [panel.figure_id], owner_id)
     native_map = _version_native_sizes(db, [panel.pinned_version_id or current_map.get(panel.figure_id)])
     return _panel_response(panel, current_map, native_map)
 
@@ -756,7 +844,7 @@ def update_panel(db: Session, canvas_id: uuid.UUID, panel_id: uuid.UUID,
 
     db.commit()
     db.refresh(panel)
-    current_map = _figure_current_versions(db, [panel.figure_id])
+    current_map = _figure_current_versions(db, [panel.figure_id], owner_id)
     native_map = _version_native_sizes(db, [panel.pinned_version_id or current_map.get(panel.figure_id)])
     return _panel_response(panel, current_map, native_map)
 
@@ -986,7 +1074,7 @@ def _compose_canvas_svg(db: Session, owner_id: uuid.UUID, canvas: Canvas) -> tup
     w_mm = _clamp(canvas.width_mm, _CANVAS_MM_MIN, _CANVAS_MM_MAX)
     h_mm = _clamp(canvas.height_mm, _CANVAS_MM_MIN, _CANVAS_MM_MAX)
 
-    current_map = _figure_current_versions(db, [p.figure_id for p in canvas.panels])
+    current_map = _figure_current_versions(db, [p.figure_id for p in canvas.panels], owner_id)
     # Paint order: ascending z_order (ties by id) → later panels drawn on top (§2).
     panels = sorted(canvas.panels, key=lambda p: (p.z_order, str(p.id)))
 
@@ -1083,31 +1171,130 @@ def _persist_export(canvas_id: uuid.UUID, data: bytes, ext: str, content_type: s
     return figures_service._url(out_path)
 
 
-def export_canvas(db: Session, canvas_id: uuid.UUID, owner_id: uuid.UUID, fmt: str) -> dict:
-    """Compose all panels as VECTOR and export the canvas as SVG or PDF (§1).
+_RASTER_DPI_CHOICES = {300, 600}
+# Raster pixel budget (U9 §2 hardening). Pixel size is ceil(mm/25.4*dpi) per
+# side; this caps the rsvg child (~4 B/px RGBA) AND the in-process Pillow TIFF
+# re-encode (~8 B/px peak — measured: 139.5M px -> ~1.1 GB RSS, enough to OOM
+# the prod box under 2-3 concurrent exports). 40M px keeps the Pillow peak
+# ~310 MB while still allowing every legitimate combination: the max 500x500mm
+# canvas @300 dpi is 34.9M px and an A4 sheet @600 dpi is 34.8M px.
+_RASTER_MAX_PIXELS = 40_000_000
+
+
+def _svg_to_png_bytes(svg_text: str, dpi: int) -> bytes:
+    """Rasterize a physical-unit (mm) composite SVG to PNG at `dpi` via
+    rsvg-convert (U9 §2).
+
+    The composite SVG carries width/height in mm (e.g. ``width="210mm"``) with
+    a 1mm-per-user-unit viewBox. Passing ``-d/-p <dpi>`` WITHOUT
+    ``--width``/``--height`` lets rsvg-convert derive the pixel size itself
+    from those physical dimensions rather than us precomputing one — verified
+    in-container against the installed rsvg-convert 2.52.5: output pixel size
+    is ``ceil(mm / 25.4 * dpi)`` (NOT round-to-nearest), e.g. a 210mm-wide
+    sheet -> 2481px at 300dpi (ceil(2480.315...)) and 4961px at 600dpi.
+    """
+    with tempfile.TemporaryDirectory(prefix="labplot_canvas_raster_") as td:
+        svg_path = os.path.join(td, "composite.svg")
+        png_path = os.path.join(td, "out.png")
+        with open(svg_path, "w", encoding="utf-8") as fh:
+            fh.write(svg_text)
+        # Hardened subprocess: no shell, fixed literal args + trusted temp
+        # paths, bounded runtime (mirrors the PDF branch).
+        try:
+            subprocess.run(
+                ["rsvg-convert", "-f", "png", "-d", str(dpi), "-p", str(dpi), "-o", png_path, svg_path],
+                check=True,
+                capture_output=True,
+                timeout=60,
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            raise BadRequestError("PNG conversion failed", error_code="PNG_EXPORT_FAILED") from exc
+        with open(png_path, "rb") as fh:
+            png_bytes = fh.read()
+    if not png_bytes:
+        raise BadRequestError("PNG conversion produced no output", error_code="PNG_EXPORT_FAILED")
+    return png_bytes
+
+
+def _stamp_png_dpi(png_bytes: bytes, dpi: int) -> bytes:
+    """Re-encode a PNG with a pHYs resolution chunk (U9 review F1): rsvg's
+    cairo writer emits none, so a '300 dpi' PNG would open as 72 dpi in
+    Photoshop/journal submission checkers — the exact use case the dpi option
+    exists for. Pillow writes pHYs when `dpi` is passed to save()."""
+    from PIL import Image
+
+    Image.MAX_IMAGE_PIXELS = _RASTER_MAX_PIXELS  # export_canvas guards to the same budget
+    with Image.open(io.BytesIO(png_bytes)) as im:
+        out = io.BytesIO()
+        im.save(out, format="PNG", dpi=(dpi, dpi))
+        return out.getvalue()
+
+
+def _png_bytes_to_tiff_bytes(png_bytes: bytes, dpi: int) -> bytes:
+    """Convert PNG bytes to LZW-compressed TIFF bytes via Pillow, preserving
+    DPI metadata (U9 §2). Reuses the rsvg-produced PNG as the raster source
+    rather than a second rsvg invocation. Local import: Pillow is only needed
+    on this raster export path."""
+    from PIL import Image
+
+    # export_canvas guards inputs to <= _RASTER_MAX_PIXELS; make Pillow enforce
+    # the same ceiling (its default only WARNS at ~89.5M px and errors at 2x),
+    # so the budget cannot be bypassed by any future caller.
+    Image.MAX_IMAGE_PIXELS = _RASTER_MAX_PIXELS
+    with Image.open(io.BytesIO(png_bytes)) as im:
+        out = io.BytesIO()
+        im.save(out, format="TIFF", compression="tiff_lzw", dpi=(dpi, dpi))
+        return out.getvalue()
+
+
+def export_canvas(db: Session, canvas_id: uuid.UUID, owner_id: uuid.UUID, fmt: str, dpi: int = 300) -> dict:
+    """Export the canvas as svg, pdf, png, or tiff (§1, U9 §2).
+
+    svg/pdf stay pure vector composition (§1: never bitmap-stretch a panel).
+    png/tiff RASTERIZE that SAME composite via rsvg-convert at `dpi` — still a
+    single controlled conversion of the whole composed sheet, not an ad hoc
+    per-panel bitmap stretch. tiff is derived from the rendered png (one rsvg
+    invocation, then a Pillow re-encode) rather than a second rsvg call.
 
     Records `{panel_id: version_id}` into `canvas.export_snapshot` for
-    reproducibility (§5) and commits.
+    reproducibility (§5) and commits, for every format.
     """
     fmt = (fmt or "svg").lower()
-    if fmt not in {"svg", "pdf"}:
-        raise BadRequestError("format must be 'svg' or 'pdf'", error_code="BAD_EXPORT_FORMAT")
+    if fmt not in {"svg", "pdf", "png", "tiff"}:
+        raise BadRequestError("format must be one of 'svg', 'pdf', 'png', 'tiff'", error_code="BAD_EXPORT_FORMAT")
+    if fmt in {"png", "tiff"} and dpi not in _RASTER_DPI_CHOICES:
+        raise BadRequestError("dpi must be 300 or 600", error_code="BAD_EXPORT_DPI")
 
-    # Fail fast if PDF is requested but the vector converter is unavailable —
-    # never silently fall back to a raster path (that path is banned).
-    if fmt == "pdf" and shutil.which("rsvg-convert") is None:
+    # Fail fast if a converter-backed format is requested but the vector
+    # converter is unavailable — never silently fall back to a lesser path.
+    if fmt in {"pdf", "png", "tiff"} and shutil.which("rsvg-convert") is None:
         raise AppError(
             status_code=501,
-            detail="PDF export requires librsvg (rsvg-convert), which is not installed.",
-            error_code="PDF_EXPORT_UNAVAILABLE",
+            detail=f"{fmt.upper()} export requires librsvg (rsvg-convert), which is not installed.",
+            error_code="PDF_EXPORT_UNAVAILABLE" if fmt == "pdf" else "RASTER_EXPORT_UNAVAILABLE",
         )
 
     canvas = get_canvas(db, canvas_id, owner_id)
+
+    if fmt in {"png", "tiff"}:
+        # Guard BEFORE composing (per-panel renders are the expensive part):
+        # ceil matches rsvg-convert's observed mm->px rounding (see the
+        # _svg_to_png_bytes docstring).
+        px_w = math.ceil(float(canvas.width_mm) / 25.4 * dpi)
+        px_h = math.ceil(float(canvas.height_mm) / 25.4 * dpi)
+        if px_w * px_h > _RASTER_MAX_PIXELS:
+            raise BadRequestError(
+                f"Raster export would be {px_w}x{px_h}px, over the "
+                f"{_RASTER_MAX_PIXELS // 1_000_000}M-pixel limit — use 300 dpi or a smaller canvas.",
+                error_code="RASTER_TOO_LARGE",
+            )
+
     composite_svg, snapshot = _compose_canvas_svg(db, owner_id, canvas)
 
+    result_dpi: int | None = None
     if fmt == "svg":
         url = _persist_export(canvas_id, composite_svg.encode("utf-8"), "svg", "image/svg+xml")
-    else:
+    elif fmt == "pdf":
         with tempfile.TemporaryDirectory(prefix="labplot_canvas_export_") as td:
             svg_path = os.path.join(td, "composite.svg")
             pdf_path = os.path.join(td, "out.pdf")
@@ -1129,11 +1316,20 @@ def export_canvas(db: Session, canvas_id: uuid.UUID, owner_id: uuid.UUID, fmt: s
         if not pdf_bytes:
             raise BadRequestError("PDF conversion produced no output", error_code="PDF_EXPORT_FAILED")
         url = _persist_export(canvas_id, pdf_bytes, "pdf", "application/pdf")
+    elif fmt == "png":
+        result_dpi = dpi
+        png_bytes = _stamp_png_dpi(_svg_to_png_bytes(composite_svg, dpi), dpi)
+        url = _persist_export(canvas_id, png_bytes, "png", "image/png")
+    else:  # tiff
+        result_dpi = dpi
+        png_bytes = _svg_to_png_bytes(composite_svg, dpi)
+        tiff_bytes = _png_bytes_to_tiff_bytes(png_bytes, dpi)
+        url = _persist_export(canvas_id, tiff_bytes, "tiff", "image/tiff")
 
     # Snapshot the versions actually composed (§5), then commit.
     canvas.export_snapshot = snapshot
     db.commit()
-    return {"url": url, "format": fmt, "snapshot": snapshot}
+    return {"url": url, "format": fmt, "dpi": result_dpi, "snapshot": snapshot}
 
 
 def apply_canvas_style(db: Session, canvas_id: uuid.UUID, owner_id: uuid.UUID,

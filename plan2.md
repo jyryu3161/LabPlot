@@ -55,7 +55,9 @@ e2e: 러버밴드 선택 수(서버 무관 UI+정렬 후 좌표 서버 검증), 
 
 e2e: 텍스트 추가→PATCH 반영→export SVG에 `<text>` 존재+문자열 일치, undo로 소멸. 리스크: 폰트 매칭(에디터 Konva vs export SVG 렌더러 — 같은 패밀리 지정), 오브젝트 z와 패널 z 인터리브(단일 z 공간 권장).
 
-## U9 — 캔버스 부가기능 4종 (요청 4 확장)
+## U9 — 캔버스 부가기능 4종 (요청 4 확장) ✅ DONE (2026-07-04 배포·45 e2e green)
+
+**Sonnet 구현 → Fable 검증·수정 체제 4회차.** Sonnet 병렬(백엔드: png/tiff+dpi export — `ceil(mm/25.4×dpi)` 컨테이너 실측, TIFF LZW+DPI 메타, `/duplicate` 권한 미러링 ∥ 프런트: 눈금자·그리드 sceneFunc·스냅 타깃 3개소·`e.code` 줌 단축키·Export 6항목·Duplicate 2개소) + e2e(래스터 치수 정밀 검증·복제 딥카피·그리드 스냅 서버 진실 — **눈금자 canvas가 `.first()` 관례 파괴하는 전 스위트 회귀 선발견** → 눈금자를 Stage 뒤 DOM으로 이동해 8개 스펙 무수정 해결). Fable 리뷰 **6/6 확정**: ① 래스터 픽셀 예산 40M(500×500@600 TIFF가 워커 1.1GB 실측→OOM 차단, 400 RASTER_TOO_LARGE)+`MAX_IMAGE_PIXELS` ② PNG pHYs 스탬핑(rsvg는 미기록→72dpi 판독 문제) ③ 복제 캔버스의 접근불가 피겨 메타 누출 ACL fail-closed ④ 눈금자 22px 오프셋 ⑤ Space+팬 라이브 동기화 ⑥ 테마 stale. **+U5부터 잠재한 프로덕션 버그 근절**: 미선택 패널 원제스처 드래그 시 선택-크롬(툴바 행/사이드바) 마운트가 컨테이너 리사이즈→pxPerMm 재적합→Konva 오프셋 무효→수십 mm 순간이동 (Konva DD 내부 추적으로 확정; `pointerGestureActive`로 크롬 5개소 마운트를 제스처 종료까지 지연). PNG pHYs 300dpi 바이트 검증·시각 확인 완료.
 
 1. **눈금자+그리드**: 캔버스 상/좌 mm 눈금자(줌 연동), 그리드 토글(5mm 기본, 10mm 보조선), **그리드 스냅 토글**(스냅 타깃에 그리드 라인 추가). Konva 별도 레이어, export 미포함.
 2. **래스터 export**: Export 메뉴에 PNG·TIFF + DPI(300/600) — 백엔드: 컴포지트 SVG → `rsvg-convert --dpi-x/y`로 PNG, TIFF는 Pillow 변환(LZW). 스냅샷 기록은 기존과 동일.

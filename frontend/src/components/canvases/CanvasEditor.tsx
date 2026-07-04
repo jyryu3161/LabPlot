@@ -2,14 +2,15 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { createPortal } from 'react-dom';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import Konva from 'konva';
-import { Stage, Layer, Rect, Group, Image as KonvaImage, Text, Transformer, Line, Circle } from 'react-konva';
+import { Stage, Layer, Rect, Group, Image as KonvaImage, Text, Transformer, Line, Circle, Shape } from 'react-konva';
 import {
   getCanvas, updateCanvas, addCanvasPanel, updateCanvasPanel, deleteCanvasPanel, renderCanvasPreview,
-  downloadCanvasExport, duplicateFigure, listProjects, ApiError,
+  downloadCanvasExport, duplicateFigure, duplicateCanvas, listProjects, ApiError,
 } from '@/lib/api';
 import type { CanvasDetail, CanvasPanel, CanvasAnnotation, FigureListItem } from '@/lib/types';
 import { Button } from '@/components/ui/button';
@@ -21,7 +22,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import {
   Loader2, Plus, Trash2, ArrowUp, ArrowDown, Maximize2, ZoomIn, ZoomOut, Lock, Unlock, Tag, Pencil, Check,
-  Download, Undo2, Redo2, ExternalLink, FlaskConical,
+  Download, Undo2, Redo2, ExternalLink, FlaskConical, CopyPlus, Grid3x3, Magnet,
   AlignStartVertical, AlignCenterVertical, AlignEndVertical,
   AlignStartHorizontal, AlignCenterHorizontal, AlignEndHorizontal,
   AlignHorizontalDistributeCenter, AlignVerticalDistributeCenter,
@@ -34,6 +35,7 @@ import { FigurePickerDialog } from './FigurePickerDialog';
 import { CanvasColorEditor } from './CanvasColorEditor';
 import { CanvasApplyStyle } from './CanvasApplyStyle';
 import { CanvasHelpPopover, CanvasHintsBar } from './CanvasHints';
+import { CanvasRulers } from './CanvasRulers';
 import { useAuthContext } from '@/components/auth/AuthProvider';
 import { CanvasAnnotationNode } from './CanvasAnnotationNode';
 import { CanvasAnnotationInspector } from './CanvasAnnotationInspector';
@@ -42,6 +44,76 @@ import {
   originMm, sizeMm, translateAnnotation, createAnnotation, nextAnnotationZ, clampNum, annotationBoxPx,
   MIN_CREATE_DRAG_MM, sanitizeText, ptToMm as annPtToMm, FONT_PT_DEFAULT as ANN_FONT_PT_DEFAULT,
 } from './annotations';
+
+// U9: grid + grid-snap toggle persistence keys (localStorage) and the grid's
+// fixed pitch (mm) — 5mm minor lines, every 2nd (10mm) drawn as an accent.
+const GRID_SHOW_KEY = 'labplot.canvas.grid';
+const GRID_SNAP_KEY = 'labplot.canvas.grid-snap';
+const GRID_MINOR_MM = 5;
+const GRID_MAJOR_EVERY = 2; // 2 * 5mm = 10mm accent lines
+const GRID_MAX_LINES_PER_AXIS = 400; // defensive cap, never hit in practice (canvas <= 500mm / 5mm = 100)
+
+function readBoolPref(key: string): boolean {
+  try {
+    return typeof window !== 'undefined' && window.localStorage.getItem(key) === '1';
+  } catch {
+    return false;
+  }
+}
+function writeBoolPref(key: string, value: boolean): void {
+  try {
+    window.localStorage.setItem(key, value ? '1' : '0');
+  } catch {
+    /* storage unavailable — the toggle still works for this session */
+  }
+}
+
+// U9: grid line positions (fit-px, un-zoomed "canvas" space) for the CURRENTLY
+// VISIBLE portion of the sheet — keeps the Shape's per-frame draw work
+// bounded during a deep zoom-in instead of always walking the whole sheet.
+function computeGridLines(
+  canvasWmm: number,
+  canvasHmm: number,
+  pxPerMm: number,
+  view: { zoom: number; x: number; y: number },
+  viewport: { w: number; h: number },
+): { minorV: number[]; majorV: number[]; minorH: number[]; majorH: number[] } {
+  const empty = { minorV: [], majorV: [], minorH: [], majorH: [] };
+  if (!(pxPerMm > 0) || !(view.zoom > 0) || canvasWmm <= 0 || canvasHmm <= 0) return empty;
+  const visX0 = clampNum((0 - view.x) / view.zoom / pxPerMm, 0, canvasWmm);
+  const visX1 = clampNum((viewport.w - view.x) / view.zoom / pxPerMm, 0, canvasWmm);
+  const visY0 = clampNum((0 - view.y) / view.zoom / pxPerMm, 0, canvasHmm);
+  const visY1 = clampNum((viewport.h - view.y) / view.zoom / pxPerMm, 0, canvasHmm);
+
+  const minorV: number[] = [];
+  const majorV: number[] = [];
+  const kStartX = Math.max(0, Math.floor(visX0 / GRID_MINOR_MM));
+  for (let i = kStartX; i * GRID_MINOR_MM <= visX1 + 1e-6 && minorV.length + majorV.length < GRID_MAX_LINES_PER_AXIS; i++) {
+    const px = mmToPx(i * GRID_MINOR_MM, pxPerMm);
+    if (i % GRID_MAJOR_EVERY === 0) majorV.push(px);
+    else minorV.push(px);
+  }
+  const minorH: number[] = [];
+  const majorH: number[] = [];
+  const kStartY = Math.max(0, Math.floor(visY0 / GRID_MINOR_MM));
+  for (let i = kStartY; i * GRID_MINOR_MM <= visY1 + 1e-6 && minorH.length + majorH.length < GRID_MAX_LINES_PER_AXIS; i++) {
+    const py = mmToPx(i * GRID_MINOR_MM, pxPerMm);
+    if (i % GRID_MAJOR_EVERY === 0) majorH.push(py);
+    else minorH.push(py);
+  }
+  return { minorV, majorV, minorH, majorH };
+}
+
+// U9: grid-snap targets (fit-px) at the fixed 5mm pitch, bounded to [0, sizeMm]
+// — joins the existing panel/annotation/canvas-edge target arrays so "nearest
+// wins" picks whichever is closest, grid included, with no special-casing.
+function gridSnapTargetsPx(sizeMm: number, pxPerMm: number): number[] {
+  if (!(sizeMm > 0) || !(pxPerMm > 0)) return [];
+  const out: number[] = [];
+  const n = Math.floor(sizeMm / GRID_MINOR_MM + 1e-6);
+  for (let i = 0; i <= n; i++) out.push(mmToPx(i * GRID_MINOR_MM, pxPerMm));
+  return out;
+}
 
 // ── panel figure image cache ────────────────────────────────────────────────
 // Keyed by (figure_id, version_id, round(w_mm), round(h_mm)) per design §3/§4:
@@ -274,6 +346,7 @@ function nextLabel(panels: CanvasPanel[]): string {
 
 export function CanvasEditor({ canvasId }: { canvasId: string }) {
   const qc = useQueryClient();
+  const router = useRouter();
   const queryKey = useMemo(() => ['canvas', canvasId], [canvasId]);
   const { data: canvas, isLoading, isError } = useQuery({ queryKey, queryFn: () => getCanvas(canvasId) });
   // Owner gate for the Move control (backend enforces too; hiding avoids
@@ -324,6 +397,15 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   // U7: rubber-band marquee, in CANVAS ("fit px", un-zoomed) coordinates — same
   // space as panel x/y so hit-testing is a plain AABB overlap check.
   const [marquee, setMarquee] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
+  // TRUE from a panel/annotation mousedown until the window-level mouseup.
+  // Selection-dependent chrome (selected-panel toolbar row, align toolbar,
+  // mixed strip, color editor / annotation inspector sidebars) must NOT mount
+  // while a pointer gesture is active: mounting them resizes the stage
+  // container mid-gesture, the view re-fits (pxPerMm changes), and Konva's
+  // drag offsets — captured against the OLD geometry at mousedown — teleport
+  // the dragged node by tens of mm. Pure clicks still get their chrome at
+  // mouseup, which is imperceptible.
+  const [pointerGestureActive, setPointerGestureActive] = useState(false);
   const marqueeShiftRef = useRef(false);
   // Mirror of the marquee state for window-level listeners (a closure captured
   // at listener registration would go stale mid-drag).
@@ -378,6 +460,27 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   // Aspect-locked resize by default: a free-form resize re-layouts the figure
   // at a different aspect than its native render, which reads as "distorted".
   const [lockAspect, setLockAspect] = useState(true);
+  // U9: grid visibility + grid-snap, each independently toggleable and
+  // persisted — this component is only ever mounted client-side (dynamic
+  // import with ssr:false, see canvases/[id]/page.tsx), so reading
+  // localStorage straight in the lazy initializer is safe (no hydration
+  // mismatch to guard against, unlike CanvasHintsBar which IS SSR'd).
+  const [showGrid, setShowGrid] = useState<boolean>(() => readBoolPref(GRID_SHOW_KEY));
+  const [gridSnapEnabled, setGridSnapEnabled] = useState<boolean>(() => readBoolPref(GRID_SNAP_KEY));
+  const toggleShowGrid = useCallback(() => {
+    setShowGrid((v) => {
+      const next = !v;
+      writeBoolPref(GRID_SHOW_KEY, next);
+      return next;
+    });
+  }, []);
+  const toggleGridSnap = useCallback(() => {
+    setGridSnapEnabled((v) => {
+      const next = !v;
+      writeBoolPref(GRID_SNAP_KEY, next);
+      return next;
+    });
+  }, []);
   const [pickerOpen, setPickerOpen] = useState(false);
   // U3: project affiliation — breadcrumb link + owner-only move dialog.
   const [moveOpen, setMoveOpen] = useState(false);
@@ -402,6 +505,12 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   // mutations it batches through) — the keydown effect only re-subscribes on
   // selectedIds changes, so it can't close over a fresh nudgeSelected directly.
   const nudgeSelectedRef = useRef<(key: string, shift: boolean) => void>(() => {});
+  // U9: same indirection for the '1' / Shift+1 / Shift+2 zoom shortcuts —
+  // all three close over view/viewport/selection state that changes far more
+  // often than the keydown effect (deps: [selectedIds]) re-subscribes.
+  const fitViewRef = useRef<() => void>(() => {});
+  const zoomTo100Ref = useRef<() => void>(() => {});
+  const zoomToSelectionRef = useRef<() => void>(() => {});
 
   const trRef = useRef<Konva.Transformer>(null);
   const nodeRefs = useRef<Map<string, Konva.Group>>(new Map());
@@ -517,6 +626,13 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     [canvas?.width_mm, canvas?.height_mm, viewport.w, viewport.h, canvas],
   );
 
+  // U9: grid line positions (visible-range only — see computeGridLines) for
+  // the grid overlay. Recomputed only while the grid is actually shown.
+  const gridLines = useMemo(
+    () => (showGrid && canvas ? computeGridLines(canvas.width_mm, canvas.height_mm, pxPerMm, view, viewport) : null),
+    [showGrid, canvas, pxPerMm, view, viewport],
+  );
+
   // ── viewport measurement ──
   useEffect(() => {
     const el = containerRef.current;
@@ -545,6 +661,9 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     fitView();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fitSig]);
+  useEffect(() => {
+    fitViewRef.current = fitView;
+  });
 
   // ── attach transformer to every selected node (U7 8: multi-node resize) ──
   // U8: line/arrow annotations are excluded — they get draggable endpoint
@@ -594,6 +713,33 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
             setActiveTool(toolKey);
             return;
           }
+        }
+      }
+      // U9: zoom shortcuts — '1' 100%, Shift+1 fit-to-view, Shift+2 zoom to
+      // selection. Digits are read via e.code (layout-independent: e.key for
+      // Shift+1 is the shifted SYMBOL, e.g. '!' on a US keyboard, not '1'),
+      // guarded the same way as the tool shortcuts above.
+      if (!mod && !e.altKey && (e.code === 'Digit1' || e.code === 'Digit2')) {
+        const role = el?.getAttribute('role') ?? '';
+        const isControl = Boolean(el && (tag === 'BUTTON' || tag === 'A'
+          || ['button', 'switch', 'checkbox', 'menuitem', 'tab', 'combobox'].includes(role)));
+        if (!isControl) {
+          if (e.code === 'Digit1' && !e.shiftKey) {
+            e.preventDefault();
+            zoomTo100Ref.current();
+            return;
+          }
+          if (e.code === 'Digit1' && e.shiftKey) {
+            e.preventDefault();
+            fitViewRef.current();
+            return;
+          }
+          if (e.code === 'Digit2' && e.shiftKey) {
+            e.preventDefault();
+            zoomToSelectionRef.current();
+            return;
+          }
+          // bare '2' has no assigned shortcut — fall through unhandled.
         }
       }
       if (e.key === 'Escape') {
@@ -1099,6 +1245,19 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     window.addEventListener('mouseup', onWinUp);
     return () => window.removeEventListener('mouseup', onWinUp);
   }, [drawingActive]);
+  // Clear the gesture flag on the WINDOW so releases outside the canvas (or
+  // over chrome) still end the gesture — Konva only binds mouseup on its own
+  // container (the U7 marquee lesson).
+  useEffect(() => {
+    if (!pointerGestureActive) return;
+    const end = () => setPointerGestureActive(false);
+    window.addEventListener('mouseup', end);
+    window.addEventListener('touchend', end);
+    return () => {
+      window.removeEventListener('mouseup', end);
+      window.removeEventListener('touchend', end);
+    };
+  }, [pointerGestureActive]);
   // F13: prune selection against BOTH live item lists — a cross-tab delete
   // otherwise leaves ghost ids that wedge group-resize's arrival counter,
   // no-op align, and mislead the "N items selected" count. U8: annotations
@@ -1114,14 +1273,27 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [panels, annotations]);
 
-  // ── export: compose the canvas into a vector file (SVG/PDF) and download it. ──
+  // ── export: compose the canvas into a file (vector SVG/PDF, or raster
+  // PNG/TIFF at 300|600 dpi) and download it. ──
   const exportCanvas = useMutation({
-    mutationFn: (format: 'svg' | 'pdf') => {
+    mutationFn: ({ format, dpi }: { format: 'svg' | 'pdf' | 'png' | 'tiff'; dpi?: 300 | 600 }) => {
       const base = (canvas?.name?.trim() || 'canvas').replace(/[/\\:*?"<>|]+/g, '_');
-      return downloadCanvasExport(canvasId, format, `${base}.${format}`);
+      const suffix = dpi ? `_${dpi}dpi` : '';
+      return downloadCanvasExport(canvasId, format, `${base}${suffix}.${format}`, dpi);
     },
-    onSuccess: (_res, format) => toast.success(`Canvas exported as ${format.toUpperCase()}`),
+    onSuccess: (_res, vars) => toast.success(`Canvas exported as ${vars.format.toUpperCase()}${vars.dpi ? ` (${vars.dpi} dpi)` : ''}`),
     onError: () => toast.error('Could not export canvas'),
+  });
+
+  // ── U9: duplicate the whole canvas (panels + annotations) and jump to it. ──
+  const duplicateCanvasMut = useMutation({
+    mutationFn: () => duplicateCanvas(canvasId),
+    onSuccess: (created) => {
+      toast.success('Canvas duplicated');
+      qc.invalidateQueries({ queryKey: ['canvases'] });
+      router.push(`/canvases/${created.id}`);
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Could not duplicate canvas'),
   });
 
   // U7 5a: apply the leader's post-snap delta to the rest of a multi-selection
@@ -1223,8 +1395,12 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     let y = node.y();
 
     const others = panels.filter((p) => p.id !== panel.id);
+    // U9: grid lines (5mm pitch) join the snap targets when grid-snap is on —
+    // appended, not substituted, so "nearest wins" picks whichever is closer.
+    const gridX = gridSnapEnabled ? gridSnapTargetsPx(canvas.width_mm, pxPerMm) : [];
+    const gridY = gridSnapEnabled ? gridSnapTargetsPx(canvas.height_mm, pxPerMm) : [];
     // U8: annotation bounding boxes join the panel snap target set.
-    const xTargets = [0, cw, cw / 2, ...others.flatMap((p) => {
+    const xTargets = [0, cw, cw / 2, ...gridX, ...others.flatMap((p) => {
       const px = mmToPx(p.x_mm, pxPerMm);
       const pw = mmToPx(p.width_mm, pxPerMm);
       return [px, px + pw, px + pw / 2];
@@ -1232,7 +1408,7 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
       const box = annotationBoxPx(a, pxPerMm, measuredTextRef.current.get(a.id));
       return [box.x0, box.x1, (box.x0 + box.x1) / 2];
     })];
-    const yTargets = [0, ch, ch / 2, ...others.flatMap((p) => {
+    const yTargets = [0, ch, ch / 2, ...gridY, ...others.flatMap((p) => {
       const py = mmToPx(p.y_mm, pxPerMm);
       const ph = mmToPx(p.height_mm, pxPerMm);
       return [py, py + ph, py + ph / 2];
@@ -1323,7 +1499,11 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     let y = node.y();
 
     const otherAnnos = annotations.filter((a) => a.id !== ann.id);
-    const xTargets = [0, cw, cw / 2, ...panels.flatMap((p) => {
+    // U9: grid lines join the snap targets when grid-snap is on (same
+    // "append, nearest wins" convention as the panel-drag path above).
+    const gridX = gridSnapEnabled ? gridSnapTargetsPx(canvas.width_mm, pxPerMm) : [];
+    const gridY = gridSnapEnabled ? gridSnapTargetsPx(canvas.height_mm, pxPerMm) : [];
+    const xTargets = [0, cw, cw / 2, ...gridX, ...panels.flatMap((p) => {
       const px = mmToPx(p.x_mm, pxPerMm);
       const pw = mmToPx(p.width_mm, pxPerMm);
       return [px, px + pw, px + pw / 2];
@@ -1331,7 +1511,7 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
       const box = annotationBoxPx(a, pxPerMm, measuredTextRef.current.get(a.id));
       return [box.x0, box.x1, (box.x0 + box.x1) / 2];
     })];
-    const yTargets = [0, ch, ch / 2, ...panels.flatMap((p) => {
+    const yTargets = [0, ch, ch / 2, ...gridY, ...panels.flatMap((p) => {
       const py = mmToPx(p.y_mm, pxPerMm);
       const ph = mmToPx(p.height_mm, pxPerMm);
       return [py, py + ph, py + ph / 2];
@@ -1805,6 +1985,58 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     const pointTo = { x: (cx - view.x) / oldScale, y: (cy - view.y) / oldScale };
     setView({ zoom: newScale, x: cx - pointTo.x * newScale, y: cy - pointTo.y * newScale });
   }
+  // U9: '1' shortcut — snap to exactly 100%, anchored at the viewport center
+  // (same anchor convention as zoomBy/the toolbar ± buttons).
+  function zoomTo100() {
+    if (!viewport.w || !viewport.h) return;
+    const oldScale = view.zoom;
+    const cx = viewport.w / 2;
+    const cy = viewport.h / 2;
+    const pointTo = { x: (cx - view.x) / oldScale, y: (cy - view.y) / oldScale };
+    setView({ zoom: 1, x: cx - pointTo.x, y: cy - pointTo.y });
+  }
+  // U9: Shift+2 — zoom to fit the union bbox of the current selection (panels
+  // + annotations) with a ~40px margin; no-op when nothing is selected (or
+  // the selection resolves to nothing, e.g. a stale id mid-delete).
+  function zoomToSelection() {
+    if (selectedIds.length === 0 || !viewport.w || !viewport.h) return;
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const id of selectedIds) {
+      const p = panels.find((pp) => pp.id === id);
+      if (p) {
+        const px0 = mmToPx(p.x_mm, pxPerMm);
+        const py0 = mmToPx(p.y_mm, pxPerMm);
+        x0 = Math.min(x0, px0);
+        y0 = Math.min(y0, py0);
+        x1 = Math.max(x1, px0 + mmToPx(p.width_mm, pxPerMm));
+        y1 = Math.max(y1, py0 + mmToPx(p.height_mm, pxPerMm));
+        continue;
+      }
+      const a = annotations.find((aa) => aa.id === id);
+      if (!a) continue;
+      const box = annotationBoxPx(a, pxPerMm, measuredTextRef.current.get(a.id));
+      x0 = Math.min(x0, box.x0);
+      y0 = Math.min(y0, box.y0);
+      x1 = Math.max(x1, box.x1);
+      y1 = Math.max(y1, box.y1);
+    }
+    if (!Number.isFinite(x0) || !Number.isFinite(y0) || !Number.isFinite(x1) || !Number.isFinite(y1)) return;
+    const marginPx = 40;
+    const bw = Math.max(1e-3, x1 - x0);
+    const bh = Math.max(1e-3, y1 - y0);
+    const availW = Math.max(1, viewport.w - marginPx * 2);
+    const availH = Math.max(1, viewport.h - marginPx * 2);
+    const newZoom = Math.min(8, Math.max(0.15, Math.min(availW / bw, availH / bh)));
+    const cx = (x0 + x1) / 2;
+    const cy = (y0 + y1) / 2;
+    setView({ zoom: newZoom, x: viewport.w / 2 - cx * newZoom, y: viewport.h / 2 - cy * newZoom });
+  }
+  useEffect(() => {
+    zoomTo100Ref.current = zoomTo100;
+  });
+  useEffect(() => {
+    zoomToSelectionRef.current = zoomToSelection;
+  });
 
   // ── U7 4/5a: panel selection ──
   // Shift+click toggles membership; a plain click selects only that panel —
@@ -1814,6 +2046,7 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   // genuine click (no intervening drag — see dragMovedRef).
   function handlePanelMouseDown(panel: CanvasPanel, e: Konva.KonvaEventObject<MouseEvent | TouchEvent>) {
     dragMovedRef.current = false;
+    setPointerGestureActive(true); // see the state's docblock (layout-shift teleport)
     const shift = 'shiftKey' in e.evt && e.evt.shiftKey;
     if (shift) {
       // Shift semantics (F5): ADD immediately (enables shift+drag-into-group);
@@ -1867,6 +2100,7 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   // exactly (shared selectedIds, same shift-defer / group-move semantics). ──
   function handleAnnotationMouseDown(ann: CanvasAnnotation, e: Konva.KonvaEventObject<MouseEvent | TouchEvent>) {
     dragMovedRef.current = false;
+    setPointerGestureActive(true); // see the state's docblock (layout-shift teleport)
     const shift = 'shiftKey' in e.evt && e.evt.shiftKey;
     if (shift) {
       setSelectedIds((cur) => {
@@ -2145,6 +2379,17 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     if (drawingRef.current) { finalizeDrawing(); return; }
     finalizeMarquee();
   }
+  function handleStageDragMove(e: Konva.KonvaEventObject<DragEvent>) {
+    // Same guard as handleStageDragEnd: panel/annotation drags bubble here
+    // too — only the Stage's own pan may write the view. Live sync keeps the
+    // U9 rulers and the grid's visible-range culling tracking the pan instead
+    // of freezing until dragend. No rAF throttle needed: the wheel path
+    // already does per-event setView by design, and re-applying the stage's
+    // own current position can't fight the in-progress drag.
+    const stage = e.target.getStage();
+    if (e.target !== stage || !stage) return;
+    setView((v) => ({ ...v, x: stage.x(), y: stage.y() }));
+  }
   function handleStageDragEnd(e: Konva.KonvaEventObject<DragEvent>) {
     // Only the Stage's own pan updates the view (panel drags bubble here too).
     const stage = e.target.getStage();
@@ -2215,12 +2460,15 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     const cw = mmToPx(canvas.width_mm, pxPerMm);
     const ch = mmToPx(canvas.height_mm, pxPerMm);
     const others = panels.filter((p) => p.id !== selectedIds[0]);
-    const xTargets = [0, cw, cw / 2, ...others.flatMap((p) => {
+    // U9: grid lines join the resize snap targets when grid-snap is on.
+    const gridX = gridSnapEnabled ? gridSnapTargetsPx(canvas.width_mm, pxPerMm) : [];
+    const gridY = gridSnapEnabled ? gridSnapTargetsPx(canvas.height_mm, pxPerMm) : [];
+    const xTargets = [0, cw, cw / 2, ...gridX, ...others.flatMap((p) => {
       const px = mmToPx(p.x_mm, pxPerMm);
       const pw = mmToPx(p.width_mm, pxPerMm);
       return [px, px + pw, px + pw / 2];
     })];
-    const yTargets = [0, ch, ch / 2, ...others.flatMap((p) => {
+    const yTargets = [0, ch, ch / 2, ...gridY, ...others.flatMap((p) => {
       const py = mmToPx(p.y_mm, pxPerMm);
       const ph = mmToPx(p.height_mm, pxPerMm);
       return [py, py + ph, py + ph / 2];
@@ -2517,6 +2765,32 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
             <Button type="button" size="icon-sm" variant="outline" onClick={() => zoomBy(1.2)} aria-label="Zoom in" title="Zoom in"><ZoomIn className="h-4 w-4" /></Button>
             <Button type="button" size="icon-sm" variant="outline" onClick={fitView} aria-label="Fit to view" title="Fit the whole canvas in the viewport"><Maximize2 className="h-4 w-4" /></Button>
           </div>
+          {/* U9: grid visibility + grid-snap — independent toggles, each persisted
+              in localStorage (see GRID_SHOW_KEY/GRID_SNAP_KEY above). */}
+          <div className="flex items-center gap-0.5">
+            <Button
+              type="button"
+              size="icon-sm"
+              variant={showGrid ? 'default' : 'outline'}
+              aria-label="Show grid"
+              aria-pressed={showGrid}
+              title="Show grid (5mm lines, 10mm accent) — editor only, never in the export"
+              onClick={toggleShowGrid}
+            >
+              <Grid3x3 className="h-4 w-4" />
+            </Button>
+            <Button
+              type="button"
+              size="icon-sm"
+              variant={gridSnapEnabled ? 'default' : 'outline'}
+              aria-label="Snap to grid"
+              aria-pressed={gridSnapEnabled}
+              title="Snap panels/annotations to the 5mm grid while dragging or resizing"
+              onClick={toggleGridSnap}
+            >
+              <Magnet className="h-4 w-4" />
+            </Button>
+          </div>
           {/* Tooltip wrapper: the style-source select inside has no title of its
               own (the Apply button does), and this file may not edit CanvasApplyStyle. */}
           <span
@@ -2537,6 +2811,18 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
               <FlaskConical className="h-4 w-4" />
             </Button>
           )}
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => duplicateCanvasMut.mutate()}
+            disabled={duplicateCanvasMut.isPending}
+            aria-label="Duplicate this canvas"
+            title="Duplicate this canvas, including its panels and annotations"
+          >
+            {duplicateCanvasMut.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <CopyPlus className="h-4 w-4" />}
+            Duplicate
+          </Button>
           <CanvasHelpPopover />
           <DropdownMenu>
             <DropdownMenuTrigger
@@ -2546,7 +2832,7 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
                   size="sm"
                   variant="outline"
                   disabled={panels.length === 0 || exportCanvas.isPending}
-                  title={panels.length === 0 ? 'Add a panel before exporting' : 'Export the composed canvas as a vector file'}
+                  title={panels.length === 0 ? 'Add a panel before exporting' : 'Export the composed canvas'}
                 />
               }
             >
@@ -2554,11 +2840,23 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
               Export
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
-              <DropdownMenuItem disabled={exportCanvas.isPending} onClick={() => exportCanvas.mutate('svg')}>
+              <DropdownMenuItem disabled={exportCanvas.isPending} onClick={() => exportCanvas.mutate({ format: 'svg' })}>
                 SVG (vector)
               </DropdownMenuItem>
-              <DropdownMenuItem disabled={exportCanvas.isPending} onClick={() => exportCanvas.mutate('pdf')}>
+              <DropdownMenuItem disabled={exportCanvas.isPending} onClick={() => exportCanvas.mutate({ format: 'pdf' })}>
                 PDF (vector)
+              </DropdownMenuItem>
+              <DropdownMenuItem disabled={exportCanvas.isPending} onClick={() => exportCanvas.mutate({ format: 'png', dpi: 300 })}>
+                PNG (300 dpi)
+              </DropdownMenuItem>
+              <DropdownMenuItem disabled={exportCanvas.isPending} onClick={() => exportCanvas.mutate({ format: 'png', dpi: 600 })}>
+                PNG (600 dpi)
+              </DropdownMenuItem>
+              <DropdownMenuItem disabled={exportCanvas.isPending} onClick={() => exportCanvas.mutate({ format: 'tiff', dpi: 300 })}>
+                TIFF (300 dpi)
+              </DropdownMenuItem>
+              <DropdownMenuItem disabled={exportCanvas.isPending} onClick={() => exportCanvas.mutate({ format: 'tiff', dpi: 600 })}>
+                TIFF (600 dpi)
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -2568,8 +2866,9 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
         </div>
       </div>
 
-      {/* selected-panel toolbar */}
-      {selectedPanel && (
+      {/* selected-panel toolbar (mount deferred while a pointer gesture
+          is active — see pointerGestureActive) */}
+      {selectedPanel && !pointerGestureActive && (
         <div className="flex flex-wrap items-center gap-2 border-b bg-muted/40 px-4 py-1.5 text-sm">
           <span className="text-xs text-muted-foreground">
             Panel {selectedPanel.label || '—'} · {roundMm(selectedPanel.width_mm)}×{roundMm(selectedPanel.height_mm)} mm
@@ -2675,7 +2974,7 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
           selection (a mixed panel+annotation selection shows the minimal
           strip below instead — align/distribute don't have an obvious
           meaning once annotations are mixed in). */}
-      {selectedPanelIds.length >= 2 && selectedAnnotationIds.length === 0 && (
+      {selectedPanelIds.length >= 2 && selectedAnnotationIds.length === 0 && !pointerGestureActive && (
         <div className="flex flex-wrap items-center gap-2 border-b bg-muted/40 px-4 py-1.5 text-sm">
           <span className="text-xs text-muted-foreground">{selectedIds.length} panels selected</span>
           <div className="flex items-center gap-0.5">
@@ -2730,7 +3029,7 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
       {/* U8: mixed panel+annotation selection — a minimal strip (no
           align/distribute, no per-type property editing; the inspector on
           the right only opens for a PURE annotation selection). */}
-      {isMixedSelection && (
+      {isMixedSelection && !pointerGestureActive && (
         <div className="flex flex-wrap items-center gap-2 border-b bg-muted/40 px-4 py-1.5 text-sm">
           <span className="text-xs text-muted-foreground">
             {selectedIds.length} items selected ({selectedPanelIds.length} panel{selectedPanelIds.length === 1 ? '' : 's'}, {selectedAnnotationIds.length} annotation{selectedAnnotationIds.length === 1 ? '' : 's'})
@@ -2773,6 +3072,7 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
             onMouseDown={handleStageMouseDown}
             onMouseMove={handleStageMouseMove}
             onMouseUp={handleStageMouseUp}
+            onDragMove={handleStageDragMove}
             onDragEnd={handleStageDragEnd}
           >
             <Layer>
@@ -2793,6 +3093,38 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
                 // marquee never armed inside the sheet — the primary use case.
                 listening={false}
               />
+              {/* U9: grid overlay — editor-only chrome (the export is composed
+                  server-side and never sees this); two Shape nodes (not one
+                  per line) so a 100-line grid is one draw call per tier
+                  instead of ~100 React-reconciled Konva nodes on every pan/
+                  zoom frame. listening=false, so it never affects hit-testing
+                  (the marquee/panel-drag machinery is untouched either way). */}
+              {gridLines && (
+                <>
+                  <Shape
+                    listening={false}
+                    stroke="#e2e8f0"
+                    strokeWidth={1 / view.zoom}
+                    sceneFunc={(ctx, shape) => {
+                      ctx.beginPath();
+                      for (const x of gridLines.minorV) { ctx.moveTo(x, 0); ctx.lineTo(x, canvasHpx); }
+                      for (const y of gridLines.minorH) { ctx.moveTo(0, y); ctx.lineTo(canvasWpx, y); }
+                      ctx.strokeShape(shape);
+                    }}
+                  />
+                  <Shape
+                    listening={false}
+                    stroke="#cbd5e1"
+                    strokeWidth={1.25 / view.zoom}
+                    sceneFunc={(ctx, shape) => {
+                      ctx.beginPath();
+                      for (const x of gridLines.majorV) { ctx.moveTo(x, 0); ctx.lineTo(x, canvasHpx); }
+                      for (const y of gridLines.majorH) { ctx.moveTo(0, y); ctx.lineTo(canvasWpx, y); }
+                      ctx.strokeShape(shape);
+                    }}
+                  />
+                </>
+              )}
               {panels.map((panel) => (
                 <CanvasPanelNode
                   key={panel.id}
@@ -2916,6 +3248,14 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
             </Layer>
           </Stage>
         )}
+        {/* U9: mm rulers — always on, editor-only chrome (never composed into
+            the export), pointer-events:none so they never steal a drag from
+            the Stage. Rendered AFTER the Stage on purpose: they overlay via
+            absolute positioning + z-20 regardless of DOM order, and keeping
+            the Konva canvas as the document's FIRST <canvas> preserves the
+            qa-e2e suite's page.locator('canvas').first() convention (the
+            rulers are real <canvas> elements too). */}
+        <CanvasRulers viewport={viewport} view={view} pxPerMm={pxPerMm} />
         {panels.length === 0 && (
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
             <p className="rounded-md bg-background/80 px-4 py-2 text-sm text-muted-foreground shadow-sm">
@@ -2946,7 +3286,7 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
         )}
         </div>
 
-        {selectedPanel && (
+        {selectedPanel && !pointerGestureActive && (
           <CanvasColorEditor
             key={selectedPanel.id}
             panel={selectedPanel}
@@ -2956,7 +3296,7 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
             overlayRect={overlayRect}
           />
         )}
-        {isAnnotationOnlySelection && (
+        {isAnnotationOnlySelection && !pointerGestureActive && (
           <CanvasAnnotationInspector
             selected={selectedAnnotations}
             onDraft={draftAnnotationField}
