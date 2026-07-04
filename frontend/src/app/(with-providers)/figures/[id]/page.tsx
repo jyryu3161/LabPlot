@@ -23,6 +23,7 @@ import { FigureComments } from '@/components/figures/FigureComments';
 import { FigureAnnotationEditor } from '@/components/figures/FigureAnnotationEditor';
 import { FigureAxisBreakControl } from '@/components/figures/FigureAxisBreakControl';
 import { FigureSeriesStyleEditor } from '@/components/figures/FigureSeriesStyleEditor';
+import { FigureVersionCompare } from '@/components/figures/FigureVersionCompare';
 import { AppHeader } from '@/components/layout/AppHeader';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -32,7 +33,7 @@ import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Slider } from '@/components/ui/slider';
 import { Switch } from '@/components/ui/switch';
-import { Loader2, Star, Download, History, Pencil, FileText, Sparkles, Trash2, Copy, ArrowUp, ArrowDown, RefreshCw, Undo2, Redo2, Zap, CopyPlus } from 'lucide-react';
+import { Loader2, Star, Download, History, Pencil, FileText, Sparkles, Trash2, Copy, ArrowUp, ArrowDown, RefreshCw, Undo2, Redo2, Zap, CopyPlus, GitCompare, Search, X } from 'lucide-react';
 
 const SCORE_COLOR = (s: number) => (s >= 80 ? 'text-green-600' : s >= 60 ? 'text-amber-600' : 'text-red-600');
 const HEX_COLOR_RE = /^#[0-9A-Fa-f]{6}$/;
@@ -128,6 +129,24 @@ function mergeLevelOrder(order: string[], levels: string[]): string[] {
     if (!seen.has(level)) { merged.push(level); seen.add(level); }
   }
   return merged;
+}
+// Option search (U11): case-insensitive substring match against an option's
+// label or key, plus a small highlighter for the matched substring in labels.
+function optionSearchMatches(query: string, key: string, label: string): boolean {
+  if (!query) return true;
+  return label.toLowerCase().includes(query) || key.toLowerCase().includes(query);
+}
+function highlightOptionMatch(text: string, query: string): React.ReactNode {
+  if (!query) return text;
+  const idx = text.toLowerCase().indexOf(query);
+  if (idx === -1) return text;
+  return (
+    <>
+      {text.slice(0, idx)}
+      <mark className="rounded-sm bg-amber-200 px-0.5 text-inherit">{text.slice(idx, idx + query.length)}</mark>
+      {text.slice(idx + query.length)}
+    </>
+  );
 }
 function swapItems<T>(items: T[], index: number, direction: -1 | 1): T[] {
   const target = index + direction;
@@ -229,12 +248,18 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
   const [improvements, setImprovements] = useState<Improvement[] | null>(null);
   // Chips shown in AiFigureEditor for the most recent apply action (U10b/U10c).
   const [aiEditOutcome, setAiEditOutcome] = useState<AiEditOutcome | null>(null);
+  // Version compare slider (U11) - the dialog itself is keyed by figure id so
+  // its base/compare selections and divider reset when the figure changes.
+  const [compareOpen, setCompareOpen] = useState(false);
 
   // edit panel
   const [plotType, setPlotType] = useState<string | null>(null);
   const [mapping, setMapping] = useState<Record<string, unknown> | null>(null);
   const [options, setOptions] = useState<Record<string, unknown> | null>(null);
   const [style, setStyle] = useState<string | null>(null);
+  // Option search (U11) - filters editablePlotOptions + the hardcoded extra
+  // controls directly below them; see the render-time filtering below.
+  const [optionSearch, setOptionSearch] = useState('');
   const [description, setDescription] = useState<string | null>(null);
   const [legend, setLegend] = useState<string | null>(null);
   const [improvePrompt, setImprovePrompt] = useState('');
@@ -266,6 +291,15 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
   const columns: ColumnProfile[] = dataset?.column_profile ?? [];
   const effectiveSelectedVid = selectedVid ?? fig?.current_version_id ?? fig?.versions[fig.versions.length - 1]?.id ?? null;
   const version: FigureVersion | undefined = fig?.versions.find((v) => v.id === effectiveSelectedVid);
+  // Version compare (U11) defaults: Compare = the version currently open;
+  // Base = the version right before it (falls back to any other version if
+  // the current one is the oldest, or is not found).
+  const compareVersionsList = fig?.versions ?? [];
+  const compareDefaultCompareId = effectiveSelectedVid;
+  const compareCurrentIndex = compareVersionsList.findIndex((v) => v.id === effectiveSelectedVid);
+  const compareDefaultBaseId = compareCurrentIndex > 0
+    ? compareVersionsList[compareCurrentIndex - 1].id
+    : (compareVersionsList.find((v) => v.id !== effectiveSelectedVid)?.id ?? effectiveSelectedVid);
   const effectivePlotType = plotType ?? fig?.plot_type ?? '';
   const effectiveStyle = style ?? fig?.style_preset ?? '';
   const effectiveMapping = mapping ?? version?.mapping ?? {};
@@ -277,6 +311,21 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
   const legendValue = legend ?? fig?.legend ?? '';
   const currentDef: PlotTypeDef | undefined = plotTypes.find((p) => p.type === effectivePlotType);
   const editablePlotOptions = (currentDef?.options ?? []).filter((option) => !GENERIC_OPTION_EXCLUDE.has(option.key));
+  // Option search (U11) scope: the generic per-type option rows above, plus
+  // the three hardcoded "extra" rows rendered directly below them (error
+  // bars, secondary-Y column/label). Mapping REQUIRED/OPTIONAL fields and the
+  // large "universal" appearance block further down stay always-visible -
+  // there are few of the former, and the latter is a set of distinct
+  // composite editors (palette, annotations, facets, ...) rather than simple
+  // label/input rows, so filtering them row-by-row is out of scope here.
+  const optionSearchQuery = optionSearch.trim().toLowerCase();
+  const filteredPlotOptions = editablePlotOptions.filter((o) => optionSearchMatches(optionSearchQuery, o.key, o.label));
+  const errorTypeRowApplicable = effectivePlotType === 'bar' && !editablePlotOptions.some((o) => o.key === 'error_type');
+  const showErrorTypeRow = errorTypeRowApplicable && optionSearchMatches(optionSearchQuery, 'error_type', 'Error bars');
+  const y2RowsApplicable = (effectivePlotType === 'line' || effectivePlotType === 'scatter') && !editablePlotOptions.some((o) => o.key === 'y2_column');
+  const showY2ColumnRow = y2RowsApplicable && optionSearchMatches(optionSearchQuery, 'y2_column', 'Secondary Y column');
+  const showY2LabelRow = y2RowsApplicable && optionSearchMatches(optionSearchQuery, 'y2_label', 'Secondary Y label');
+  const noOptionSearchMatches = Boolean(optionSearchQuery) && filteredPlotOptions.length === 0 && !showErrorTypeRow && !showY2ColumnRow && !showY2LabelRow;
   const continuousFill = isContinuousFill(effectivePlotType);
   const categoryColors = normalizedCategoryColors(effectiveOptions.category_colors);
   const categoryColorColumnName = categoryColorColumn(effectivePlotType, effectiveMapping, effectiveOptions);
@@ -668,7 +717,9 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
   }
 
   // Ctrl/Cmd+Z / Ctrl/Cmd+Shift+Z — scoped so it never steals undo from an
-  // active text field (inputs, textareas, selects, contentEditable).
+  // active text field (inputs, textareas, selects, contentEditable), or from
+  // inside an open modal dialog (e.g. the version-compare slider), where the
+  // edit panel is hidden and an undo would be silent and invisible.
   useEffect(() => {
     if (!canEditFigure) return;
     const handler = (e: KeyboardEvent) => {
@@ -676,6 +727,7 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
       const el = document.activeElement as HTMLElement | null;
       const tag = el?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el?.isContentEditable) return;
+      if (el?.closest('[role="dialog"]')) return;
       e.preventDefault();
       if (e.shiftKey) redo(); else undo();
     };
@@ -1195,10 +1247,39 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
                       </div>
                     ))}
 
+                    {/* option search (U11) - filters the plot-specific option rows just below */}
+                    <div className="space-y-1">
+                      <Label htmlFor="option-search" className="text-xs">Search options</Label>
+                      <div className="relative">
+                        <Search className="pointer-events-none absolute top-1/2 left-2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                        <Input
+                          id="option-search"
+                          type="search"
+                          aria-label="Search options"
+                          placeholder="Search options…"
+                          value={optionSearch}
+                          onChange={(e) => setOptionSearch(e.target.value)}
+                          className="h-8 pr-7 pl-7 text-sm"
+                        />
+                        {optionSearch && (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon-xs"
+                            aria-label="Clear option search"
+                            className="absolute top-1/2 right-1 -translate-y-1/2"
+                            onClick={() => setOptionSearch('')}
+                          >
+                            <X className="h-3.5 w-3.5" />
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+
                     {/* plot-specific options */}
-                    {editablePlotOptions.map((o) => (
+                    {filteredPlotOptions.map((o) => (
                       <div key={o.key} className="space-y-1">
-                        <Label className="text-xs">{o.label}</Label>
+                        <Label className="text-xs">{highlightOptionMatch(o.label, optionSearchQuery)}</Label>
                         {o.type === 'bool' ? (
                           <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={Boolean(effectiveOptions[o.key])} onChange={(e) => setOptions({ ...effectiveOptions, [o.key]: e.target.checked })} /> enabled</label>
                         ) : o.type === 'select' ? (
@@ -1210,9 +1291,9 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
                     ))}
 
                     {/* error-bar statistic (bar charts only) */}
-                    {effectivePlotType === 'bar' && !editablePlotOptions.some((o) => o.key === 'error_type') && (
+                    {showErrorTypeRow && (
                       <div className="space-y-1">
-                        <Label htmlFor="error-type" className="text-xs">Error bars</Label>
+                        <Label htmlFor="error-type" className="text-xs">{highlightOptionMatch('Error bars', optionSearchQuery)}</Label>
                         <select id="error-type" className="w-full rounded-md border px-2 py-1.5 text-sm" value={String(effectiveOptions.error_type ?? 'sd')} onChange={(e) => setOptions({ ...effectiveOptions, error_type: e.target.value })}>
                           {ERROR_TYPE_OPTIONS.map((opt) => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
                         </select>
@@ -1220,20 +1301,34 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
                     )}
 
                     {/* secondary Y axis (line & scatter only) */}
-                    {(effectivePlotType === 'line' || effectivePlotType === 'scatter') && !editablePlotOptions.some((o) => o.key === 'y2_column') && (
+                    {y2RowsApplicable && (
                       <>
-                        <div className="space-y-1">
-                          <Label htmlFor="y2-column" className="text-xs">Secondary Y column</Label>
-                          <select id="y2-column" className="w-full rounded-md border px-2 py-1.5 text-sm" value={String(effectiveOptions.y2_column ?? '')} onChange={(e) => setOptions(setStringOption(effectiveOptions, 'y2_column', e.target.value))}>
-                            <option value="">None</option>
-                            {columns.map((c) => <option key={c.name} value={c.name}>{c.name} ({c.role})</option>)}
-                          </select>
-                        </div>
-                        <div className="space-y-1">
-                          <Label htmlFor="y2-label" className="text-xs">Secondary Y label</Label>
-                          <Input id="y2-label" className="text-sm" maxLength={120} value={String(effectiveOptions.y2_label ?? '')} onChange={(e) => setOptions(setStringOption(effectiveOptions, 'y2_label', e.target.value))} placeholder="Right axis label" />
-                        </div>
+                        {showY2ColumnRow && (
+                          <div className="space-y-1">
+                            <Label htmlFor="y2-column" className="text-xs">{highlightOptionMatch('Secondary Y column', optionSearchQuery)}</Label>
+                            <select id="y2-column" className="w-full rounded-md border px-2 py-1.5 text-sm" value={String(effectiveOptions.y2_column ?? '')} onChange={(e) => setOptions(setStringOption(effectiveOptions, 'y2_column', e.target.value))}>
+                              <option value="">None</option>
+                              {columns.map((c) => <option key={c.name} value={c.name}>{c.name} ({c.role})</option>)}
+                            </select>
+                          </div>
+                        )}
+                        {showY2LabelRow && (
+                          <div className="space-y-1">
+                            <Label htmlFor="y2-label" className="text-xs">{highlightOptionMatch('Secondary Y label', optionSearchQuery)}</Label>
+                            <Input id="y2-label" className="text-sm" maxLength={120} value={String(effectiveOptions.y2_label ?? '')} onChange={(e) => setOptions(setStringOption(effectiveOptions, 'y2_label', e.target.value))} placeholder="Right axis label" />
+                          </div>
+                        )}
                       </>
+                    )}
+
+                    {noOptionSearchMatches && (
+                      // Honest about scope: only the plot-specific list above is
+                      // filtered — a user searching "DPI"/"palette" would otherwise
+                      // read this as "the option doesn't exist" while the control
+                      // sits unfiltered in the appearance section below.
+                      <p className="rounded-md border border-dashed p-3 text-center text-xs text-muted-foreground">
+                        No plot-specific options match &ldquo;{optionSearch.trim()}&rdquo;. Appearance controls below are not filtered.
+                      </p>
                     )}
 
                     {/* universal label/axis/appearance controls */}
@@ -1575,7 +1670,21 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
 
             {/* versions */}
             <Card>
-              <CardHeader className="pb-2"><CardTitle className="flex items-center gap-2 text-base"><History className="h-4 w-4" /> Versions ({fig.versions.length})</CardTitle></CardHeader>
+              <CardHeader className="pb-2">
+                <div className="flex items-center justify-between gap-2">
+                  <CardTitle className="flex items-center gap-2 text-base"><History className="h-4 w-4" /> Versions ({fig.versions.length})</CardTitle>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    aria-label="Compare versions"
+                    disabled={fig.versions.length < 2}
+                    onClick={() => setCompareOpen(true)}
+                  >
+                    <GitCompare className="mr-1 h-3.5 w-3.5" /> Compare
+                  </Button>
+                </div>
+              </CardHeader>
               <CardContent className="space-y-1">
                 {fig.versions.slice().reverse().map((v) => (
                   <div key={v.id}
@@ -1605,6 +1714,17 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
                 ))}
               </CardContent>
             </Card>
+            {/* Version compare slider (U11). Keyed by figure id so its
+                base/compare selections and divider reset when the figure
+                changes, matching the key={version?.id} pattern used above. */}
+            <FigureVersionCompare
+              key={id}
+              open={compareOpen}
+              onOpenChange={setCompareOpen}
+              versions={fig.versions}
+              defaultBaseId={compareDefaultBaseId}
+              defaultCompareId={compareDefaultCompareId}
+            />
 
             {/* AI review */}
             <Card>
