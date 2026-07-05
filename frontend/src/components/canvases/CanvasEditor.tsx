@@ -3054,6 +3054,19 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
         </div>
       )}
 
+      {/* Pinned top controls: reserve the toolbar strip's height (measured
+          37px) whenever no contextual toolbar is showing — nothing selected,
+          an annotation-only selection (its controls live in the right
+          inspector), or mid-gesture (the three toolbars above keep their U9
+          pointerGestureActive guard so they don't shift vertical space during
+          a drag). Without this, selecting/deselecting collapsed the strip and
+          shifted everything below it; now the layout below is constant. */}
+      {!(!pointerGestureActive && (Boolean(selectedPanel) || (selectedPanelIds.length >= 2 && selectedAnnotationIds.length === 0) || isMixedSelection)) && (
+        <div className="flex min-h-[37px] flex-wrap items-center gap-2 border-b bg-muted/40 px-4 py-1.5 text-xs text-muted-foreground">
+          Select a panel or object on the canvas to edit it here.
+        </div>
+      )}
+
       {/* one-time gesture hints (empty canvases are guided by the empty state) */}
       <CanvasHintsBar show={panels.length > 0} />
 
