@@ -20,6 +20,7 @@ import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import {
   DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem,
+  DropdownMenuCheckboxItem, DropdownMenuSeparator,
 } from '@/components/ui/dropdown-menu';
 import {
   Loader2, Plus, Trash2, ArrowUp, ArrowDown, Maximize2, ZoomIn, ZoomOut, Lock, Unlock, Tag, Pencil, Check,
@@ -2895,17 +2896,6 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
             Duplicate
           </Button>
           <CanvasHelpPopover />
-          <Button
-            type="button"
-            size="icon-sm"
-            variant={cropExport ? 'default' : 'outline'}
-            aria-label="Trim margins on export"
-            aria-pressed={cropExport}
-            title="Trim margins: export cropped to the content (removes the surrounding sheet whitespace)"
-            onClick={() => setCropExport((v) => !v)}
-          >
-            <Crop className="h-4 w-4" />
-          </Button>
           <DropdownMenu>
             <DropdownMenuTrigger
               render={
@@ -2922,6 +2912,15 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
               Export{cropExport ? ' ✂' : ''}
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
+              <DropdownMenuCheckboxItem
+                checked={cropExport}
+                closeOnClick={false}
+                onCheckedChange={(v) => setCropExport(Boolean(v))}
+                title="Export only the graphs — removes the surrounding A4 sheet and its margins (applies to every format below)"
+              >
+                <Crop className="h-4 w-4" /> Trim to content (no sheet margins)
+              </DropdownMenuCheckboxItem>
+              <DropdownMenuSeparator />
               <DropdownMenuItem disabled={exportCanvas.isPending} onClick={() => exportCanvas.mutate({ format: 'svg', crop: cropExport })}>
                 SVG (vector)
               </DropdownMenuItem>

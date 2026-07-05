@@ -1375,13 +1375,16 @@ def _build_pptx_bytes(db: Session, owner_id: uuid.UUID, canvas: Canvas, crop: bo
     prs.slide_height = Mm(slide_h)
     slide = prs.slides.add_slide(prs.slide_layouts[6])  # blank layout
 
+    # White page fill via the SLIDE BACKGROUND (a slide-level property), NOT a
+    # shape. A background rectangle is selectable/clickable in PowerPoint, so it
+    # gets in the way when the user just wants to grab a figure — only the
+    # figures/annotations should be objects. slide.background writes <p:bg> into
+    # the slide XML and is not part of the shape tree (verified: shape_count 0).
     if canvas.background != "transparent":
         try:
-            bg = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Mm(0), Mm(0), Mm(slide_w), Mm(slide_h))
-            bg.fill.solid()
-            bg.fill.fore_color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
-            bg.line.fill.background()
-            bg.shadow.inherit = False
+            fill = slide.background.fill
+            fill.solid()
+            fill.fore_color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
         except Exception:  # noqa: BLE001 - background is decorative, never fail the export
             pass
 
