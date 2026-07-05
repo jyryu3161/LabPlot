@@ -21,6 +21,15 @@ import { CanvasAxisPopover } from './CanvasAxisPopover';
 
 const HEX_RE = /^#[0-9A-Fa-f]{6}$/;
 
+// Absolute font sizes (pt) offered in the Edit panel — matches the backend
+// base_size clamp (5–14, resolve_base_size).
+const FONT_SIZE_CHOICES = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14];
+// Line-width multipliers offered in the Edit panel. 1 == the figure's default
+// linewidth; the backend clamps linewidth_scale to [0.25, 4].
+const LINE_WIDTH_CHOICES: [number, string][] = [
+  [0.5, 'Thin'], [0.75, 'Light'], [1, 'Normal'], [1.5, 'Medium'], [2, 'Thick'], [3, 'Extra'],
+];
+
 // Preview key: a re-render is only needed when figure / effective version / physical
 // size changes — the same inputs as the M2 panel image cache. After a color commit,
 // the panel's effective_version_id changes → this refetches the committed render.
@@ -74,12 +83,18 @@ export function CanvasColorEditor({
   canvasName,
   containerEl,
   overlayRect,
+  gestureActive = false,
 }: {
   panel: CanvasPanel;
   canvasId: string;
   canvasName: string;
   containerEl: HTMLElement | null;
   overlayRect: { left: number; top: number; width: number; height: number } | null;
+  /** True while a panel drag/resize gesture is in flight. The positioned SVG
+   * overlay is pinned to the panel's COMMITTED rect, so during a gesture it
+   * would freeze at the origin (the "ghost"); we hide it via CSS (keeping it
+   * mounted so the inlined SVG survives) until the gesture commits. */
+  gestureActive?: boolean;
 }) {
   const qc = useQueryClient();
   const [edits, setEdits] = useState<Record<string, string>>({});
@@ -192,7 +207,7 @@ export function CanvasColorEditor({
   const commitText = useMutation({
     // patch values: string sets the option; null UNSETS it (restores the
     // rendered default — '' would explicitly blank a label backend-side).
-    mutationFn: async (vars: { patch: Record<string, string | number | boolean | null>; note: string; revert?: Record<string, string | number | boolean | null>; kind?: 'text' | 'axis' }) => {
+    mutationFn: async (vars: { patch: Record<string, string | number | boolean | null>; note: string; revert?: Record<string, string | number | boolean | null>; kind?: 'text' | 'axis' | 'font' | 'line' }) => {
       const fig = await getFigure(panel.figure_id);
       // Merge base = the version our edits are relative to (the conflict-guard
       // ref, which advances after every commit here). Using the panel prop's
@@ -220,7 +235,10 @@ export function CanvasColorEditor({
       setAxisEdit(null);
       qc.invalidateQueries({ queryKey: ['canvas', canvasId] });
       qc.invalidateQueries({ queryKey: ['figure', panel.figure_id] });
-      const kindLabel = vars.kind === 'axis' ? 'Axis' : 'Text';
+      const kindLabel = vars.kind === 'axis' ? 'Axis'
+        : vars.kind === 'font' ? 'Font size'
+        : vars.kind === 'line' ? 'Line width'
+        : 'Text';
       if (vars.revert) {
         const revert = vars.revert;
         toast.success(`${kindLabel} updated`, {
@@ -396,6 +414,11 @@ export function CanvasColorEditor({
               width: overlayRect.width,
               height: overlayRect.height,
               cursor: canEdit ? 'crosshair' : undefined,
+              // Ghost fix: hide (don't unmount — keeps the inlined SVG) while a
+              // drag/resize gesture is live, since overlayRect is still the
+              // pre-gesture position. visibility:hidden also makes it
+              // non-interactive so it can't steal the in-flight Konva drag.
+              visibility: gestureActive ? 'hidden' : undefined,
             }}
             onClick={canEdit ? handleOverlayClick : undefined}
             role="presentation"
@@ -557,6 +580,12 @@ export function CanvasColorEditor({
     || textDrafts.y_label.trim() !== optionText('y_label').trim()
   );
 
+  // Global figure options edited via the same rerender/commit path as Text.
+  // null = unset (figure default). base_size is absolute pt; linewidth_scale
+  // multiplies every geom's line thickness.
+  const currentBaseSize = typeof effOptions.base_size === 'number' ? effOptions.base_size : null;
+  const currentLineWidth = typeof effOptions.linewidth_scale === 'number' ? effOptions.linewidth_scale : null;
+
   return (
     <div className="flex w-64 shrink-0 flex-col gap-3 overflow-y-auto border-l bg-background p-3 text-sm">
       <div className="flex items-center justify-between">
@@ -622,6 +651,55 @@ export function CanvasColorEditor({
           )}
         </div>
       )}
+
+      {/* ── font size + line width (all plot types; commits a new version) ── */}
+      <div className="flex flex-col gap-1.5">
+        <span className="text-xs font-medium text-muted-foreground">Type &amp; lines</span>
+        <span className="flex items-center gap-1.5">
+          <Label htmlFor="panel-font-size" className="w-16 shrink-0 text-[11px] text-muted-foreground">Font size</Label>
+          <select
+            id="panel-font-size"
+            className="h-7 flex-1 rounded border bg-background px-1.5 text-xs disabled:opacity-60"
+            disabled={commitText.isPending || loading}
+            value={currentBaseSize ?? ''}
+            onChange={(e) => {
+              const next = e.target.value === '' ? null : Number(e.target.value);
+              if (next === currentBaseSize) return;
+              commitText.mutate({
+                patch: { base_size: next },
+                note: `Canvas '${canvasName}': font size ${next ?? 'default'}`,
+                revert: { base_size: currentBaseSize },
+                kind: 'font',
+              });
+            }}
+          >
+            <option value="">Default</option>
+            {FONT_SIZE_CHOICES.map((n) => <option key={n} value={n}>{n} pt</option>)}
+          </select>
+        </span>
+        <span className="flex items-center gap-1.5">
+          <Label htmlFor="panel-line-width" className="w-16 shrink-0 text-[11px] text-muted-foreground">Line width</Label>
+          <select
+            id="panel-line-width"
+            className="h-7 flex-1 rounded border bg-background px-1.5 text-xs disabled:opacity-60"
+            disabled={commitText.isPending || loading}
+            value={currentLineWidth ?? ''}
+            onChange={(e) => {
+              const next = e.target.value === '' ? null : Number(e.target.value);
+              if (next === currentLineWidth) return;
+              commitText.mutate({
+                patch: { linewidth_scale: next },
+                note: `Canvas '${canvasName}': line width ${next ?? 'default'}`,
+                revert: { linewidth_scale: currentLineWidth },
+                kind: 'line',
+              });
+            }}
+          >
+            <option value="">Default</option>
+            {LINE_WIDTH_CHOICES.map(([v, label]) => <option key={v} value={v}>{label} (×{v})</option>)}
+          </select>
+        </span>
+      </div>
 
       <div className="flex items-center justify-between">
         <span className="text-xs font-medium text-muted-foreground">Colors</span>

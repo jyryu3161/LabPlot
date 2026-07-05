@@ -624,11 +624,15 @@ export async function renderCanvasPreview(req: {
 
 // U9: png/tiff add a `dpi` (300|600, default 300 server-side) alongside the
 // existing vector svg/pdf formats — same endpoint, same request shape.
-export async function exportCanvasFile(id: string, format: 'svg' | 'pdf' | 'png' | 'tiff', dpi?: 300 | 600): Promise<import('./types').CanvasExportResult> {
-  return fetcher(`/api/canvases/${id}/export`, { method: 'POST', body: JSON.stringify(dpi != null ? { format, dpi } : { format }) });
+export type CanvasExportFormat = 'svg' | 'pdf' | 'png' | 'tiff' | 'pptx';
+export async function exportCanvasFile(id: string, format: CanvasExportFormat, dpi?: 300 | 600, crop?: boolean): Promise<import('./types').CanvasExportResult> {
+  const body: Record<string, unknown> = { format };
+  if (dpi != null) body.dpi = dpi;
+  if (crop) body.crop = true;
+  return fetcher(`/api/canvases/${id}/export`, { method: 'POST', body: JSON.stringify(body) });
 }
-export async function downloadCanvasExport(id: string, format: 'svg' | 'pdf' | 'png' | 'tiff', filename: string, dpi?: 300 | 600): Promise<void> {
-  const { url } = await exportCanvasFile(id, format, dpi);
+export async function downloadCanvasExport(id: string, format: CanvasExportFormat, filename: string, dpi?: 300 | 600, crop?: boolean): Promise<void> {
+  const { url } = await exportCanvasFile(id, format, dpi, crop);
   const headers: Record<string, string> = {};
   const token = getAccessToken();
   if (token) headers['Authorization'] = `Bearer ${token}`;

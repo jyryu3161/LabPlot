@@ -2551,6 +2551,10 @@ def _sanitize_option(key: str, value: Any, valid_columns: set[str] | None = None
         if key == "base_size":
             # Absolute font size in points: integer, clamped to a sane range.
             return int(max(5, min(14, round(num))))
+        if key == "linewidth_scale":
+            # Global line-thickness multiplier (×default). Clamped so it can
+            # never zero out lines or blow them up. 1.0 == the figure default.
+            return max(0.25, min(4.0, num))
         if key == "bar_alpha":
             return max(0.15, min(1.0, num))
         if key in {"fill_alpha", "point_alpha"}:

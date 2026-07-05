@@ -11,6 +11,7 @@ import { Stage, Layer, Rect, Group, Image as KonvaImage, Text, Transformer, Line
 import {
   getCanvas, updateCanvas, addCanvasPanel, updateCanvasPanel, deleteCanvasPanel, renderCanvasPreview,
   downloadCanvasExport, duplicateFigure, duplicateCanvas, listProjects, ApiError,
+  type CanvasExportFormat,
 } from '@/lib/api';
 import type { CanvasDetail, CanvasPanel, CanvasAnnotation, FigureListItem } from '@/lib/types';
 import { Button } from '@/components/ui/button';
@@ -22,13 +23,13 @@ import {
 } from '@/components/ui/dropdown-menu';
 import {
   Loader2, Plus, Trash2, ArrowUp, ArrowDown, Maximize2, ZoomIn, ZoomOut, Lock, Unlock, Tag, Pencil, Check,
-  Download, Undo2, Redo2, ExternalLink, FlaskConical, CopyPlus, Grid3x3, Magnet,
+  Download, Undo2, Redo2, ExternalLink, FlaskConical, CopyPlus, Grid3x3, Magnet, Ruler, ClipboardPaste, Crop,
   AlignStartVertical, AlignCenterVertical, AlignEndVertical,
   AlignStartHorizontal, AlignCenterHorizontal, AlignEndHorizontal,
   AlignHorizontalDistributeCenter, AlignVerticalDistributeCenter,
 } from 'lucide-react';
 import {
-  mmToPx, pxToMm, roundMm, fitPxPerMm, clampCanvasMm, clampPanelMm, PANEL_MM_MIN,
+  mmToPx, pxToMm, roundMm, fitPxPerMm, clampCanvasMm, clampPanelMm, PANEL_MM_MIN, CANVAS_MM_MAX,
 } from './mm';
 import { CanvasHistory, type PanelFields, type PanelSnapshot, type CanvasSize } from './canvasHistory';
 import { FigurePickerDialog } from './FigurePickerDialog';
@@ -310,6 +311,11 @@ function CanvasPanelNode({
 // ── editor ──────────────────────────────────────────────────────────────────
 const SNAP_PX = 6; // screen-space snap threshold
 const EPS_MM = 0.05; // ignore sub-tenth-mm drift (pure-click dragend, no-op transforms)
+// Off-sheet placement envelope for panel top-left (mm). MUST match the backend
+// clamp in canvases/service.py (add_panel/update_panel) so a position never
+// snaps differently server-side.
+const OFF_SHEET_MIN_MM = -CANVAS_MM_MAX; // -500
+const OFF_SHEET_MAX_MM = 2 * CANVAS_MM_MAX; // 1000
 
 function snapshotOf(panel: CanvasPanel): PanelSnapshot {
   return {
@@ -460,6 +466,13 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   // Aspect-locked resize by default: a free-form resize re-layouts the figure
   // at a different aspect than its native render, which reads as "distorted".
   const [lockAspect, setLockAspect] = useState(true);
+  // Size clipboard: "Copy size" stashes one panel's mm dimensions so they can be
+  // pasted exactly onto other panels (drag-resizing to an identical size is
+  // imprecise). Session-only (a ref-like clipboard); position is never copied.
+  const [sizeClip, setSizeClip] = useState<{ width_mm: number; height_mm: number } | null>(null);
+  // Export "trim margins": when on, every export crops to the content bbox
+  // (removes the surrounding A4 whitespace). Threaded into every export call.
+  const [cropExport, setCropExport] = useState(false);
   // U9: grid visibility + grid-snap, each independently toggleable and
   // persisted — this component is only ever mounted client-side (dynamic
   // import with ssr:false, see canvases/[id]/page.tsx), so reading
@@ -1283,12 +1296,12 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   // ── export: compose the canvas into a file (vector SVG/PDF, or raster
   // PNG/TIFF at 300|600 dpi) and download it. ──
   const exportCanvas = useMutation({
-    mutationFn: ({ format, dpi }: { format: 'svg' | 'pdf' | 'png' | 'tiff'; dpi?: 300 | 600 }) => {
+    mutationFn: ({ format, dpi, crop }: { format: CanvasExportFormat; dpi?: 300 | 600; crop?: boolean }) => {
       const base = (canvas?.name?.trim() || 'canvas').replace(/[/\\:*?"<>|]+/g, '_');
-      const suffix = dpi ? `_${dpi}dpi` : '';
-      return downloadCanvasExport(canvasId, format, `${base}${suffix}.${format}`, dpi);
+      const suffix = `${dpi ? `_${dpi}dpi` : ''}${crop ? '_trim' : ''}`;
+      return downloadCanvasExport(canvasId, format, `${base}${suffix}.${format}`, dpi, crop);
     },
-    onSuccess: (_res, vars) => toast.success(`Canvas exported as ${vars.format.toUpperCase()}${vars.dpi ? ` (${vars.dpi} dpi)` : ''}`),
+    onSuccess: (_res, vars) => toast.success(`Canvas exported as ${vars.format.toUpperCase()}${vars.dpi ? ` (${vars.dpi} dpi)` : ''}${vars.crop ? ' — trimmed' : ''}`),
     onError: () => toast.error('Could not export canvas'),
   });
 
@@ -1726,6 +1739,41 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     commitAnnotations((cur) => cur.map((a) => (a.id === ann.id ? updated : a)), 'resize');
   }
 
+  // ── size clipboard (copy/paste exact dimensions) ──
+  function copyPanelSize(p: CanvasPanel) {
+    const size = { width_mm: roundMm(clampPanelMm(p.width_mm)), height_mm: roundMm(clampPanelMm(p.height_mm)) };
+    setSizeClip(size);
+    toast.success(`Copied size ${size.width_mm}×${size.height_mm} mm`);
+  }
+  function pasteSizeToSelected() {
+    if (!sizeClip) return;
+    const w = roundMm(clampPanelMm(sizeClip.width_mm));
+    const h = roundMm(clampPanelMm(sizeClip.height_mm));
+    // Apply only to selected panels whose size actually differs (a no-op paste
+    // must not burn a history entry or re-render an already-matching panel).
+    const targets = panels.filter((p) => selectedPanelIds.includes(p.id)
+      && (Math.abs(p.width_mm - w) >= EPS_MM || Math.abs(p.height_mm - h) >= EPS_MM));
+    if (targets.length === 0) return;
+    if (targets.length === 1) {
+      const p = targets[0];
+      patchPanel.mutate({
+        panelId: p.id,
+        data: { width_mm: w, height_mm: h }, // position unchanged (off-sheet stays)
+        history: { before: { width_mm: p.width_mm, height_mm: p.height_mm }, label: 'paste size' },
+      });
+    } else {
+      void commitPanelsBatch(
+        targets.map((p) => ({
+          panelId: p.id,
+          before: { width_mm: p.width_mm, height_mm: p.height_mm },
+          after: { width_mm: w, height_mm: h },
+        })),
+        'paste size',
+      );
+    }
+    toast.success(`Applied size to ${targets.length} panel${targets.length === 1 ? '' : 's'}`);
+  }
+
   // ── z-order ──
   function bringForward(panel: CanvasPanel) {
     const maxZ = Math.max(0, ...panels.map((p) => p.z_order));
@@ -1906,10 +1954,22 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     s = Math.max(s, PANEL_MM_MIN / nw, PANEL_MM_MIN / nh);
     return { width_mm: roundMm(nw * s), height_mm: roundMm(nh * s) };
   }
-  // Position clamp: keep the panel's top-left inside [0, canvas − panel] on
-  // each axis. NOT clampCanvasMm — that is a SIZE clamp whose 20mm floor would
-  // shove near-canvas-width panels off the sheet.
-  function clampPosMm(pos: number, panelMm: number, canvasMm: number): number {
+  // Deliberate placement (drag / resize / group-move / align / distribute /
+  // nudge) may leave a panel OFF the A4 sheet: users park a figure beside the
+  // sheet and pull it back later. The clamp is now a generous FIXED envelope
+  // [-500, 1000]mm that the backend mirrors EXACTLY (service.py add/update
+  // panel), so a dragged position never snaps differently on the server. It
+  // still bounds the position so a panel can't be flung unrecoverably far — an
+  // off-sheet panel stays reachable by zooming out / panning. (panelMm/canvasMm
+  // are unused now but kept so the many call sites need no signature churn.)
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  function clampPosMm(pos: number, _panelMm: number, _canvasMm: number): number {
+    return roundMm(clampNum(pos, OFF_SHEET_MIN_MM, OFF_SHEET_MAX_MM));
+  }
+  // The on-sheet clamp (old clampPosMm behaviour) — used only where we WANT to
+  // keep a panel fully on the sheet: initial auto-placement of a new panel and
+  // the "Original size" pull-back convenience button.
+  function clampOnSheetMm(pos: number, panelMm: number, canvasMm: number): number {
     return roundMm(Math.max(0, Math.min(pos, canvasMm - panelMm)));
   }
   async function handlePick(fig: FigureListItem, opts: { copy: boolean }) {
@@ -1936,8 +1996,8 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
       : { width_mm: 60, height_mm: 45 };
     const n = panels.length;
     // Stagger new panels so they don't stack exactly, kept inside the canvas.
-    const x_mm = clampPosMm(10 + (n % 4) * 8, width_mm, canvas.width_mm);
-    const y_mm = clampPosMm(10 + (n % 4) * 8, height_mm, canvas.height_mm);
+    const x_mm = clampOnSheetMm(10 + (n % 4) * 8, width_mm, canvas.width_mm);
+    const y_mm = clampOnSheetMm(10 + (n % 4) * 8, height_mm, canvas.height_mm);
     addPanel.mutate({
       data: {
         figure_id: figureId,
@@ -2557,6 +2617,10 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   // U7 8: (re)arm the group-resize batch counter at the start of every
   // transform gesture — see the accumulation logic in handleTransformEnd.
   function handleTransformStart() {
+    // Same ghost class as drag: a resize also leaves overlayRect on the
+    // pre-resize box until transformend. Mark the gesture so the Edit-panel
+    // overlay hides for its duration (the window mouseup listener clears it).
+    setPointerGestureActive(true);
     void flushNudge();
     flushAnnotationEdit();
     // U8: the real "last one in" threshold is the ELIGIBLE count — line/arrow
@@ -2831,6 +2895,17 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
             Duplicate
           </Button>
           <CanvasHelpPopover />
+          <Button
+            type="button"
+            size="icon-sm"
+            variant={cropExport ? 'default' : 'outline'}
+            aria-label="Trim margins on export"
+            aria-pressed={cropExport}
+            title="Trim margins: export cropped to the content (removes the surrounding sheet whitespace)"
+            onClick={() => setCropExport((v) => !v)}
+          >
+            <Crop className="h-4 w-4" />
+          </Button>
           <DropdownMenu>
             <DropdownMenuTrigger
               render={
@@ -2839,30 +2914,33 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
                   size="sm"
                   variant="outline"
                   disabled={panels.length === 0 || exportCanvas.isPending}
-                  title={panels.length === 0 ? 'Add a panel before exporting' : 'Export the composed canvas'}
+                  title={panels.length === 0 ? 'Add a panel before exporting' : `Export the composed canvas${cropExport ? ' (trimmed to content)' : ''}`}
                 />
               }
             >
               {exportCanvas.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-              Export
+              Export{cropExport ? ' ✂' : ''}
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
-              <DropdownMenuItem disabled={exportCanvas.isPending} onClick={() => exportCanvas.mutate({ format: 'svg' })}>
+              <DropdownMenuItem disabled={exportCanvas.isPending} onClick={() => exportCanvas.mutate({ format: 'svg', crop: cropExport })}>
                 SVG (vector)
               </DropdownMenuItem>
-              <DropdownMenuItem disabled={exportCanvas.isPending} onClick={() => exportCanvas.mutate({ format: 'pdf' })}>
+              <DropdownMenuItem disabled={exportCanvas.isPending} onClick={() => exportCanvas.mutate({ format: 'pdf', crop: cropExport })}>
                 PDF (vector)
               </DropdownMenuItem>
-              <DropdownMenuItem disabled={exportCanvas.isPending} onClick={() => exportCanvas.mutate({ format: 'png', dpi: 300 })}>
+              <DropdownMenuItem disabled={exportCanvas.isPending} onClick={() => exportCanvas.mutate({ format: 'pptx', crop: cropExport })}>
+                PowerPoint (.pptx)
+              </DropdownMenuItem>
+              <DropdownMenuItem disabled={exportCanvas.isPending} onClick={() => exportCanvas.mutate({ format: 'png', dpi: 300, crop: cropExport })}>
                 PNG (300 dpi)
               </DropdownMenuItem>
-              <DropdownMenuItem disabled={exportCanvas.isPending} onClick={() => exportCanvas.mutate({ format: 'png', dpi: 600 })}>
+              <DropdownMenuItem disabled={exportCanvas.isPending} onClick={() => exportCanvas.mutate({ format: 'png', dpi: 600, crop: cropExport })}>
                 PNG (600 dpi)
               </DropdownMenuItem>
-              <DropdownMenuItem disabled={exportCanvas.isPending} onClick={() => exportCanvas.mutate({ format: 'tiff', dpi: 300 })}>
+              <DropdownMenuItem disabled={exportCanvas.isPending} onClick={() => exportCanvas.mutate({ format: 'tiff', dpi: 300, crop: cropExport })}>
                 TIFF (300 dpi)
               </DropdownMenuItem>
-              <DropdownMenuItem disabled={exportCanvas.isPending} onClick={() => exportCanvas.mutate({ format: 'tiff', dpi: 600 })}>
+              <DropdownMenuItem disabled={exportCanvas.isPending} onClick={() => exportCanvas.mutate({ format: 'tiff', dpi: 600, crop: cropExport })}>
                 TIFF (600 dpi)
               </DropdownMenuItem>
             </DropdownMenuContent>
@@ -2925,6 +3003,14 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
           <Button type="button" size="xs" variant={lockAspect ? 'default' : 'outline'} onClick={() => setLockAspect((v) => !v)} title="Keep the aspect ratio while resizing from a corner">
             {lockAspect ? <Lock className="h-3.5 w-3.5" /> : <Unlock className="h-3.5 w-3.5" />} Aspect
           </Button>
+          <Button type="button" size="xs" variant="outline" title="Copy this panel's exact size (width × height) so you can paste it onto other panels" onClick={() => copyPanelSize(selectedPanel)}>
+            <Ruler className="h-3.5 w-3.5" /> Copy size
+          </Button>
+          {sizeClip && (Math.abs(selectedPanel.width_mm - sizeClip.width_mm) >= EPS_MM || Math.abs(selectedPanel.height_mm - sizeClip.height_mm) >= EPS_MM) && (
+            <Button type="button" size="xs" variant="outline" title={`Resize this panel to the copied ${roundMm(sizeClip.width_mm)}×${roundMm(sizeClip.height_mm)} mm`} onClick={pasteSizeToSelected}>
+              <ClipboardPaste className="h-3.5 w-3.5" /> Paste size
+            </Button>
+          )}
           {selectedPanel.native_width_mm && selectedPanel.native_height_mm ? (
             <Button
               type="button"
@@ -2935,8 +3021,8 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
                 const fit = fitToCanvasMm(selectedPanel.native_width_mm!, selectedPanel.native_height_mm!);
                 // Growing in place can push the panel past the sheet — pull the
                 // top-left back so the restored panel stays fully on-canvas.
-                const x_mm = clampPosMm(selectedPanel.x_mm, fit.width_mm, canvas.width_mm);
-                const y_mm = clampPosMm(selectedPanel.y_mm, fit.height_mm, canvas.height_mm);
+                const x_mm = clampOnSheetMm(selectedPanel.x_mm, fit.width_mm, canvas.width_mm);
+                const y_mm = clampOnSheetMm(selectedPanel.y_mm, fit.height_mm, canvas.height_mm);
                 if (
                   Math.abs(fit.width_mm - selectedPanel.width_mm) < EPS_MM &&
                   Math.abs(fit.height_mm - selectedPanel.height_mm) < EPS_MM &&
@@ -3030,6 +3116,11 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
               <AlignVerticalDistributeCenter className="h-3.5 w-3.5" />
             </Button>
           </div>
+          {sizeClip && (
+            <Button type="button" size="xs" variant="outline" title={`Resize every selected panel to the copied ${roundMm(sizeClip.width_mm)}×${roundMm(sizeClip.height_mm)} mm`} onClick={pasteSizeToSelected}>
+              <ClipboardPaste className="h-3.5 w-3.5" /> Paste size
+            </Button>
+          )}
         </div>
       )}
 
@@ -3327,6 +3418,16 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
             canvasName={canvas.name}
             containerEl={containerEl}
             overlayRect={overlayRect}
+            // Ghost fix: the overlay is positioned from the panel's COMMITTED
+            // x/y (overlayRect), which only advances on drag/resize-END — so
+            // during a gesture it froze the figure's white SVG box at the
+            // origin while the konva raster moved away (a residual "잔상").
+            // We keep the overlay MOUNTED and hide it with CSS for the duration
+            // of the gesture (unmounting it would drop the inlined SVG and flash
+            // a blank white box on drop); it becomes visible again at the
+            // committed position on mouseup. Series/text/axis editing all happen
+            // on click (never mid-gesture), so nothing interactive is lost.
+            gestureActive={pointerGestureActive}
           />
         ) : isAnnotationOnlySelection ? (
           <CanvasAnnotationInspector

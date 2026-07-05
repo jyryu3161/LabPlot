@@ -25,9 +25,10 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 # Pillow for bounded-size AI vision inputs (ai/client._bounded_image downscales
-# huge renders before verify_edit/improve calls). Separate late layer so the
+# huge renders before verify_edit/improve calls). python-pptx builds the canvas
+# PPTX export (each figure a movable slide picture). Separate late layer so the
 # slow r-viz solve above stays cached.
-RUN pixi run python -m pip install --no-cache-dir "pillow>=10"
+RUN pixi run python -m pip install --no-cache-dir "pillow>=10" "python-pptx>=0.6.23"
 
 # replace AL application code with LabPlot's
 RUN rm -rf backend

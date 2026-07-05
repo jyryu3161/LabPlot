@@ -201,14 +201,14 @@ def remove_panel(canvas_id: uuid.UUID, panel_id: uuid.UUID, request: Request,
              dependencies=[Depends(rate_limit("canvas_export", 30, 3600))])
 def export_canvas(canvas_id: uuid.UUID, data: CanvasExportRequest, request: Request,
                   db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    result = service.export_canvas(db, canvas_id, current_user.id, data.format, data.dpi)
+    result = service.export_canvas(db, canvas_id, current_user.id, data.format, data.dpi, data.crop)
     audit_service.log_event(
         db,
         actor_id=current_user.id,
         action="canvas.export",
         target_type="canvas",
         target_id=canvas_id,
-        metadata={"format": result["format"], "dpi": result.get("dpi"), "panels": len(result["snapshot"])},
+        metadata={"format": result["format"], "dpi": result.get("dpi"), "crop": data.crop, "panels": len(result["snapshot"])},
         request=request,
     )
     db.commit()

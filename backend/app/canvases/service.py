@@ -37,6 +37,12 @@ _CANVAS_MM_MIN = 20.0
 _CANVAS_MM_MAX = 500.0
 _PANEL_MM_MIN = 10.0
 _PANEL_MM_MAX = 500.0
+# Off-sheet placement envelope for a panel's top-left (mm). A panel may be
+# parked beside/off the A4 sheet and pulled back later; bounded so it can't be
+# flung unrecoverably far. MUST match the frontend OFF_SHEET_MIN/MAX_MM in
+# CanvasEditor.tsx so a dragged position never re-snaps server-side.
+_PANEL_POS_MIN = -_CANVAS_MM_MAX  # -500
+_PANEL_POS_MAX = 2 * _CANVAS_MM_MAX  # 1000
 
 # Allowed canvas backgrounds (design §2). Anything else falls back to "white".
 _CANVAS_BACKGROUNDS = {"white", "transparent"}
@@ -791,12 +797,13 @@ def add_panel(db: Session, canvas_id: uuid.UUID, owner_id: uuid.UUID, data: Pane
         canvas_id=canvas.id,
         figure_id=fig.id,
         pinned_version_id=data.pinned_version_id,
-        # Position clamp [0, 500]: coordinates were stored unvalidated; a panel's
-        # top-left can never usefully sit off the sheet's origin or beyond the
-        # max canvas envelope. (Upper bound is the envelope, not canvas-size —
-        # a canvas may legitimately be shrunk after placement.)
-        x_mm=_clamp(data.x_mm, 0.0, _CANVAS_MM_MAX),
-        y_mm=_clamp(data.y_mm, 0.0, _CANVAS_MM_MAX),
+        # Off-sheet placement envelope [-500, 1000]mm: a panel MAY be parked off
+        # the A4 sheet (users place a figure beside the sheet and pull it back).
+        # Bounded so it can't be flung unrecoverably far. MUST match the
+        # frontend OFF_SHEET_MIN/MAX_MM (CanvasEditor.tsx) so a dragged position
+        # never re-snaps server-side.
+        x_mm=_clamp(data.x_mm, _PANEL_POS_MIN, _PANEL_POS_MAX),
+        y_mm=_clamp(data.y_mm, _PANEL_POS_MIN, _PANEL_POS_MAX),
         width_mm=_clamp(data.width_mm, _PANEL_MM_MIN, _PANEL_MM_MAX),
         height_mm=_clamp(data.height_mm, _PANEL_MM_MIN, _PANEL_MM_MAX),
         z_order=z_order,
@@ -822,9 +829,9 @@ def update_panel(db: Session, canvas_id: uuid.UUID, panel_id: uuid.UUID,
     panel = _get_panel(canvas, panel_id)
 
     if data.get("x_mm") is not None:
-        panel.x_mm = _clamp(data["x_mm"], 0.0, _CANVAS_MM_MAX)
+        panel.x_mm = _clamp(data["x_mm"], _PANEL_POS_MIN, _PANEL_POS_MAX)
     if data.get("y_mm") is not None:
-        panel.y_mm = _clamp(data["y_mm"], 0.0, _CANVAS_MM_MAX)
+        panel.y_mm = _clamp(data["y_mm"], _PANEL_POS_MIN, _PANEL_POS_MAX)
     if data.get("width_mm") is not None:
         panel.width_mm = _clamp(data["width_mm"], _PANEL_MM_MIN, _PANEL_MM_MAX)
     if data.get("height_mm") is not None:
@@ -1065,14 +1072,81 @@ def _annotation_svg(ann: dict) -> str | None:
     return None
 
 
-def _compose_canvas_svg(db: Session, owner_id: uuid.UUID, canvas: Canvas) -> tuple[str, dict[str, str]]:
+def _annotation_bbox_mm(ann: dict) -> tuple[float, float, float, float] | None:
+    """Best-effort mm bounding box (x0, y0, x1, y1) of one annotation, for the
+    crop-to-content export. Returns None for malformed items (they are skipped,
+    same fail-open policy as _annotation_svg)."""
+    if not isinstance(ann, dict):
+        return None
+    t = ann.get("type")
+    try:
+        if t in ("rect", "ellipse"):
+            x = float(ann["x_mm"]); y = float(ann["y_mm"])
+            w = float(ann.get("w_mm") or 0.0); h = float(ann.get("h_mm") or 0.0)
+            return (x, y, x + w, y + h)
+        if t == "text":
+            x = float(ann["x_mm"]); y = float(ann["y_mm"])
+            font_mm = float(ann.get("font_pt") or 10.0) * _PT_TO_MM
+            # Use the stored width if present; else estimate generously so the
+            # crop never clips text (over-inclusion is the safe direction).
+            if isinstance(ann.get("w_mm"), (int, float)):
+                w = float(ann["w_mm"])
+            else:
+                w = font_mm * 0.62 * max(1, len(str(ann.get("text") or "")))
+            h = float(ann["h_mm"]) if isinstance(ann.get("h_mm"), (int, float)) else font_mm * 1.4
+            return (x, y, x + w, y + h)
+        if t in ("line", "arrow"):
+            pts = ann.get("points_mm")
+            if isinstance(pts, list) and len(pts) == 4:
+                x1, y1, x2, y2 = (float(p) for p in pts)
+                return (min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
+    except (TypeError, ValueError, KeyError):
+        return None
+    return None
+
+
+def _content_bbox_mm(canvas: Canvas) -> tuple[float, float, float, float] | None:
+    """Union mm bbox (x0, y0, x1, y1) of every panel + annotation, or None when
+    the canvas is empty. Panels use the SAME size clamp as the composite so the
+    crop matches what is actually painted."""
+    x0s: list[float] = []; y0s: list[float] = []; x1s: list[float] = []; y1s: list[float] = []
+    for p in canvas.panels:
+        pw = _clamp(p.width_mm, _PANEL_MM_MIN, _PANEL_MM_MAX)
+        ph = _clamp(p.height_mm, _PANEL_MM_MIN, _PANEL_MM_MAX)
+        x0s.append(p.x_mm); y0s.append(p.y_mm); x1s.append(p.x_mm + pw); y1s.append(p.y_mm + ph)
+    for ann in (canvas.annotations or []):
+        bb = _annotation_bbox_mm(ann)
+        if bb:
+            x0s.append(bb[0]); y0s.append(bb[1]); x1s.append(bb[2]); y1s.append(bb[3])
+    if not x0s:
+        return None
+    return (min(x0s), min(y0s), max(x1s), max(y1s))
+
+
+def _compose_canvas_svg(db: Session, owner_id: uuid.UUID, canvas: Canvas, crop: bool = False) -> tuple[str, dict[str, str]]:
     """Build the composite canvas SVG by nesting each panel's vector render.
+
+    When ``crop`` is set, the outer <svg> viewBox/size is the tight bounding box
+    of all content (panels + annotations) instead of the full A4 sheet — i.e.
+    the surrounding margins are removed. Child coordinates are unchanged; the
+    viewBox window (min-x/min-y origin) does the cropping, which rsvg-convert
+    honours for every format.
 
     Returns (svg_text, snapshot) where snapshot is {panel_id: version_id} of the
     versions actually rendered (design §5 reproducibility).
     """
+    # Full-sheet frame by default; the content bbox when cropping (falls back to
+    # the full sheet if the canvas is empty).
+    ox, oy = 0.0, 0.0
     w_mm = _clamp(canvas.width_mm, _CANVAS_MM_MIN, _CANVAS_MM_MAX)
     h_mm = _clamp(canvas.height_mm, _CANVAS_MM_MIN, _CANVAS_MM_MAX)
+    if crop:
+        bbox = _content_bbox_mm(canvas)
+        if bbox is not None:
+            bx0, by0, bx1, by1 = bbox
+            ox, oy = bx0, by0
+            w_mm = max(1.0, bx1 - bx0)
+            h_mm = max(1.0, by1 - by0)
 
     current_map = _figure_current_versions(db, [p.figure_id for p in canvas.panels], owner_id)
     # Paint order: ascending z_order (ties by id) → later panels drawn on top (§2).
@@ -1084,12 +1158,13 @@ def _compose_canvas_svg(db: Session, owner_id: uuid.UUID, canvas: Canvas) -> tup
             '<svg xmlns="http://www.w3.org/2000/svg" '
             'xmlns:xlink="http://www.w3.org/1999/xlink" version="1.1" '
             f'width="{_num(w_mm)}mm" height="{_num(h_mm)}mm" '
-            f'viewBox="0 0 {_num(w_mm)} {_num(h_mm)}">'
+            f'viewBox="{_num(ox)} {_num(oy)} {_num(w_mm)} {_num(h_mm)}">'
         ),
     ]
     # Background: opaque white unless the canvas is explicitly transparent (§2).
+    # When cropping, the rect covers the bbox (origin ox/oy), not 0,0.
     if canvas.background != "transparent":
-        parts.append(f'<rect x="0" y="0" width="{_num(w_mm)}" height="{_num(h_mm)}" fill="#ffffff"/>')
+        parts.append(f'<rect x="{_num(ox)}" y="{_num(oy)}" width="{_num(w_mm)}" height="{_num(h_mm)}" fill="#ffffff"/>')
 
     snapshot: dict[str, str] = {}
     for idx, panel in enumerate(panels):
@@ -1247,8 +1322,178 @@ def _png_bytes_to_tiff_bytes(png_bytes: bytes, dpi: int) -> bytes:
         return out.getvalue()
 
 
-def export_canvas(db: Session, canvas_id: uuid.UUID, owner_id: uuid.UUID, fmt: str, dpi: int = 300) -> dict:
-    """Export the canvas as svg, pdf, png, or tiff (§1, U9 §2).
+# DPI used to rasterise each panel figure into the PPTX. Slides don't need
+# 600dpi; 200 keeps each panel PNG well under the raster budget while staying
+# crisp on a projector.
+_PPTX_PANEL_DPI = 200
+
+
+def _build_pptx_bytes(db: Session, owner_id: uuid.UUID, canvas: Canvas, crop: bool = False) -> tuple[bytes, dict[str, str]]:
+    """Build a one-slide PPTX where each figure is its OWN movable picture and
+    annotations are native PowerPoint shapes, sized so a slide millimetre maps
+    to a canvas millimetre. Returns (pptx_bytes, snapshot).
+
+    python-pptx is imported lazily so the module never hard-depends on it — an
+    absent package surfaces as a clear 501 on THIS path only.
+    """
+    try:
+        from pptx import Presentation
+        from pptx.util import Mm, Pt
+        from pptx.dml.color import RGBColor
+        from pptx.enum.shapes import MSO_SHAPE, MSO_CONNECTOR
+        from pptx.enum.text import PP_ALIGN
+    except ImportError as exc:  # pragma: no cover - depends on deploy image
+        raise AppError(
+            status_code=501,
+            detail="PPTX export requires the python-pptx package, which is not installed.",
+            error_code="PPTX_EXPORT_UNAVAILABLE",
+        ) from exc
+
+    def _rgb(hexstr, default=(0, 0, 0)):
+        s = str(hexstr or "").lstrip("#")
+        if len(s) == 6:
+            try:
+                return RGBColor.from_string(s.upper())
+            except ValueError:
+                pass
+        return RGBColor(*default)
+
+    # Slide = full sheet, or the content bbox when cropping. ox/oy shift every
+    # placed object into slide space.
+    ox, oy = 0.0, 0.0
+    slide_w = _clamp(canvas.width_mm, _CANVAS_MM_MIN, _CANVAS_MM_MAX)
+    slide_h = _clamp(canvas.height_mm, _CANVAS_MM_MIN, _CANVAS_MM_MAX)
+    if crop:
+        bbox = _content_bbox_mm(canvas)
+        if bbox is not None:
+            ox, oy = bbox[0], bbox[1]
+            slide_w = max(1.0, bbox[2] - bbox[0])
+            slide_h = max(1.0, bbox[3] - bbox[1])
+
+    prs = Presentation()
+    prs.slide_width = Mm(slide_w)
+    prs.slide_height = Mm(slide_h)
+    slide = prs.slides.add_slide(prs.slide_layouts[6])  # blank layout
+
+    if canvas.background != "transparent":
+        try:
+            bg = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Mm(0), Mm(0), Mm(slide_w), Mm(slide_h))
+            bg.fill.solid()
+            bg.fill.fore_color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+            bg.line.fill.background()
+            bg.shadow.inherit = False
+        except Exception:  # noqa: BLE001 - background is decorative, never fail the export
+            pass
+
+    current_map = _figure_current_versions(db, [p.figure_id for p in canvas.panels], owner_id)
+    panels = sorted(canvas.panels, key=lambda p: (p.z_order, str(p.id)))
+    snapshot: dict[str, str] = {}
+    for panel in panels:
+        effective = panel.pinned_version_id or current_map.get(panel.figure_id)
+        if effective is None:
+            continue
+        pw = _clamp(panel.width_mm, _PANEL_MM_MIN, _PANEL_MM_MAX)
+        ph = _clamp(panel.height_mm, _PANEL_MM_MIN, _PANEL_MM_MAX)
+        try:
+            ref, _layout, _cached = _render_preview_ref(
+                db, owner_id,
+                PreviewRenderRequest(figure_id=panel.figure_id, version_id=effective, width_mm=pw, height_mm=ph),
+            )
+        except NotFoundError:
+            continue  # inaccessible panel figure — skip, don't fail the whole export
+        svg_text = storage.read_bytes(ref).decode("utf-8")
+        png_bytes = _svg_to_png_bytes(svg_text, _PPTX_PANEL_DPI)
+        slide.shapes.add_picture(io.BytesIO(png_bytes), Mm(panel.x_mm - ox), Mm(panel.y_mm - oy), Mm(pw), Mm(ph))
+        if panel.label_visible and panel.label:
+            try:
+                tb = slide.shapes.add_textbox(Mm(panel.x_mm - ox + _LABEL_INSET_MM), Mm(panel.y_mm - oy),
+                                              Mm(20), Mm(_LABEL_FONT_MM * 1.8))
+                tf = tb.text_frame
+                tf.word_wrap = False
+                tf.margin_left = tf.margin_right = tf.margin_top = tf.margin_bottom = 0
+                run = tf.paragraphs[0].add_run()
+                run.text = panel.label
+                run.font.bold = True
+                run.font.size = Pt(_LABEL_FONT_MM / _PT_TO_MM)
+                run.font.color.rgb = RGBColor(0, 0, 0)
+            except Exception:  # noqa: BLE001 - label is decorative
+                pass
+        snapshot[str(panel.id)] = str(effective)
+
+    annotations = sorted(
+        (a for a in (canvas.annotations or []) if isinstance(a, dict)),
+        key=lambda a: (a.get("z", 0) if isinstance(a.get("z"), (int, float)) else 0, str(a.get("id", ""))),
+    )
+    for ann in annotations:
+        t = ann.get("type")
+        try:
+            if t in ("rect", "ellipse"):
+                x = float(ann["x_mm"]); y = float(ann["y_mm"])
+                w = float(ann.get("w_mm") or 0.0); h = float(ann.get("h_mm") or 0.0)
+                if w <= 0 or h <= 0:
+                    continue
+                shp = slide.shapes.add_shape(
+                    MSO_SHAPE.OVAL if t == "ellipse" else MSO_SHAPE.RECTANGLE,
+                    Mm(x - ox), Mm(y - oy), Mm(w), Mm(h),
+                )
+                shp.shadow.inherit = False
+                fill_hex = ann.get("fill_hex")
+                if fill_hex and str(fill_hex).lower() not in ("none", "transparent", ""):
+                    shp.fill.solid(); shp.fill.fore_color.rgb = _rgb(fill_hex)
+                else:
+                    shp.fill.background()
+                stroke_hex = ann.get("stroke_hex")
+                if stroke_hex:
+                    shp.line.color.rgb = _rgb(stroke_hex)
+                    shp.line.width = Pt(float(ann.get("stroke_pt") or 1.0))
+                else:
+                    shp.line.fill.background()
+            elif t == "text":
+                text_val = ann.get("text")
+                if not isinstance(text_val, str) or not text_val:
+                    continue
+                x = float(ann["x_mm"]); y = float(ann["y_mm"])
+                font_pt = float(ann.get("font_pt") or 10.0)
+                w = float(ann["w_mm"]) if isinstance(ann.get("w_mm"), (int, float)) \
+                    else font_pt * _PT_TO_MM * 0.62 * max(1, len(text_val))
+                h = float(ann["h_mm"]) if isinstance(ann.get("h_mm"), (int, float)) else font_pt * _PT_TO_MM * 1.8
+                tb = slide.shapes.add_textbox(Mm(x - ox), Mm(y - oy), Mm(max(w, 5.0)), Mm(max(h, 5.0)))
+                tf = tb.text_frame
+                tf.word_wrap = False
+                tf.margin_left = tf.margin_right = tf.margin_top = tf.margin_bottom = 0
+                para = tf.paragraphs[0]
+                para.alignment = {"center": PP_ALIGN.CENTER, "right": PP_ALIGN.RIGHT}.get(ann.get("align"), PP_ALIGN.LEFT)
+                run = para.add_run()
+                run.text = text_val
+                run.font.size = Pt(font_pt)
+                run.font.color.rgb = _rgb(ann.get("fill_hex"))
+                run.font.name = "Helvetica"
+            elif t in ("line", "arrow"):
+                pts = ann.get("points_mm")
+                if not (isinstance(pts, list) and len(pts) == 4):
+                    continue
+                x1, y1, x2, y2 = (float(p) for p in pts)
+                cxn = slide.shapes.add_connector(MSO_CONNECTOR.STRAIGHT,
+                                                 Mm(x1 - ox), Mm(y1 - oy), Mm(x2 - ox), Mm(y2 - oy))
+                cxn.line.color.rgb = _rgb(ann.get("stroke_hex"))
+                cxn.line.width = Pt(float(ann.get("stroke_pt") or 1.0))
+                if t == "arrow":
+                    try:
+                        from pptx.oxml.ns import qn
+                        ln = cxn.line._get_or_add_ln()
+                        ln.append(ln.makeelement(qn("a:tailEnd"), {"type": "triangle"}))
+                    except Exception:  # noqa: BLE001 - arrowhead is cosmetic
+                        pass
+        except (TypeError, ValueError, KeyError):
+            continue  # malformed annotation — skip (export-parity fail-open)
+
+    buf = io.BytesIO()
+    prs.save(buf)
+    return buf.getvalue(), snapshot
+
+
+def export_canvas(db: Session, canvas_id: uuid.UUID, owner_id: uuid.UUID, fmt: str, dpi: int = 300, crop: bool = False) -> dict:
+    """Export the canvas as svg, pdf, png, tiff, or pptx (§1, U9 §2).
 
     svg/pdf stay pure vector composition (§1: never bitmap-stretch a panel).
     png/tiff RASTERIZE that SAME composite via rsvg-convert at `dpi` — still a
@@ -1260,14 +1505,15 @@ def export_canvas(db: Session, canvas_id: uuid.UUID, owner_id: uuid.UUID, fmt: s
     reproducibility (§5) and commits, for every format.
     """
     fmt = (fmt or "svg").lower()
-    if fmt not in {"svg", "pdf", "png", "tiff"}:
-        raise BadRequestError("format must be one of 'svg', 'pdf', 'png', 'tiff'", error_code="BAD_EXPORT_FORMAT")
+    if fmt not in {"svg", "pdf", "png", "tiff", "pptx"}:
+        raise BadRequestError("format must be one of 'svg', 'pdf', 'png', 'tiff', 'pptx'", error_code="BAD_EXPORT_FORMAT")
     if fmt in {"png", "tiff"} and dpi not in _RASTER_DPI_CHOICES:
         raise BadRequestError("dpi must be 300 or 600", error_code="BAD_EXPORT_DPI")
 
     # Fail fast if a converter-backed format is requested but the vector
     # converter is unavailable — never silently fall back to a lesser path.
-    if fmt in {"pdf", "png", "tiff"} and shutil.which("rsvg-convert") is None:
+    # pptx rasterises each panel through the same rsvg path.
+    if fmt in {"pdf", "png", "tiff", "pptx"} and shutil.which("rsvg-convert") is None:
         raise AppError(
             status_code=501,
             detail=f"{fmt.upper()} export requires librsvg (rsvg-convert), which is not installed.",
@@ -1276,12 +1522,22 @@ def export_canvas(db: Session, canvas_id: uuid.UUID, owner_id: uuid.UUID, fmt: s
 
     canvas = get_canvas(db, canvas_id, owner_id)
 
+    # The rasterised size is the CROPPED content bbox when cropping (smaller),
+    # else the full sheet — so the pixel-budget guard matches the real output.
+    guard_w = float(canvas.width_mm)
+    guard_h = float(canvas.height_mm)
+    if crop:
+        bbox = _content_bbox_mm(canvas)
+        if bbox is not None:
+            guard_w = max(1.0, bbox[2] - bbox[0])
+            guard_h = max(1.0, bbox[3] - bbox[1])
+
     if fmt in {"png", "tiff"}:
         # Guard BEFORE composing (per-panel renders are the expensive part):
         # ceil matches rsvg-convert's observed mm->px rounding (see the
         # _svg_to_png_bytes docstring).
-        px_w = math.ceil(float(canvas.width_mm) / 25.4 * dpi)
-        px_h = math.ceil(float(canvas.height_mm) / 25.4 * dpi)
+        px_w = math.ceil(guard_w / 25.4 * dpi)
+        px_h = math.ceil(guard_h / 25.4 * dpi)
         if px_w * px_h > _RASTER_MAX_PIXELS:
             raise BadRequestError(
                 f"Raster export would be {px_w}x{px_h}px, over the "
@@ -1289,7 +1545,19 @@ def export_canvas(db: Session, canvas_id: uuid.UUID, owner_id: uuid.UUID, fmt: s
                 error_code="RASTER_TOO_LARGE",
             )
 
-    composite_svg, snapshot = _compose_canvas_svg(db, owner_id, canvas)
+    # pptx composes its OWN document (per-panel pictures), not the flat SVG —
+    # handle it early so we don't render every panel twice.
+    if fmt == "pptx":
+        pptx_bytes, snapshot = _build_pptx_bytes(db, owner_id, canvas, crop=crop)
+        url = _persist_export(
+            canvas_id, pptx_bytes, "pptx",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        )
+        canvas.export_snapshot = snapshot
+        db.commit()
+        return {"url": url, "format": fmt, "dpi": None, "snapshot": snapshot}
+
+    composite_svg, snapshot = _compose_canvas_svg(db, owner_id, canvas, crop=crop)
 
     result_dpi: int | None = None
     if fmt == "svg":

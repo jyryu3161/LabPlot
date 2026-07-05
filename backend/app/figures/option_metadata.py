@@ -17,6 +17,9 @@ from __future__ import annotations
 
 _UNIVERSAL_OPTION_KEYS = {
     "palette_name", "size", "width_in", "height_in", "color_mode", "font_scale", "base_size", "dpi",
+    # Global line-thickness multiplier (×default). Universal: scales every
+    # geom's linewidth in the renderer post-pass; ignored by device types.
+    "linewidth_scale",
     "title", "subtitle", "x_label", "y_label", "legend_title",
     "hide_legend", "log_x", "log_y", "flip_coords", "x_text_angle", "legend_position",
     "x_min", "x_max", "y_min", "y_max",
@@ -110,6 +113,8 @@ _NUMBER_OPTIONS = {
     "ref_line", "overlap",
     # Axis tick-count hints and legend layout sizing (clamped in _sanitize_option).
     "x_breaks", "y_breaks", "legend_key_size", "legend_ncol",
+    # Global line-thickness multiplier (float, clamped in _sanitize_option).
+    "linewidth_scale",
 }
 # Of _NUMBER_OPTIONS, the subset _sanitize_option casts to int(...) rather than
 # a clamped float. Used by ai/options_schema.py to pick "integer" vs "number".

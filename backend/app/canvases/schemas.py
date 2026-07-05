@@ -141,15 +141,22 @@ class CanvasExportRequest(BaseModel):
     # composite via rsvg-convert (librsvg) — a pure vector SVG→PDF, fonts
     # preserved as text. png/tiff (U9 §2) RASTERIZE that same composite via
     # rsvg-convert at `dpi`; tiff is LZW-compressed and derived from the png.
-    format: Literal["svg", "pdf", "png", "tiff"] = "svg"
+    # pptx: one slide sized to the canvas (mm→EMU) with each figure as its own
+    # movable picture (annotations rendered as native shapes) — needs librsvg to
+    # rasterise the panels and the python-pptx package.
+    format: Literal["svg", "pdf", "png", "tiff", "pptx"] = "svg"
     # Raster DPI — png/tiff only, ignored for svg/pdf. Output pixel size is
     # ceil(mm / 25.4 * dpi) (verified against the installed rsvg-convert).
     dpi: Literal[300, 600] = 300
+    # Crop the export to the tight bounding box of all content (panels +
+    # annotations), removing the surrounding sheet margins. Applies to every
+    # format.
+    crop: bool = False
 
 
 class CanvasExportResponse(BaseModel):
     url: str
-    format: Literal["svg", "pdf", "png", "tiff"]
+    format: Literal["svg", "pdf", "png", "tiff", "pptx"]
     # Set for png/tiff exports only; None for svg/pdf.
     dpi: int | None = None
     # {panel_id: version_id} snapshot recorded for reproducibility (design §5).

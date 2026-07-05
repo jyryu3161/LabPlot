@@ -273,6 +273,40 @@ if (isTRUE(capabilities("cairo"))) {{
             post += f'p <- p + geom_vline(xintercept = {vline:g}, linetype = "dashed", linewidth = 0.3, colour = "grey50")\n'
         post += _facet_r(opts)
 
+    # Global line-thickness multiplier (Edit-panel "Line width"). Runs for ALL
+    # ggplot types (incl. NO_THEME ones like network, hence outside the block
+    # above) — DEVICE_TYPES already returned. Post-multiplies the fixed
+    # `linewidth` aes-param of every layer that sets one (the templates set it
+    # explicitly on line/bar/box/etc geoms), so no template needs to change.
+    # Guarded so a non-ggplot or layer without linewidth is left untouched.
+    lw_scale = opts.get("linewidth_scale")
+    if lw_scale is not None:
+        try:
+            _mult = max(0.25, min(4.0, float(lw_scale)))
+        except (TypeError, ValueError):
+            _mult = 1.0
+        if abs(_mult - 1.0) > 1e-6:
+            # Scale a numeric `linewidth` fixed-param wherever a geom keeps it —
+            # aes_params (geom_line/path/step/smooth/violin/bar/col/tile/
+            # histogram and geom_boxplot's overall stroke) or geom_params (some
+            # geoms/versions). Only the `linewidth` key is touched, so width
+            # RATIOS (e.g. boxplot staplewidth) are never distorted. Reference
+            # semantics on the layer ggproto objects — the standard post-build
+            # mutation idiom (verified on ggplot2 4.0).
+            post += (
+                "p <- (function(.p) {\n"
+                '  if (!inherits(.p, "ggplot") || is.null(.p$layers)) return(.p)\n'
+                "  for (.i in seq_along(.p$layers)) {\n"
+                '    for (.slot in c("aes_params", "geom_params")) {\n'
+                "      .pl <- .p$layers[[.i]][[.slot]]\n"
+                "      if (!is.null(.pl) && is.numeric(.pl$linewidth)) "
+                f".p$layers[[.i]][[.slot]]$linewidth <- .pl$linewidth * {_mult:g}\n"
+                "    }\n"
+                "  }\n"
+                "  .p\n"
+                "})(p)\n"
+            )
+
     # Opt-in interactive HTML (self-contained plotly). Best-effort: wrapped in
     # tryCatch so a missing pandoc / non-convertible plot never fails the static
     # render. Only attempted on the standard ggplot path (p is a ggplot here).
