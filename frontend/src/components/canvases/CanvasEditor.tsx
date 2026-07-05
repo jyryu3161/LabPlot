@@ -3293,7 +3293,20 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
         )}
         </div>
 
-        {selectedPanel && !pointerGestureActive && (
+        {/* Right "Edit panel" column — PINNED: always occupies its fixed
+            width so selecting/deselecting an item only swaps the column's
+            CONTENTS, never the stage's width. Previously this sidebar was
+            conditionally mounted, so each select/deselect resized the stage
+            container, re-fit pxPerMm, and made the canvas visibly jump
+            ("화면이동" back and forth). The fixed width also makes the column
+            reflow-safe, so — unlike the top toolbar rows, which still shift
+            vertical space and stay gated on !pointerGestureActive — the editor
+            can stay mounted through a drag (it no longer causes the teleport
+            the gate guarded against). CanvasColorEditor / CanvasAnnotation
+            Inspector each render their own w-64 border-l column; the empty
+            state renders a matching-width placeholder so the width is
+            identical in all three states. */}
+        {selectedPanel ? (
           <CanvasColorEditor
             key={selectedPanel.id}
             panel={selectedPanel}
@@ -3302,8 +3315,7 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
             containerEl={containerEl}
             overlayRect={overlayRect}
           />
-        )}
-        {isAnnotationOnlySelection && !pointerGestureActive && (
+        ) : isAnnotationOnlySelection ? (
           <CanvasAnnotationInspector
             selected={selectedAnnotations}
             onDraft={draftAnnotationField}
@@ -3312,6 +3324,11 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
             onSendBackward={(ids) => zBumpAnnotations(ids, -1)}
             onDelete={deleteAnnotationIds}
           />
+        ) : (
+          <aside className="flex w-64 shrink-0 flex-col items-center justify-center gap-2 border-l bg-background p-4 text-center text-xs text-muted-foreground">
+            <span className="font-medium">Edit panel</span>
+            <span>Select a panel or object on the canvas to edit its properties here.</span>
+          </aside>
         )}
       </div>
 
