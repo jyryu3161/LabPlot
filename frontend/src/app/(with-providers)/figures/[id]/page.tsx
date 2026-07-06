@@ -207,6 +207,24 @@ function categoryColorColumn(plotType: string, mapping: Record<string, unknown>,
   return null;
 }
 
+// The categorical column whose level order the R renderer honors via
+// `level_order` (box/violin/bar/grouped_bar). Superset of categoryColorColumn:
+// it also covers a plain bar chart (x axis) that has NO per-category colouring,
+// so the reorder control is offered wherever the backend can actually apply it.
+function reorderableColumn(plotType: string, mapping: Record<string, unknown>): string | null {
+  const explicit = mappingValue(mapping, 'group') || mappingValue(mapping, 'color');
+  if (explicit) return explicit;
+  if (plotType === 'box' || plotType === 'violin' || plotType === 'bar') return mappingValue(mapping, 'x');
+  return null;
+}
+
+// Numeric-aware alphabetical sort of category levels (matches the renderer's
+// numeric-aware auto order). `desc` reverses it.
+function sortLevels(levels: string[], dir: 'asc' | 'desc'): string[] {
+  const sorted = [...levels].sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
+  return dir === 'desc' ? sorted.reverse() : sorted;
+}
+
 // True distinct levels of the grouping column, sourced from the column-values
 // endpoint and falling back to the profiled sample values before it loads.
 function distinctColumnLevels(values: string[] | undefined, profile: ColumnProfile | undefined): string[] {
@@ -329,15 +347,20 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
   const continuousFill = isContinuousFill(effectivePlotType);
   const categoryColors = normalizedCategoryColors(effectiveOptions.category_colors);
   const categoryColorColumnName = categoryColorColumn(effectivePlotType, effectiveMapping, effectiveOptions);
-  const categoryColorProfile = columns.find((column) => column.name === categoryColorColumnName);
-  // True distinct levels of the currently-mapped grouping column, used to drive
-  // both the per-category color pickers and the level-order reorder UI.
+  // The column driving the reorder UI + the distinct-levels query. Superset of
+  // categoryColorColumnName (it also covers a plain bar's x axis), and equal to
+  // it whenever the colour column is set — so the same levels feed both the
+  // colour pickers and the reorder list.
+  const reorderColumnName = reorderableColumn(effectivePlotType, effectiveMapping);
+  const reorderColumnProfile = columns.find((column) => column.name === reorderColumnName);
+  // True distinct levels of the currently-mapped grouping/category column, used
+  // to drive both the per-category color pickers and the level-order reorder UI.
   const { data: columnValues } = useQuery({
-    queryKey: ['column-values', fig?.dataset_id, categoryColorColumnName],
-    queryFn: () => getColumnValues(fig!.dataset_id, categoryColorColumnName!),
-    enabled: !!fig?.dataset_id && !!categoryColorColumnName,
+    queryKey: ['column-values', fig?.dataset_id, reorderColumnName],
+    queryFn: () => getColumnValues(fig!.dataset_id, reorderColumnName!),
+    enabled: !!fig?.dataset_id && !!reorderColumnName,
   });
-  const distinctLevels = distinctColumnLevels(columnValues?.values, categoryColorProfile);
+  const distinctLevels = distinctColumnLevels(columnValues?.values, reorderColumnProfile);
   const categoryColorLevels = [
     ...distinctLevels,
     ...Object.keys(categoryColors).filter((level) => !distinctLevels.includes(level)),
@@ -770,10 +793,13 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
       await copyToClipboard(await res.text(), 'R code');
     } catch { toast.error('Could not load R code'); }
   }
+  function setLevelOrder(next: string[]) {
+    setOptions({ ...effectiveOptions, level_order: next });
+  }
   function moveLevel(index: number, direction: -1 | 1) {
     const next = swapItems(orderedLevels, index, direction);
     if (next === orderedLevels) return;
-    setOptions({ ...effectiveOptions, level_order: next });
+    setLevelOrder(next);
   }
 
   async function doExport(fmt: string) {
@@ -1399,6 +1425,37 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
                           {selectedStyle.description} Color palette overrides the style colors; manuscript styles use no gridlines by default.
                         </p>
                       )}
+                      {/* Category order — reorder the data on the axis/legend. Shown for every
+                          plot the renderer can reorder (box/violin/bar/grouped bar), including
+                          plain bars with no per-category colouring. */}
+                      {reorderColumnName && orderedLevels.length > 1 && (
+                        <div className="space-y-2 rounded-md border bg-muted/20 p-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <div>
+                              <Label className="text-xs">Category order</Label>
+                              <p className="text-[11px] text-muted-foreground">Reorder the <span className="font-medium">{reorderColumnName}</span> levels shown on the axis and legend — move rows with the arrows, or use a quick sort.</p>
+                            </div>
+                            {hasLevelOrder && (
+                              <Button type="button" variant="ghost" size="sm" onClick={() => setOptions(deleteOption(effectiveOptions, 'level_order'))}>Reset</Button>
+                            )}
+                          </div>
+                          <div className="flex flex-wrap gap-1">
+                            <Button type="button" variant="outline" size="sm" onClick={() => setLevelOrder([...orderedLevels].reverse())}>Reverse</Button>
+                            <Button type="button" variant="outline" size="sm" onClick={() => setLevelOrder(sortLevels(orderedLevels, 'asc'))}>A→Z</Button>
+                            <Button type="button" variant="outline" size="sm" onClick={() => setLevelOrder(sortLevels(orderedLevels, 'desc'))}>Z→A</Button>
+                          </div>
+                          <div className="space-y-1">
+                            {orderedLevels.map((level, index) => (
+                              <div key={level} className="flex items-center gap-1">
+                                <span className="w-5 shrink-0 text-center text-[11px] text-muted-foreground">{index + 1}</span>
+                                <span className="min-w-0 flex-1 truncate text-xs" title={level}>{level}</span>
+                                <Button type="button" variant="ghost" size="icon-xs" aria-label={`Move ${level} up`} disabled={index === 0} onClick={() => moveLevel(index, -1)}><ArrowUp className="h-3.5 w-3.5" /></Button>
+                                <Button type="button" variant="ghost" size="icon-xs" aria-label={`Move ${level} down`} disabled={index === orderedLevels.length - 1} onClick={() => moveLevel(index, 1)}><ArrowDown className="h-3.5 w-3.5" /></Button>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                       {/* color palette (discrete) — a no-op for continuous-fill charts, which use their own color scale */}
                       {continuousFill ? (
                         <div className="space-y-1 rounded-md border bg-muted/20 p-2">
@@ -1463,29 +1520,6 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
                               <Button type="button" variant="outline" size="sm" onClick={addCategoryColorLevel}>Add</Button>
                             </div>
                           </div>
-                          {orderedLevels.length > 1 && (
-                            <div className="mt-2 space-y-2 rounded-md border bg-muted/20 p-2">
-                              <div className="flex items-center justify-between gap-2">
-                                <div>
-                                  <Label className="text-xs">Category &amp; legend order</Label>
-                                  <p className="text-[11px] text-muted-foreground">Order of <span className="font-medium">{categoryColorColumnName}</span> levels in the legend and axis.</p>
-                                </div>
-                                {hasLevelOrder && (
-                                  <Button type="button" variant="ghost" size="sm" onClick={() => setOptions(deleteOption(effectiveOptions, 'level_order'))}>Reset</Button>
-                                )}
-                              </div>
-                              <div className="space-y-1">
-                                {orderedLevels.map((level, index) => (
-                                  <div key={level} className="flex items-center gap-1">
-                                    <span className="w-5 shrink-0 text-center text-[11px] text-muted-foreground">{index + 1}</span>
-                                    <span className="min-w-0 flex-1 truncate text-xs" title={level}>{level}</span>
-                                    <Button type="button" variant="ghost" size="icon-xs" aria-label={`Move ${level} up`} disabled={index === 0} onClick={() => moveLevel(index, -1)}><ArrowUp className="h-3.5 w-3.5" /></Button>
-                                    <Button type="button" variant="ghost" size="icon-xs" aria-label={`Move ${level} down`} disabled={index === orderedLevels.length - 1} onClick={() => moveLevel(index, 1)}><ArrowDown className="h-3.5 w-3.5" /></Button>
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
-                          )}
                         </>)}
                         <div className="flex flex-wrap gap-2 pt-1">
                           <Button type="button" variant="outline" size="sm" onClick={openNewPalette}>New custom palette</Button>
