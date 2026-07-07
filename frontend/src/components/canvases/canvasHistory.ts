@@ -50,7 +50,11 @@ export type PanelFields = Partial<{
 export interface PanelSnapshot {
   /** The panel's live server id at the time the op was recorded. */
   panelId: string;
-  figure_id: string;
+  /** null for imported-image panels (image_key identifies the blob instead). */
+  figure_id: string | null;
+  /** Imported-image blob key — blobs are never deleted on panel removal, so
+   *  undo can always re-reference the same key. */
+  image_key?: string | null;
   x_mm: number;
   y_mm: number;
   width_mm: number;

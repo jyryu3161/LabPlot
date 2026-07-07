@@ -601,10 +601,35 @@ export async function getCanvasPresets(): Promise<import('./types').CanvasPreset
   return fetcher('/api/canvases/presets');
 }
 export async function addCanvasPanel(canvasId: string, data: {
-  figure_id: string; x_mm: number; y_mm: number; width_mm: number; height_mm: number;
+  // Exactly one of figure_id/image_key. The image_key form re-references an
+  // ALREADY-uploaded import blob (undo-recreate / duplication); fresh images
+  // go through addCanvasImagePanel below.
+  figure_id?: string; image_key?: string;
+  x_mm: number; y_mm: number; width_mm: number; height_mm: number;
   z_order?: number; label?: string; pinned_version_id?: string;
 }): Promise<import('./types').CanvasPanel> {
   return fetcher(`/api/canvases/${canvasId}/panels`, { method: 'POST', body: JSON.stringify(data) });
+}
+// External image import (SVG/PNG/JPEG, ≤20MB): uploads the file and places it
+// as a new panel in one call. x_mm/y_mm are the desired panel CENTER (the
+// server computes the fitted size from the image's native dimensions);
+// omitted → sheet center.
+export async function addCanvasImagePanel(
+  canvasId: string,
+  file: File,
+  opts?: { x_mm?: number; y_mm?: number; label?: string },
+): Promise<import('./types').CanvasPanel> {
+  const fd = new FormData();
+  fd.append('file', file);
+  if (opts?.x_mm != null) fd.append('x_mm', String(opts.x_mm));
+  if (opts?.y_mm != null) fd.append('y_mm', String(opts.y_mm));
+  if (opts?.label) fd.append('label', opts.label);
+  const headers: Record<string, string> = {};
+  const token = getAccessToken();
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const res = await fetch(`${BASE_URL}/api/canvases/${canvasId}/panels/image`, { method: 'POST', body: fd, headers });
+  if (!res.ok) { const b = await res.text().catch(() => ''); throw new ApiError(parseErrorMessage(b, res.statusText), res.status); }
+  return res.json();
 }
 export async function updateCanvasPanel(canvasId: string, panelId: string, data: {
   x_mm?: number; y_mm?: number; width_mm?: number; height_mm?: number;

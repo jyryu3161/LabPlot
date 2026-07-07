@@ -17,9 +17,16 @@ import {
  * each other figure's version, so follow-latest panels re-render — we invalidate the
  * canvas + figure queries on success so the stage reloads at the new versions.
  */
-export function CanvasApplyStyle({ canvasId, panels }: { canvasId: string; panels: CanvasPanel[] }) {
+export function CanvasApplyStyle({ canvasId, panels: allPanels }: { canvasId: string; panels: CanvasPanel[] }) {
   const qc = useQueryClient();
   const [sourcePanelId, setSourcePanelId] = useState<string | null>(null);
+
+  // Imported-image panels carry no figure/style — they neither source nor
+  // receive a style copy, so they are invisible to this control entirely.
+  const panels = useMemo(
+    () => allPanels.filter((p): p is CanvasPanel & { figure_id: string } => Boolean(p.figure_id)),
+    [allPanels],
+  );
 
   // Figure names for the dropdown labels (shares the ['figure', id] cache with the
   // color editor, so these are usually already resolved / cheap).

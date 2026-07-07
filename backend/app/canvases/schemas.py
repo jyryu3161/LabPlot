@@ -45,7 +45,13 @@ class CanvasUpdate(BaseModel):
 
 
 class PanelCreate(BaseModel):
-    figure_id: uuid.UUID
+    # Exactly ONE of figure_id/image_key (service-enforced): a figure panel
+    # references a figure; an image panel references an ALREADY-UPLOADED import
+    # blob by its relative key ("canvases/imports/<hex32>.<ext>"). The key form
+    # exists for undo-recreate and panel duplication — fresh images arrive via
+    # the multipart POST /panels/image endpoint, never through here.
+    figure_id: uuid.UUID | None = None
+    image_key: str | None = Field(default=None, max_length=160)
     x_mm: float
     y_mm: float
     width_mm: float = Field(..., ge=_PANEL_MM_MIN, le=_PANEL_MM_MAX)
@@ -69,7 +75,9 @@ class PanelUpdate(BaseModel):
 class CanvasPanel(BaseModel):
     id: uuid.UUID
     canvas_id: uuid.UUID
-    figure_id: uuid.UUID
+    # None for imported-image panels (image_key set instead).
+    figure_id: uuid.UUID | None = None
+    image_key: str | None = None
     pinned_version_id: uuid.UUID | None = None
     x_mm: float
     y_mm: float

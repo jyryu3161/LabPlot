@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from sqlalchemy.orm import Session
 
 from app.audit import service as audit_service
@@ -21,9 +21,32 @@ from app.canvases.schemas import (
     PreviewRenderRequest,
 )
 from app.common.deps import get_current_user, get_db
+from app.common.exceptions import FileTooLargeError
+from app.common.quotas import enforce_storage_quota
 from app.common.security import rate_limit
 
 router = APIRouter(prefix="/api/canvases", tags=["canvases"])
+
+# Imported canvas images (SVG/PNG/JPEG) get their own, tighter cap than the
+# global dataset limit (grilling Q4: 20MB/file).
+_IMAGE_UPLOAD_MAX_MB = 20
+
+
+async def _read_image_limited(file: UploadFile) -> bytes:
+    """Stream the upload in 1MB chunks, aborting past the 20MB image cap
+    (mirrors datasets._read_upload_limited, with the image-specific limit)."""
+    max_bytes = _IMAGE_UPLOAD_MAX_MB * 1024 * 1024
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise FileTooLargeError(_IMAGE_UPLOAD_MAX_MB)
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 # -------- preview (M1, ephemeral) --------
@@ -151,7 +174,51 @@ def add_panel(canvas_id: uuid.UUID, data: PanelCreate, request: Request,
         action="canvas.panel.add",
         target_type="canvas",
         target_id=canvas_id,
-        metadata={"panel_id": str(panel["id"]), "figure_id": str(panel["figure_id"])},
+        metadata={
+            "panel_id": str(panel["id"]),
+            "figure_id": str(panel["figure_id"]) if panel["figure_id"] else None,
+            "image_key": panel.get("image_key"),
+        },
+        request=request,
+    )
+    db.commit()
+    return panel
+
+
+# -------- image panels (external SVG/PNG/JPEG import) --------
+# Multipart upload + placement in one call: the blob is validated/sanitized
+# (magic-byte sniffing, 40M-px raster budget, SVG script/href stripping) and a
+# panel row is created referencing it. x_mm/y_mm are the desired panel CENTER
+# (the client can't know the fitted size before the upload); omitted → sheet
+# center. Blobs are never deleted on panel removal (undo/duplicate safety).
+@router.post("/{canvas_id}/panels/image", response_model=CanvasPanel, status_code=201,
+             dependencies=[Depends(rate_limit("canvas_image_add", 60, 3600))])
+async def add_image_panel(
+    canvas_id: uuid.UUID,
+    request: Request,
+    file: UploadFile = File(...),
+    x_mm: float | None = Form(None),
+    y_mm: float | None = Form(None),
+    label: str | None = Form(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    content = await _read_image_limited(file)
+    enforce_storage_quota(db, current_user, len(content))
+    panel = service.add_image_panel(db, canvas_id, current_user.id, content,
+                                    x_mm=x_mm, y_mm=y_mm, label=label)
+    audit_service.log_event(
+        db,
+        actor_id=current_user.id,
+        action="canvas.panel.add_image",
+        target_type="canvas",
+        target_id=canvas_id,
+        metadata={
+            "panel_id": str(panel["id"]),
+            "image_key": panel.get("image_key"),
+            "filename": file.filename,
+            "bytes": len(content),
+        },
         request=request,
     )
     db.commit()

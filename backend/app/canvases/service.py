@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
 import io
@@ -16,6 +17,7 @@ from xml.sax.saxutils import escape as _xml_escape
 from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload
 
+from app.canvases import images as canvas_images
 from app.canvases.models import Canvas, CanvasPanel
 from app.canvases.schemas import CanvasCreate, PanelCreate, PreviewRenderRequest
 from app.common import storage
@@ -51,6 +53,30 @@ _CANVAS_BACKGROUNDS = {"white", "transparent"}
 # storage layout: local under static/figures/canvases/preview, object storage
 # under the "figures/canvases/preview" key prefix.
 _PREVIEW_PARTS = ("figures", "canvases", "preview")
+
+# Imported external images (SVG/PNG/JPEG panels). Stored under the figures
+# root — local: static/figures/canvases/imports, object storage: the
+# "figures/canvases/imports" key prefix — so the existing /static mount and the
+# /api/assets figures/ allow-list serve them with no new route (public-by-key,
+# same grade as rendered figures; grilling Q3). image_key is the RELATIVE part
+# ("canvases/imports/<hex32>.<ext>"), backend-agnostic.
+_IMAGE_KEY_RE = re.compile(r"^canvases/imports/[0-9a-f]{32}\.(png|jpg|svg)$")
+_IMAGE_MEDIA_TYPES = {"png": "image/png", "jpg": "image/jpeg", "svg": "image/svg+xml"}
+
+
+def _image_ref(image_key: str) -> str:
+    """storage.read_bytes-able ref for an import blob (local path or s3 URI)."""
+    if storage.object_storage_enabled():
+        return storage.object_uri(storage.object_key("figures", image_key))
+    return os.path.join(settings.figures_dir, image_key)
+
+
+def _image_url(image_key: str) -> str | None:
+    return figures_service._url(_image_ref(image_key))
+
+
+def _image_ext(image_key: str) -> str:
+    return image_key.rsplit(".", 1)[-1].lower()
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -355,18 +381,29 @@ def _panel_response(panel: CanvasPanel, current_map: dict[uuid.UUID, uuid.UUID |
     # ABSENCE from current_map means the figure is INACCESSIBLE to the caller
     # (see _figure_current_versions) — fail closed, including the pin, so no
     # version id or native-size metadata of an unreadable figure leaks.
-    if panel.figure_id not in current_map:
+    if panel.image_key:
+        # Imported-image panel: no figure/version machinery. render_url serves
+        # the stored (sanitized) blob directly; native size was computed once
+        # at upload from the image's own dimensions/DPI.
         effective = None
+        nw, nh = panel.image_native_width_mm, panel.image_native_height_mm
+        render_url = _image_url(panel.image_key)
+    elif panel.figure_id not in current_map:
+        effective = None
+        nw, nh = None, None
+        render_url = None
     else:
         effective = panel.pinned_version_id or current_map.get(panel.figure_id)
-    native = (native_map or {}).get(effective) if effective else None
-    nw, nh = native if native else (None, None)
+        native = (native_map or {}).get(effective) if effective else None
+        nw, nh = native if native else (None, None)
+        render_url = None
     return {
         "native_width_mm": nw,
         "native_height_mm": nh,
         "id": panel.id,
         "canvas_id": panel.canvas_id,
         "figure_id": panel.figure_id,
+        "image_key": panel.image_key,
         "pinned_version_id": panel.pinned_version_id,
         "x_mm": panel.x_mm,
         "y_mm": panel.y_mm,
@@ -378,7 +415,7 @@ def _panel_response(panel: CanvasPanel, current_map: dict[uuid.UUID, uuid.UUID |
         "created_at": panel.created_at,
         "updated_at": panel.updated_at,
         "effective_version_id": effective,
-        "render_url": None,
+        "render_url": render_url,
     }
 
 
@@ -570,6 +607,9 @@ def duplicate_canvas(db: Session, canvas_id: uuid.UUID, owner_id: uuid.UUID) -> 
         db.add(CanvasPanel(
             canvas_id=new_canvas_id,
             figure_id=p.figure_id,
+            image_key=p.image_key,
+            image_native_width_mm=p.image_native_width_mm,
+            image_native_height_mm=p.image_native_height_mm,
             pinned_version_id=p.pinned_version_id,
             x_mm=p.x_mm,
             y_mm=p.y_mm,
@@ -782,12 +822,123 @@ def _validate_pin(fig: Figure, pinned_version_id: uuid.UUID | None) -> None:
         )
 
 
+def _validate_image_key(image_key: str) -> tuple[float, float]:
+    """Validate a client-supplied import key (undo-recreate/duplication path)
+    and return the blob's native (w_mm, h_mm).
+
+    The strict key shape plus the existence check bound this to blobs that
+    passed the upload pipeline (every file under canvases/imports/ was
+    validated + sanitized there) — a key can never point outside that prefix.
+    Native size is re-derived from the stored bytes because the key alone
+    doesn't carry it.
+    """
+    if not _IMAGE_KEY_RE.fullmatch(image_key or ""):
+        raise BadRequestError("invalid image_key", error_code="BAD_IMAGE_KEY")
+    ref = _image_ref(image_key)
+    if not storage.exists(ref):
+        raise BadRequestError("image_key does not exist", error_code="BAD_IMAGE_KEY")
+    blob = storage.read_bytes(ref)
+    if _image_ext(image_key) == "svg":
+        _sanitized, nw, nh = canvas_images.sanitize_svg(blob)
+    else:
+        _bytes, nw, nh = canvas_images.validate_raster(blob, _image_ext(image_key))
+    return nw, nh
+
+
+def _fit_image_panel_mm(nw_mm: float, nh_mm: float, canvas_w: float, canvas_h: float) -> tuple[float, float]:
+    """Initial panel size for an imported image: native size, shrunk uniformly
+    (aspect preserved) if it exceeds ~90% of the sheet, raised uniformly so
+    both sides stay >= PANEL_MM_MIN. Mirrors the editor's fitToCanvasMm for
+    figure panels. The final per-side clamp only bites on pathological aspect
+    ratios (where min-side and max-side constraints conflict)."""
+    s = min(1.0, (canvas_w * 0.9) / nw_mm, (canvas_h * 0.9) / nh_mm)
+    s = max(s, _PANEL_MM_MIN / nw_mm, _PANEL_MM_MIN / nh_mm)
+    return (
+        _clamp(nw_mm * s, _PANEL_MM_MIN, _PANEL_MM_MAX),
+        _clamp(nh_mm * s, _PANEL_MM_MIN, _PANEL_MM_MAX),
+    )
+
+
+def add_image_panel(db: Session, canvas_id: uuid.UUID, owner_id: uuid.UUID,
+                    content: bytes,
+                    x_mm: float | None = None, y_mm: float | None = None,
+                    label: str | None = None) -> dict:
+    """Upload an external image (SVG/PNG/JPEG) and place it as a new panel.
+
+    Type is sniffed from magic bytes (never the filename); SVG is sanitized
+    and the SANITIZED serialization is what gets stored; rasters are decoded
+    under the 40M-pixel budget (JPEG re-encoded upright, EXIF dropped).
+    ``x_mm``/``y_mm`` are the desired panel CENTER (the client doesn't know
+    the final size before the upload); omitted → sheet center. Initial size is
+    the image's native physical size fitted to the sheet, aspect preserved.
+    """
+    canvas = get_canvas(db, canvas_id, owner_id, write=True)
+    if not content:
+        raise BadRequestError("empty image upload", error_code="BAD_IMAGE")
+
+    kind = canvas_images.sniff_kind(content)
+    if kind == "svg":
+        stored, native_w, native_h = canvas_images.sanitize_svg(content)
+    else:
+        stored, native_w, native_h = canvas_images.validate_raster(content, kind)
+
+    image_key = f"canvases/imports/{uuid.uuid4().hex}.{kind}"
+    media = _IMAGE_MEDIA_TYPES[kind]
+    if storage.object_storage_enabled():
+        storage.put_bytes(storage.object_key("figures", image_key), stored, content_type=media)
+    else:
+        path = os.path.join(settings.figures_dir, image_key)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as fh:
+            fh.write(stored)
+
+    width_mm, height_mm = _fit_image_panel_mm(native_w, native_h, canvas.width_mm, canvas.height_mm)
+    center_x = x_mm if x_mm is not None else canvas.width_mm / 2.0
+    center_y = y_mm if y_mm is not None else canvas.height_mm / 2.0
+
+    panel = CanvasPanel(
+        canvas_id=canvas.id,
+        figure_id=None,
+        image_key=image_key,
+        image_native_width_mm=native_w,
+        image_native_height_mm=native_h,
+        x_mm=_clamp(center_x - width_mm / 2.0, _PANEL_POS_MIN, _PANEL_POS_MAX),
+        y_mm=_clamp(center_y - height_mm / 2.0, _PANEL_POS_MIN, _PANEL_POS_MAX),
+        width_mm=width_mm,
+        height_mm=height_mm,
+        z_order=max((p.z_order for p in canvas.panels), default=-1) + 1,
+        label=(label or "").strip()[:8] or None,
+    )
+    db.add(panel)
+    db.commit()
+    db.refresh(panel)
+    return _panel_response(panel, {}, {})
+
+
 def add_panel(db: Session, canvas_id: uuid.UUID, owner_id: uuid.UUID, data: PanelCreate) -> dict:
     canvas = get_canvas(db, canvas_id, owner_id, write=True)
-    # The figure must be accessible to the caller (owner OR project access);
-    # get_figure raises NotFoundError (404) otherwise.
-    fig = figures_service.get_figure(db, data.figure_id, owner_id)
-    _validate_pin(fig, data.pinned_version_id)
+    # Exactly one content reference: a figure OR an already-uploaded import
+    # blob (the image_key form exists for undo-recreate/duplication — fresh
+    # uploads go through add_image_panel).
+    if (data.figure_id is None) == (data.image_key is None):
+        raise BadRequestError(
+            "exactly one of figure_id or image_key is required",
+            error_code="BAD_PANEL_CONTENT",
+        )
+
+    image_native: tuple[float, float] | None = None
+    if data.image_key is not None:
+        if data.pinned_version_id is not None:
+            raise BadRequestError(
+                "image panels cannot pin a figure version", error_code="BAD_PANEL_CONTENT"
+            )
+        image_native = _validate_image_key(data.image_key)
+        fig = None
+    else:
+        # The figure must be accessible to the caller (owner OR project access);
+        # get_figure raises NotFoundError (404) otherwise.
+        fig = figures_service.get_figure(db, data.figure_id, owner_id)
+        _validate_pin(fig, data.pinned_version_id)
 
     z_order = data.z_order
     if z_order is None:
@@ -795,7 +946,10 @@ def add_panel(db: Session, canvas_id: uuid.UUID, owner_id: uuid.UUID, data: Pane
 
     panel = CanvasPanel(
         canvas_id=canvas.id,
-        figure_id=fig.id,
+        figure_id=fig.id if fig is not None else None,
+        image_key=data.image_key,
+        image_native_width_mm=image_native[0] if image_native else None,
+        image_native_height_mm=image_native[1] if image_native else None,
         pinned_version_id=data.pinned_version_id,
         # Off-sheet placement envelope [-500, 1000]mm: a panel MAY be parked off
         # the A4 sheet (users place a figure beside the sheet and pull it back).
@@ -845,6 +999,10 @@ def update_panel(db: Session, canvas_id: uuid.UUID, panel_id: uuid.UUID,
     if "pinned_version_id" in data:
         pin = data["pinned_version_id"]
         if pin is not None:
+            if panel.figure_id is None:
+                raise BadRequestError(
+                    "image panels cannot pin a figure version", error_code="BAD_PANEL_CONTENT"
+                )
             fig = figures_service.get_figure(db, panel.figure_id, owner_id)
             _validate_pin(fig, pin)
         panel.pinned_version_id = pin
@@ -1168,41 +1326,76 @@ def _compose_canvas_svg(db: Session, owner_id: uuid.UUID, canvas: Canvas, crop: 
 
     snapshot: dict[str, str] = {}
     for idx, panel in enumerate(panels):
-        effective = panel.pinned_version_id or current_map.get(panel.figure_id)
-        if effective is None:
-            continue  # figure has no version yet → nothing to render
-
         pw_mm = _clamp(panel.width_mm, _PANEL_MM_MIN, _PANEL_MM_MAX)
         ph_mm = _clamp(panel.height_mm, _PANEL_MM_MIN, _PANEL_MM_MAX)
-        # Reuse the exact physical-size vector renderer (fonts stay pt, §5).
-        try:
-            ref, _layout, _cached = _render_preview_ref(
-                db,
-                owner_id,
-                PreviewRenderRequest(
-                    figure_id=panel.figure_id,
-                    version_id=effective,
-                    width_mm=pw_mm,
-                    height_mm=ph_mm,
-                ),
-            )
-        except NotFoundError:
-            # The exporting user can't access this panel's figure (e.g. the
-            # canvas was moved into a project while a panel still references a
-            # personal figure). Fail-closed per PANEL — skip it — instead of
-            # hard-404ing a collaborator's ENTIRE export on the first miss.
-            continue
-        svg_text = storage.read_bytes(ref).decode("utf-8")
-        attrs, inner = _split_svg(svg_text)
-        native_w, native_h = _svg_native_size(attrs)
-        inner = _prefix_svg_ids(inner, f"p{idx}_")
 
-        parts.append(
-            f'<svg x="{_num(panel.x_mm)}" y="{_num(panel.y_mm)}" '
-            f'width="{_num(pw_mm)}" height="{_num(ph_mm)}" '
-            f'viewBox="0 0 {_num(native_w)} {_num(native_h)}" '
-            f'preserveAspectRatio="none" overflow="hidden">{inner}</svg>'
-        )
+        effective = None
+        if panel.image_key:
+            # Imported image: SVG imports nest as vector (same path as figure
+            # panels — the stored markup is already sanitized); raster imports
+            # embed as a data-URI <image>, which rsvg resolves locally with no
+            # network access. A missing/corrupt blob skips the panel (same
+            # fail-open-per-panel policy as an inaccessible figure).
+            try:
+                blob = storage.read_bytes(_image_ref(panel.image_key))
+            except (OSError, RuntimeError, ValueError):
+                continue
+            if _image_ext(panel.image_key) == "svg":
+                try:
+                    attrs, inner = _split_svg(blob.decode("utf-8"))
+                except (BadRequestError, UnicodeDecodeError):
+                    continue
+                native_w, native_h = _svg_native_size(attrs)
+                inner = _prefix_svg_ids(inner, f"p{idx}_")
+                parts.append(
+                    f'<svg x="{_num(panel.x_mm)}" y="{_num(panel.y_mm)}" '
+                    f'width="{_num(pw_mm)}" height="{_num(ph_mm)}" '
+                    f'viewBox="0 0 {_num(native_w)} {_num(native_h)}" '
+                    f'preserveAspectRatio="none" overflow="hidden">{inner}</svg>'
+                )
+            else:
+                media = _IMAGE_MEDIA_TYPES[_image_ext(panel.image_key)]
+                b64 = base64.b64encode(blob).decode("ascii")
+                parts.append(
+                    f'<image x="{_num(panel.x_mm)}" y="{_num(panel.y_mm)}" '
+                    f'width="{_num(pw_mm)}" height="{_num(ph_mm)}" '
+                    f'preserveAspectRatio="none" '
+                    f'xlink:href="data:{media};base64,{b64}"/>'
+                )
+        else:
+            effective = panel.pinned_version_id or current_map.get(panel.figure_id)
+            if effective is None:
+                continue  # figure has no version yet → nothing to render
+
+            # Reuse the exact physical-size vector renderer (fonts stay pt, §5).
+            try:
+                ref, _layout, _cached = _render_preview_ref(
+                    db,
+                    owner_id,
+                    PreviewRenderRequest(
+                        figure_id=panel.figure_id,
+                        version_id=effective,
+                        width_mm=pw_mm,
+                        height_mm=ph_mm,
+                    ),
+                )
+            except NotFoundError:
+                # The exporting user can't access this panel's figure (e.g. the
+                # canvas was moved into a project while a panel still references a
+                # personal figure). Fail-closed per PANEL — skip it — instead of
+                # hard-404ing a collaborator's ENTIRE export on the first miss.
+                continue
+            svg_text = storage.read_bytes(ref).decode("utf-8")
+            attrs, inner = _split_svg(svg_text)
+            native_w, native_h = _svg_native_size(attrs)
+            inner = _prefix_svg_ids(inner, f"p{idx}_")
+
+            parts.append(
+                f'<svg x="{_num(panel.x_mm)}" y="{_num(panel.y_mm)}" '
+                f'width="{_num(pw_mm)}" height="{_num(ph_mm)}" '
+                f'viewBox="0 0 {_num(native_w)} {_num(native_h)}" '
+                f'preserveAspectRatio="none" overflow="hidden">{inner}</svg>'
+            )
 
         if panel.label_visible and panel.label:
             # Absolute-pt bold label pinned to the panel's top-left corner.
@@ -1215,7 +1408,10 @@ def _compose_canvas_svg(db: Session, owner_id: uuid.UUID, canvas: Canvas, crop: 
                 f'fill="#000000">{_xml_escape(panel.label)}</text>'
             )
 
-        snapshot[str(panel.id)] = str(effective)
+        # Snapshot records figure VERSIONS (§5 reproducibility) — image panels
+        # have no version and are immutable blobs, so they don't appear.
+        if effective is not None:
+            snapshot[str(panel.id)] = str(effective)
 
     # U8: annotations are emitted AFTER every panel — they always paint ABOVE
     # panels (V1) — sorted by (z, id) for stable, deterministic paint order.
@@ -1392,21 +1588,54 @@ def _build_pptx_bytes(db: Session, owner_id: uuid.UUID, canvas: Canvas, crop: bo
     panels = sorted(canvas.panels, key=lambda p: (p.z_order, str(p.id)))
     snapshot: dict[str, str] = {}
     for panel in panels:
-        effective = panel.pinned_version_id or current_map.get(panel.figure_id)
-        if effective is None:
-            continue
         pw = _clamp(panel.width_mm, _PANEL_MM_MIN, _PANEL_MM_MAX)
         ph = _clamp(panel.height_mm, _PANEL_MM_MIN, _PANEL_MM_MAX)
-        try:
-            ref, _layout, _cached = _render_preview_ref(
-                db, owner_id,
-                PreviewRenderRequest(figure_id=panel.figure_id, version_id=effective, width_mm=pw, height_mm=ph),
-            )
-        except NotFoundError:
-            continue  # inaccessible panel figure — skip, don't fail the whole export
-        svg_text = storage.read_bytes(ref).decode("utf-8")
-        png_bytes = _svg_to_png_bytes(svg_text, _PPTX_PANEL_DPI)
-        slide.shapes.add_picture(io.BytesIO(png_bytes), Mm(panel.x_mm - ox), Mm(panel.y_mm - oy), Mm(pw), Mm(ph))
+        effective = None
+        if panel.image_key:
+            # Imported image: PNG/JPEG insert natively (python-pptx reads
+            # both); SVG is wrapped at the panel's physical mm size and
+            # rasterized through the same rsvg path as figure panels.
+            try:
+                blob = storage.read_bytes(_image_ref(panel.image_key))
+            except (OSError, RuntimeError, ValueError):
+                continue
+            if _image_ext(panel.image_key) == "svg":
+                try:
+                    attrs, inner = _split_svg(blob.decode("utf-8"))
+                except (BadRequestError, UnicodeDecodeError):
+                    continue
+                native_w, native_h = _svg_native_size(attrs)
+                wrapper = (
+                    '<svg xmlns="http://www.w3.org/2000/svg" '
+                    'xmlns:xlink="http://www.w3.org/1999/xlink" '
+                    f'width="{_num(pw)}mm" height="{_num(ph)}mm" '
+                    f'viewBox="0 0 {_num(pw)} {_num(ph)}">'
+                    f'<svg x="0" y="0" width="{_num(pw)}" height="{_num(ph)}" '
+                    f'viewBox="0 0 {_num(native_w)} {_num(native_h)}" '
+                    f'preserveAspectRatio="none" overflow="hidden">{inner}</svg></svg>'
+                )
+                picture_bytes = _svg_to_png_bytes(wrapper, _PPTX_PANEL_DPI)
+            else:
+                picture_bytes = blob
+            try:
+                slide.shapes.add_picture(io.BytesIO(picture_bytes),
+                                         Mm(panel.x_mm - ox), Mm(panel.y_mm - oy), Mm(pw), Mm(ph))
+            except Exception:  # noqa: BLE001 - skip an unreadable image, keep the export
+                continue
+        else:
+            effective = panel.pinned_version_id or current_map.get(panel.figure_id)
+            if effective is None:
+                continue
+            try:
+                ref, _layout, _cached = _render_preview_ref(
+                    db, owner_id,
+                    PreviewRenderRequest(figure_id=panel.figure_id, version_id=effective, width_mm=pw, height_mm=ph),
+                )
+            except NotFoundError:
+                continue  # inaccessible panel figure — skip, don't fail the whole export
+            svg_text = storage.read_bytes(ref).decode("utf-8")
+            png_bytes = _svg_to_png_bytes(svg_text, _PPTX_PANEL_DPI)
+            slide.shapes.add_picture(io.BytesIO(png_bytes), Mm(panel.x_mm - ox), Mm(panel.y_mm - oy), Mm(pw), Mm(ph))
         if panel.label_visible and panel.label:
             try:
                 tb = slide.shapes.add_textbox(Mm(panel.x_mm - ox + _LABEL_INSET_MM), Mm(panel.y_mm - oy),
@@ -1421,7 +1650,8 @@ def _build_pptx_bytes(db: Session, owner_id: uuid.UUID, canvas: Canvas, crop: bo
                 run.font.color.rgb = RGBColor(0, 0, 0)
             except Exception:  # noqa: BLE001 - label is decorative
                 pass
-        snapshot[str(panel.id)] = str(effective)
+        if effective is not None:
+            snapshot[str(panel.id)] = str(effective)
 
     annotations = sorted(
         (a for a in (canvas.annotations or []) if isinstance(a, dict)),
@@ -1612,7 +1842,8 @@ def apply_canvas_style(db: Session, canvas_id: uuid.UUID, owner_id: uuid.UUID,
     one of the canvas's own panel figures. Returns {updated, skipped}.
     """
     canvas = get_canvas(db, canvas_id, owner_id, write=True)
-    panel_figure_ids = [p.figure_id for p in canvas.panels]
+    # Image panels carry no figure/style — they neither source nor receive.
+    panel_figure_ids = [p.figure_id for p in canvas.panels if p.figure_id is not None]
     if source_figure_id not in panel_figure_ids:
         raise BadRequestError(
             "source_figure_id must be one of the canvas's panel figures",

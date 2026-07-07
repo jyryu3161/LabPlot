@@ -587,7 +587,11 @@ export interface ClientErrorItem {
 export interface CanvasPanel {
   id: string;
   canvas_id: string;
-  figure_id: string;
+  /** null for imported-image panels (image_key set instead). */
+  figure_id: string | null;
+  /** Imported external image (SVG/PNG/JPEG): relative storage key
+   *  "canvases/imports/<hex32>.<ext>"; render_url serves the blob. */
+  image_key?: string | null;
   pinned_version_id?: string | null;
   x_mm: number;
   y_mm: number;

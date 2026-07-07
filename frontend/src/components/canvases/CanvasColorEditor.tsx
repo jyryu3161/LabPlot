@@ -9,6 +9,11 @@ import {
   getFigure, getPlotTypes, rerenderFigure, renderCanvasPreview, ApiError,
 } from '@/lib/api';
 import type { CanvasPanel, CanvasPreviewResult, SeriesStyle } from '@/lib/types';
+
+// This editor only ever mounts for FIGURE panels (the canvas editor routes
+// imported-image panels to a plain info sidebar instead), so figure_id is
+// non-null by construction here.
+type FigurePanel = CanvasPanel & { figure_id: string };
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -33,7 +38,7 @@ const LINE_WIDTH_CHOICES: [number, string][] = [
 // Preview key: a re-render is only needed when figure / effective version / physical
 // size changes — the same inputs as the M2 panel image cache. After a color commit,
 // the panel's effective_version_id changes → this refetches the committed render.
-function previewKey(panel: CanvasPanel): string {
+function previewKey(panel: FigurePanel): string {
   return `${panel.figure_id}|${panel.effective_version_id ?? 'latest'}|${roundMm(panel.width_mm)}|${roundMm(panel.height_mm)}`;
 }
 
@@ -42,7 +47,7 @@ function previewKey(panel: CanvasPanel): string {
  * RESULT (svg_url + layout with series_hex/legend_keys/panel_px/img_px) AND fetches the
  * SVG text so it can be inlined and recolored client-side.
  */
-function usePanelPreview(panel: CanvasPanel, enabled: boolean) {
+function usePanelPreview(panel: FigurePanel, enabled: boolean) {
   const [state, setState] = useState<{ result: CanvasPreviewResult | null; svgText: string | null; loading: boolean }>(
     { result: null, svgText: null, loading: enabled },
   );
@@ -85,7 +90,7 @@ export function CanvasColorEditor({
   overlayRect,
   gestureActive = false,
 }: {
-  panel: CanvasPanel;
+  panel: FigurePanel;
   canvasId: string;
   canvasName: string;
   containerEl: HTMLElement | null;

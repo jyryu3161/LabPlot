@@ -48,10 +48,21 @@ class CanvasPanel(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     canvas_id = Column(UUID(as_uuid=True), ForeignKey("canvases.id", ondelete="CASCADE"), nullable=False, index=True)
-    # reverse lookup: "canvases using this figure" (invalidate derived cache on color commit)
-    figure_id = Column(UUID(as_uuid=True), ForeignKey("figures.id", ondelete="CASCADE"), nullable=False, index=True)
+    # reverse lookup: "canvases using this figure" (invalidate derived cache on color commit).
+    # NULL for imported-image panels (image_key set instead) — a DB CHECK
+    # constraint enforces exactly one of figure_id/image_key per row.
+    figure_id = Column(UUID(as_uuid=True), ForeignKey("figures.id", ondelete="CASCADE"), nullable=True, index=True)
     # null => follow-latest (figure.current_version_id); else pinned
     pinned_version_id = Column(UUID(as_uuid=True), nullable=True)
+    # Imported external image (SVG/PNG/JPEG): relative storage key
+    # "canvases/imports/<hex32>.<ext>" under the figures storage root. The blob
+    # is validated + (for SVG) sanitized at upload and never deleted on panel
+    # removal (undo/duplicate safety — orphan cleanup is a future batch job).
+    image_key = Column(String(160), nullable=True)
+    # Native physical size (mm) computed once at upload from the image's own
+    # dimensions/DPI — feeds the editor's original-size placement/reset.
+    image_native_width_mm = Column(Float, nullable=True)
+    image_native_height_mm = Column(Float, nullable=True)
     x_mm = Column(Float, nullable=False)   # top-left position on canvas (DOUBLE PRECISION)
     y_mm = Column(Float, nullable=False)
     width_mm = Column(Float, nullable=False)   # panel physical size -> drives re-render

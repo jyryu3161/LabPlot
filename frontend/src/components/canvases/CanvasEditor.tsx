@@ -9,8 +9,8 @@ import { toast } from 'sonner';
 import Konva from 'konva';
 import { Stage, Layer, Rect, Group, Image as KonvaImage, Text, Transformer, Line, Circle, Shape } from 'react-konva';
 import {
-  getCanvas, updateCanvas, addCanvasPanel, updateCanvasPanel, deleteCanvasPanel, renderCanvasPreview,
-  downloadCanvasExport, duplicateFigure, duplicateCanvas, listProjects, ApiError,
+  getCanvas, updateCanvas, addCanvasPanel, addCanvasImagePanel, updateCanvasPanel, deleteCanvasPanel,
+  renderCanvasPreview, downloadCanvasExport, duplicateFigure, duplicateCanvas, listProjects, ApiError,
   type CanvasExportFormat,
 } from '@/lib/api';
 import type { CanvasDetail, CanvasPanel, CanvasAnnotation, FigureListItem } from '@/lib/types';
@@ -25,6 +25,7 @@ import {
 import {
   Loader2, Plus, Trash2, ArrowUp, ArrowDown, Maximize2, ZoomIn, ZoomOut, Lock, Unlock, Tag, Pencil, Check,
   Download, Undo2, Redo2, ExternalLink, FlaskConical, CopyPlus, Grid3x3, Magnet, Ruler, ClipboardPaste, Crop,
+  ImagePlus,
   AlignStartVertical, AlignCenterVertical, AlignEndVertical,
   AlignStartHorizontal, AlignCenterHorizontal, AlignEndHorizontal,
   AlignHorizontalDistributeCenter, AlignVerticalDistributeCenter,
@@ -120,9 +121,11 @@ function gridSnapTargetsPx(sizeMm: number, pxPerMm: number): number[] {
 // ── panel figure image cache ────────────────────────────────────────────────
 // Keyed by (figure_id, version_id, round(w_mm), round(h_mm)) per design §3/§4:
 // a re-render is only needed when the physical panel SIZE changes. Moving a
-// panel (position only) reuses the cached image.
+// panel (position only) reuses the cached image. Imported-image panels key by
+// their blob alone — the blob is immutable and never re-renders on resize.
 const imageCache = new Map<string, HTMLImageElement>();
-function panelKey(panel: Pick<CanvasPanel, 'figure_id' | 'effective_version_id' | 'width_mm' | 'height_mm'>): string {
+function panelKey(panel: Pick<CanvasPanel, 'figure_id' | 'image_key' | 'effective_version_id' | 'width_mm' | 'height_mm'>): string {
+  if (panel.image_key) return `image|${panel.image_key}`;
   return `${panel.figure_id}|${panel.effective_version_id ?? 'latest'}|${Math.round(panel.width_mm)}|${Math.round(panel.height_mm)}`;
 }
 
@@ -148,13 +151,22 @@ function usePanelImage(panel: CanvasPanel): { img: HTMLImageElement | null; load
     setLoading(true);
     (async () => {
       try {
-        // Re-layout render at the panel's CURRENT physical size (mm).
-        const { svg_url } = await renderCanvasPreview({
-          figure_id: panel.figure_id,
-          version_id: panel.effective_version_id ?? undefined,
-          width_mm: roundMm(panel.width_mm),
-          height_mm: roundMm(panel.height_mm),
-        });
+        let src: string;
+        if (panel.image_key) {
+          // Imported image: the stored (sanitized) blob is served directly —
+          // no re-render on resize, ever.
+          if (!panel.render_url) { setLoading(false); return; }
+          src = panel.render_url;
+        } else {
+          // Re-layout render at the panel's CURRENT physical size (mm).
+          const { svg_url } = await renderCanvasPreview({
+            figure_id: panel.figure_id!,
+            version_id: panel.effective_version_id ?? undefined,
+            width_mm: roundMm(panel.width_mm),
+            height_mm: roundMm(panel.height_mm),
+          });
+          src = svg_url;
+        }
         const image = new window.Image();
         image.onload = () => {
           if (cancelled) return;
@@ -163,13 +175,13 @@ function usePanelImage(panel: CanvasPanel): { img: HTMLImageElement | null; load
           setLoading(false);
         };
         image.onerror = () => { if (!cancelled) setLoading(false); };
-        image.src = svg_url; // SVG loads fine as an <img> src
+        image.src = src; // SVG loads fine as an <img> src
       } catch {
         if (!cancelled) setLoading(false);
       }
     })();
     return () => { cancelled = true; };
-  }, [key, panel.figure_id, panel.effective_version_id, panel.width_mm, panel.height_mm]);
+  }, [key, panel.figure_id, panel.image_key, panel.render_url, panel.effective_version_id, panel.width_mm, panel.height_mm]);
 
   return { img, loading };
 }
@@ -224,9 +236,13 @@ function CanvasPanelNode({
   // Letterbox the image to its own aspect ratio. In steady state the render
   // matches the panel box exactly (it was rendered at these mm), so this is a
   // no-op; while a resize re-render is in flight it stops the stale image from
-  // being drawn stretched into the new box.
+  // being drawn stretched into the new box. Imported-image panels STRETCH to
+  // the box instead — the export composite paints them with
+  // preserveAspectRatio="none", so the editor must match (their aspect is
+  // transformer-locked anyway, so a visible stretch only means the stored
+  // geometry already diverged and hiding it would lie about the export).
   let imgX = 0, imgY = 0, imgW = w, imgH = h;
-  if (img && img.width > 0 && img.height > 0) {
+  if (!panel.image_key && img && img.width > 0 && img.height > 0) {
     const s = Math.min(w / img.width, h / img.height);
     imgW = img.width * s;
     imgH = img.height * s;
@@ -272,7 +288,7 @@ function CanvasPanelNode({
       {img && <KonvaImage image={img} x={imgX} y={imgY} width={imgW} height={imgH} listening={false} />}
       {!img && !loading && (
         <Text
-          text="render failed"
+          text={panel.image_key ? 'image unavailable' : 'render failed'}
           x={0}
           y={h / 2 - 6}
           width={w}
@@ -322,6 +338,7 @@ function snapshotOf(panel: CanvasPanel): PanelSnapshot {
   return {
     panelId: panel.id,
     figure_id: panel.figure_id,
+    image_key: panel.image_key ?? null,
     x_mm: panel.x_mm,
     y_mm: panel.y_mm,
     width_mm: panel.width_mm,
@@ -496,6 +513,9 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     });
   }, []);
   const [pickerOpen, setPickerOpen] = useState(false);
+  // Hidden file input backing the "Add image" toolbar button (drag-drop onto
+  // the sheet is the other entry point — see handleContainerDrop).
+  const imageInputRef = useRef<HTMLInputElement>(null);
   // U3: project affiliation — breadcrumb link + owner-only move dialog.
   const [moveOpen, setMoveOpen] = useState(false);
   const [moveTarget, setMoveTarget] = useState<string>('personal');
@@ -920,6 +940,22 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     onError: () => toast.error('Could not add figure'),
   });
 
+  // External image import (SVG/PNG/JPEG → panel). The server sniffs/validates
+  // the file, computes the fitted native size, and returns the created panel;
+  // x_mm/y_mm are the desired CENTER (drop point), omitted = sheet center.
+  const addImagePanel = useMutation({
+    mutationFn: ({ file, center }: { file: File; center?: { x_mm: number; y_mm: number } }) =>
+      addCanvasImagePanel(canvasId, file, { ...(center ?? {}), label: nextLabel(panels) }),
+    onSuccess: (panel) => {
+      qc.setQueryData<CanvasDetail>(queryKey, (old) =>
+        old ? { ...old, panels: [...old.panels, panel] } : old,
+      );
+      setSelectedIds([panel.id]);
+      historyRef.current?.record({ type: 'panel-add', snapshot: snapshotOf(panel), label: 'add image' });
+    },
+    onError: (e) => toast.error(e instanceof Error && e.message ? e.message : 'Could not add the image'),
+  });
+
   const removePanel = useMutation({
     mutationFn: ({ panelId }: { panelId: string; record?: boolean }) => deleteCanvasPanel(canvasId, panelId),
     onMutate: async ({ panelId }) => {
@@ -1144,7 +1180,10 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   async function recreatePanel(snap: PanelSnapshot) {
     const created = await addPanel.mutateAsync({
       data: {
-        figure_id: snap.figure_id,
+        // Exactly one of figure_id/image_key — image blobs survive panel
+        // deletion, so re-referencing the key always works.
+        figure_id: snap.figure_id ?? undefined,
+        image_key: snap.image_key ?? undefined,
         x_mm: snap.x_mm,
         y_mm: snap.y_mm,
         width_mm: snap.width_mm,
@@ -1746,20 +1785,34 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     setSizeClip(size);
     toast.success(`Copied size ${size.width_mm}×${size.height_mm} mm`);
   }
+  // An imported image never stretches: pasting a size onto one fits the
+  // LARGEST aspect-true box inside the copied w×h instead of adopting it
+  // verbatim (matches the transformer's forced keepRatio).
+  function pastedSizeFor(p: CanvasPanel, w: number, h: number): { width_mm: number; height_mm: number } {
+    if (!p.image_key || p.width_mm <= 0 || p.height_mm <= 0) return { width_mm: w, height_mm: h };
+    const s = Math.min(w / p.width_mm, h / p.height_mm);
+    return {
+      width_mm: roundMm(clampPanelMm(p.width_mm * s)),
+      height_mm: roundMm(clampPanelMm(p.height_mm * s)),
+    };
+  }
   function pasteSizeToSelected() {
     if (!sizeClip) return;
     const w = roundMm(clampPanelMm(sizeClip.width_mm));
     const h = roundMm(clampPanelMm(sizeClip.height_mm));
     // Apply only to selected panels whose size actually differs (a no-op paste
     // must not burn a history entry or re-render an already-matching panel).
-    const targets = panels.filter((p) => selectedPanelIds.includes(p.id)
-      && (Math.abs(p.width_mm - w) >= EPS_MM || Math.abs(p.height_mm - h) >= EPS_MM));
+    const targets = panels.filter((p) => {
+      if (!selectedPanelIds.includes(p.id)) return false;
+      const t = pastedSizeFor(p, w, h);
+      return Math.abs(p.width_mm - t.width_mm) >= EPS_MM || Math.abs(p.height_mm - t.height_mm) >= EPS_MM;
+    });
     if (targets.length === 0) return;
     if (targets.length === 1) {
       const p = targets[0];
       patchPanel.mutate({
         panelId: p.id,
-        data: { width_mm: w, height_mm: h }, // position unchanged (off-sheet stays)
+        data: pastedSizeFor(p, w, h), // position unchanged (off-sheet stays)
         history: { before: { width_mm: p.width_mm, height_mm: p.height_mm }, label: 'paste size' },
       });
     } else {
@@ -1767,7 +1820,7 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
         targets.map((p) => ({
           panelId: p.id,
           before: { width_mm: p.width_mm, height_mm: p.height_mm },
-          after: { width_mm: w, height_mm: h },
+          after: pastedSizeFor(p, w, h),
         })),
         'paste size',
       );
@@ -2011,6 +2064,60 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
       },
       record: true,
     });
+  }
+
+  // ── add external image (SVG/PNG/JPEG) — toolbar button + file drag-drop ──
+  function isImportableImage(file: File): boolean {
+    return /\.(svg|png|jpe?g)$/i.test(file.name)
+      || ['image/svg+xml', 'image/png', 'image/jpeg'].includes(file.type);
+  }
+  /** Upload each importable file as a new image panel. `center` (canvas mm) is
+   * the drop point; the button path omits it (server centers on the sheet).
+   * Sequential so labels (A/B/C…) and stagger offsets stay deterministic. */
+  async function importImageFiles(files: FileList | File[], center?: { x_mm: number; y_mm: number }) {
+    const list = Array.from(files).filter(isImportableImage);
+    if (list.length === 0) {
+      toast.error('Only SVG, PNG, or JPEG images can be imported');
+      return;
+    }
+    for (let i = 0; i < list.length; i++) {
+      const offset = i * 8; // stagger multi-file drops like new figure panels
+      try {
+        await addImagePanel.mutateAsync({
+          file: list[i],
+          center: center
+            ? { x_mm: roundMm(center.x_mm + offset), y_mm: roundMm(center.y_mm + offset) }
+            : undefined,
+        });
+      } catch {
+        break; // onError already toasted; don't spam one toast per remaining file
+      }
+    }
+  }
+  function handleImageInputChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = e.target.files;
+    if (files && files.length > 0) void importImageFiles(files);
+    e.target.value = ''; // allow re-picking the same file
+  }
+  /** OS file drag → place at the drop point. Only claims drags that carry
+   * files, so Konva's own node dragging is never affected (it doesn't use the
+   * HTML5 drag-and-drop API at all). */
+  function handleContainerDragOver(e: React.DragEvent<HTMLDivElement>) {
+    if (Array.from(e.dataTransfer.types).includes('Files')) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'copy';
+    }
+  }
+  function handleContainerDrop(e: React.DragEvent<HTMLDivElement>) {
+    if (!e.dataTransfer.files || e.dataTransfer.files.length === 0) return;
+    e.preventDefault();
+    const el = containerRef.current;
+    if (!el || !canvas) return;
+    const rect = el.getBoundingClientRect();
+    // screen px → canvas mm (undo pan/zoom, then the fit scale).
+    const x_mm = pxToMm((e.clientX - rect.left - view.x) / view.zoom, pxPerMm);
+    const y_mm = pxToMm((e.clientY - rect.top - view.y) / view.zoom, pxPerMm);
+    void importImageFiles(e.dataTransfer.files, { x_mm, y_mm });
   }
 
   // ── wheel: scroll pans, pinch / Ctrl(Cmd)+wheel zooms (Figma convention) ──
@@ -2559,7 +2666,10 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     // F3: a locked-ratio CORNER drag moves both axes together; snapping one
     // axis independently would silently break the aspect the lock promises.
     // Skip snapping for that case (guides off) rather than fight keepRatio.
-    if (lockAspect && (leftMoved || rightMoved) && (topMoved || bottomMoved)) {
+    // Image panels are ALWAYS ratio-locked (keepRatio is forced on for them
+    // regardless of the Aspect toggle), so they get the same treatment.
+    const imageRatioLocked = selectedIds.some((id) => panels.some((p) => p.id === id && p.image_key));
+    if ((lockAspect || imageRatioLocked) && (leftMoved || rightMoved) && (topMoved || bottomMoved)) {
       if (guides.x !== null || guides.y !== null) setGuides({ x: null, y: null });
       return newBox;
     }
@@ -2711,6 +2821,12 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
       }
     : null;
 
+  // Narrowed handle for the figure-only Edit sidebar (CanvasColorEditor):
+  // imported-image panels route to a plain info sidebar instead.
+  const selectedFigurePanel = selectedPanel && selectedPanel.figure_id
+    ? (selectedPanel as CanvasPanel & { figure_id: string })
+    : null;
+
   // U8: selection composition drives the toolbar/sidebar below.
   const isAnnotationOnlySelection = selectedAnnotationIds.length > 0 && selectedPanelIds.length === 0;
   const isMixedSelection = selectedPanelIds.length > 0 && selectedAnnotationIds.length > 0;
@@ -2720,9 +2836,17 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     || annotations.some((a) => a.id === id && a.type !== 'line' && a.type !== 'arrow'));
   const textOnlyTransform = transformEligibleIds.length > 0
     && transformEligibleIds.every((id) => annotations.find((a) => a.id === id)?.type === 'text');
+  // Imported-image panels never resize free-form (a stretched photo reads as
+  // corrupted data in a scientific figure): any selection touching one gets
+  // corner-only anchors + a forced keepRatio, regardless of the Aspect toggle.
+  const selectionHasImagePanel = transformEligibleIds.some(
+    (id) => panels.some((p) => p.id === id && p.image_key),
+  );
   const transformerAnchors: string[] = textOnlyTransform
     ? ['middle-left', 'middle-right']
-    : ['top-left', 'top-right', 'bottom-left', 'bottom-right', 'middle-left', 'middle-right', 'top-center', 'bottom-center'];
+    : selectionHasImagePanel
+      ? ['top-left', 'top-right', 'bottom-left', 'bottom-right']
+      : ['top-left', 'top-right', 'bottom-left', 'bottom-right', 'middle-left', 'middle-right', 'top-center', 'bottom-center'];
 
   // Sole-selected line/arrow annotation → render draggable endpoint handles
   // instead of the Transformer (which excludes them — see isTransformerEligible).
@@ -2944,6 +3068,27 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
+          <input
+            ref={imageInputRef}
+            type="file"
+            accept=".svg,.png,.jpg,.jpeg,image/svg+xml,image/png,image/jpeg"
+            multiple
+            className="hidden"
+            aria-hidden="true"
+            tabIndex={-1}
+            onChange={handleImageInputChange}
+          />
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={addImagePanel.isPending}
+            onClick={() => imageInputRef.current?.click()}
+            title="Import an external image (SVG, PNG, or JPEG — up to 20MB) as a panel. You can also drop files straight onto the sheet."
+          >
+            {addImagePanel.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <ImagePlus className="h-4 w-4" />}
+            Add image
+          </Button>
           <Button type="button" size="sm" onClick={() => setPickerOpen(true)}>
             <Plus className="h-4 w-4" /> Add figure
           </Button>
@@ -2955,7 +3100,7 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
       {selectedPanel && !pointerGestureActive && (
         <div className="flex flex-wrap items-center gap-2 border-b bg-muted/40 px-4 py-1.5 text-sm">
           <span className="text-xs text-muted-foreground">
-            Panel {selectedPanel.label || '—'} · {roundMm(selectedPanel.width_mm)}×{roundMm(selectedPanel.height_mm)} mm
+            {selectedPanel.image_key ? 'Image' : 'Panel'} {selectedPanel.label || '—'} · {roundMm(selectedPanel.width_mm)}×{roundMm(selectedPanel.height_mm)} mm
           </span>
           <span className="mx-1 flex items-center gap-1">
             <Tag className="h-3.5 w-3.5 text-muted-foreground" />
@@ -2999,9 +3144,15 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
           <Button type="button" size="xs" variant="outline" onClick={() => sendBack(selectedPanel)} title="Send this panel behind overlapping panels">
             <ArrowDown className="h-3.5 w-3.5" /> Back
           </Button>
-          <Button type="button" size="xs" variant={lockAspect ? 'default' : 'outline'} onClick={() => setLockAspect((v) => !v)} title="Keep the aspect ratio while resizing from a corner">
-            {lockAspect ? <Lock className="h-3.5 w-3.5" /> : <Unlock className="h-3.5 w-3.5" />} Aspect
-          </Button>
+          {selectedPanel.image_key ? (
+            <Button type="button" size="xs" variant="default" disabled title="Imported images always keep their aspect ratio">
+              <Lock className="h-3.5 w-3.5" /> Aspect
+            </Button>
+          ) : (
+            <Button type="button" size="xs" variant={lockAspect ? 'default' : 'outline'} onClick={() => setLockAspect((v) => !v)} title="Keep the aspect ratio while resizing from a corner">
+              {lockAspect ? <Lock className="h-3.5 w-3.5" /> : <Unlock className="h-3.5 w-3.5" />} Aspect
+            </Button>
+          )}
           <Button type="button" size="xs" variant="outline" title="Copy this panel's exact size (width × height) so you can paste it onto other panels" onClick={() => copyPanelSize(selectedPanel)}>
             <Ruler className="h-3.5 w-3.5" /> Copy size
           </Button>
@@ -3046,15 +3197,17 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
               <Maximize2 className="h-3.5 w-3.5" /> Original size
             </Button>
           ) : null}
-          <Button
-            type="button"
-            size="xs"
-            variant="outline"
-            title="Open this figure in the figure editor (new tab)"
-            onClick={() => window.open(`/figures/${selectedPanel.figure_id}`, '_blank', 'noopener')}
-          >
-            <ExternalLink className="h-3.5 w-3.5" /> Edit figure
-          </Button>
+          {selectedPanel.figure_id && (
+            <Button
+              type="button"
+              size="xs"
+              variant="outline"
+              title="Open this figure in the figure editor (new tab)"
+              onClick={() => window.open(`/figures/${selectedPanel.figure_id}`, '_blank', 'noopener')}
+            >
+              <ExternalLink className="h-3.5 w-3.5" /> Edit figure
+            </Button>
+          )}
           <Button type="button" size="xs" variant="ghost" className="text-destructive" title="Remove this panel from the canvas" onClick={() => { if (window.confirm('Remove this panel from the canvas?')) removePanel.mutate({ panelId: selectedPanel.id, record: true }); }}>
             <Trash2 className="h-3.5 w-3.5" /> Delete
           </Button>
@@ -3166,6 +3319,8 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
         ref={setContainerRef}
         className="relative flex-1 overflow-hidden bg-muted/30"
         style={spaceHeld ? { cursor: 'grab' } : activeTool !== 'select' ? { cursor: 'crosshair' } : undefined}
+        onDragOver={handleContainerDragOver}
+        onDrop={handleContainerDrop}
       >
         <CanvasAnnotationToolbar active={activeTool} onSelect={setActiveTool} />
         {viewport.w > 0 && viewport.h > 0 && (
@@ -3347,7 +3502,7 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
               <Transformer
                 ref={trRef}
                 rotateEnabled={false}
-                keepRatio={lockAspect}
+                keepRatio={lockAspect || selectionHasImagePanel}
                 enabledAnchors={transformerAnchors}
                 anchorSize={8}
                 borderStroke="#2563EB"
@@ -3369,7 +3524,7 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
         {panels.length === 0 && (
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
             <p className="rounded-md bg-background/80 px-4 py-2 text-sm text-muted-foreground shadow-sm">
-              Empty canvas — use “＋ Add figure” to place your first panel.
+              Empty canvas — use “＋ Add figure” to place your first panel, or drop an SVG/PNG/JPEG image file here.
             </p>
           </div>
         )}
@@ -3409,10 +3564,24 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
             Inspector each render their own w-64 border-l column; the empty
             state renders a matching-width placeholder so the width is
             identical in all three states. */}
-        {selectedPanel ? (
+        {selectedPanel && selectedPanel.image_key ? (
+          <aside className="flex w-64 shrink-0 flex-col gap-2 border-l bg-background p-4 text-xs text-muted-foreground">
+            <span className="flex items-center gap-1.5 font-medium text-foreground">
+              <ImagePlus className="h-3.5 w-3.5" /> Imported image
+            </span>
+            <span className="uppercase">{selectedPanel.image_key.split('.').pop()}</span>
+            {selectedPanel.native_width_mm && selectedPanel.native_height_mm ? (
+              <span>Native size {roundMm(selectedPanel.native_width_mm)}×{roundMm(selectedPanel.native_height_mm)} mm</span>
+            ) : null}
+            <span>
+              Resizing keeps the aspect ratio. Use the toolbar above to label,
+              reorder, or restore the original size.
+            </span>
+          </aside>
+        ) : selectedFigurePanel ? (
           <CanvasColorEditor
-            key={selectedPanel.id}
-            panel={selectedPanel}
+            key={selectedFigurePanel.id}
+            panel={selectedFigurePanel}
             canvasId={canvasId}
             canvasName={canvas.name}
             containerEl={containerEl}
