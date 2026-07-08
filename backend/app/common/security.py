@@ -51,7 +51,7 @@ INTERACTIVE_FIGURE_HTML_HEADERS = {
     ),
 }
 
-_INTERACTIVE_FIGURE_HTML_RE = re.compile(r"^/static/figures/.+\.html$", re.IGNORECASE)
+_INTERACTIVE_FIGURE_HTML_RE = re.compile(r"^/(?:static/)?figures/.+\.html$", re.IGNORECASE)
 
 
 def security_headers_for_path(path: str) -> dict[str, str]:

@@ -48,6 +48,8 @@
 	handle @interactive_figure_html {
 		header Cache-Control "private, max-age=3600"
 		reverse_proxy labplot-backend:8000 {
+			header_down -X-Frame-Options
+			header_down -Content-Security-Policy
 			header_up -X-Forwarded-For
 			header_up X-Forwarded-For {remote_host}
 			header_up X-Real-IP {remote_host}
@@ -56,6 +58,8 @@
 	handle /static/figures/* {
 		header Cache-Control "public, max-age=31536000, immutable"
 		reverse_proxy labplot-backend:8000 {
+			header_down -X-Frame-Options
+			header_down -Content-Security-Policy
 			header_up -X-Forwarded-For
 			header_up X-Forwarded-For {remote_host}
 			header_up X-Real-IP {remote_host}
