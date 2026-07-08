@@ -369,6 +369,8 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
   const hasLevelOrder = Array.isArray(effectiveOptions.level_order);
   const canEditFigure = !fig?.project_id || project?.role === 'owner' || project?.role === 'editor';
   const isViewerOnly = Boolean(fig?.project_id && project?.role === 'viewer');
+  const interactiveHtmlReady = Boolean(version?.html_url);
+  const interactiveHtmlRequested = Boolean(effectiveOptions.interactive_html);
   const hasUnsavedEdits = Boolean(
     mapping !== null || options !== null
     || (plotType !== null && plotType !== fig?.plot_type)
@@ -1008,24 +1010,47 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
           {/* left: image + paper-writing */}
           <div className="space-y-4 lg:col-span-2">
             <Card><CardContent className="space-y-3 p-4">
-              <div className="flex flex-wrap items-center justify-end gap-2">
-                <Label htmlFor="interactive-view" className="cursor-pointer text-xs text-muted-foreground">Interactive view</Label>
-                <Switch
-                  id="interactive-view"
-                  checked={interactiveView && Boolean(version?.html_url)}
-                  onCheckedChange={setInteractiveView}
-                  disabled={!version?.html_url}
-                  aria-label="Show the interactive HTML figure with hover tooltips"
-                />
-                {!version?.html_url && (
-                  <span className="text-[11px] text-muted-foreground">Enable &lsquo;Interactive HTML&rsquo; and re-render to view.</span>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Label htmlFor="interactive-view" className="cursor-pointer text-xs text-muted-foreground">Interactive view</Label>
+                  <Switch
+                    id="interactive-view"
+                    checked={interactiveView && interactiveHtmlReady}
+                    onCheckedChange={setInteractiveView}
+                    disabled={!interactiveHtmlReady}
+                    aria-label="Show the interactive HTML figure with hover tooltips"
+                  />
+                  <span className="text-[11px] text-muted-foreground">
+                    {interactiveHtmlReady ? 'Hover points in the interactive version.' : 'Generate an interactive version to enable this view.'}
+                  </span>
+                </div>
+                {!interactiveHtmlReady && canEditFigure && (
+                  <div className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/20 px-2 py-1.5">
+                    <Label htmlFor="interactive-html-preview" className="cursor-pointer text-xs">Interactive HTML</Label>
+                    <Switch
+                      id="interactive-html-preview"
+                      checked={interactiveHtmlRequested}
+                      onCheckedChange={setInteractiveHtml}
+                      disabled={apply.isPending}
+                      aria-label="Generate an interactive HTML version on the next re-render"
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => apply.mutate()}
+                      disabled={!interactiveHtmlRequested || apply.isPending}
+                    >
+                      {apply.isPending ? <><Loader2 className="mr-1 h-4 w-4 animate-spin" /> Generating…</> : <><RefreshCw className="mr-1 h-4 w-4" /> Generate</>}
+                    </Button>
+                  </div>
                 )}
               </div>
               {interactiveView && version?.html_url ? (
                 <iframe
                   src={version.html_url}
                   title="Interactive figure"
-                  sandbox="allow-scripts allow-same-origin"
+                  sandbox="allow-scripts"
                   className="h-[480px] w-full rounded border bg-white"
                 />
               ) : previewUrl ? (

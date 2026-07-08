@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
 from app.common.exceptions import AppError, app_error_handler
-from app.common.security import allowed_origins, SECURITY_HEADERS
+from app.common.security import allowed_origins, security_headers_for_path
 
 # import models so metadata is registered before migrations
 from sqlalchemy import text
@@ -81,7 +81,7 @@ app.add_middleware(
 @app.middleware("http")
 async def apply_security_headers(request, call_next):
     response = await call_next(request)
-    for header, value in SECURITY_HEADERS.items():
+    for header, value in security_headers_for_path(request.url.path).items():
         response.headers[header] = value
     return response
 

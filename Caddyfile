@@ -9,13 +9,27 @@
 	request_body {
 		max_size 55MB
 	}
-	header {
+	@interactive_figure_html path_regexp interactive_figure_html (?i)^/static/figures/.+\.html$
+	@standard_security {
+		not {
+			path_regexp interactive_figure_html (?i)^/static/figures/.+\.html$
+		}
+	}
+	header @standard_security {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
 		X-Content-Type-Options "nosniff"
 		X-Frame-Options "DENY"
 		Referrer-Policy "strict-origin-when-cross-origin"
 		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
 		Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://www.googletagmanager.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' https://www.google-analytics.com https://region1.google-analytics.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+	}
+	header @interactive_figure_html {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
+		Content-Security-Policy "default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' data: blob:; frame-ancestors 'self'; base-uri 'self'; form-action 'none'"
 	}
 	handle /api/* {
 		reverse_proxy labplot-backend:8000 {
@@ -30,6 +44,14 @@
 	@figure_scripts path_regexp figure_scripts (?i)^/static/figures/.+\.r$
 	handle @figure_scripts {
 		respond 404
+	}
+	handle @interactive_figure_html {
+		header Cache-Control "private, max-age=3600"
+		reverse_proxy labplot-backend:8000 {
+			header_up -X-Forwarded-For
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Real-IP {remote_host}
+		}
 	}
 	handle /static/figures/* {
 		header Cache-Control "public, max-age=31536000, immutable"

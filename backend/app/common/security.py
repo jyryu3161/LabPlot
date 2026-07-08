@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from collections import defaultdict, deque
 from collections.abc import Callable
@@ -32,6 +33,31 @@ SECURITY_HEADERS = {
         "form-action 'self'"
     ),
 }
+
+
+INTERACTIVE_FIGURE_HTML_HEADERS = {
+    **SECURITY_HEADERS,
+    "X-Frame-Options": "SAMEORIGIN",
+    "Content-Security-Policy": (
+        "default-src 'self' data: blob:; "
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: blob:; "
+        "font-src 'self' data:; "
+        "connect-src 'self' data: blob:; "
+        "frame-ancestors 'self'; "
+        "base-uri 'self'; "
+        "form-action 'none'"
+    ),
+}
+
+_INTERACTIVE_FIGURE_HTML_RE = re.compile(r"^/static/figures/.+\.html$", re.IGNORECASE)
+
+
+def security_headers_for_path(path: str) -> dict[str, str]:
+    if _INTERACTIVE_FIGURE_HTML_RE.match(path):
+        return INTERACTIVE_FIGURE_HTML_HEADERS
+    return SECURITY_HEADERS
 
 
 class InMemoryRateLimiter:
