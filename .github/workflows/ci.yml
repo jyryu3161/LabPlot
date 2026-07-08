@@ -66,6 +66,7 @@ jobs:
           cd /home/ubuntu/web_projects/LabPlot
           docker compose build
           docker compose up -d
+          docker compose exec -T labplot-caddy caddy reload --config /etc/caddy/Caddyfile
       - name: Health check (containers + live site)
         run: |
           cd /home/ubuntu/web_projects/LabPlot
@@ -76,7 +77,26 @@ jobs:
             if [ "$fe" = healthy ] && [ "$be" = healthy ]; then
               code=$(curl -s -o /dev/null -w '%{http_code}' https://labplotai.com/canvases)
               echo "live /canvases -> HTTP $code"
-              [ "$code" = "200" ] && exit 0
+              if [ "$code" = "200" ]; then
+                html_headers=$(curl -sSI https://labplotai.com/static/figures/__health__/figure.html)
+                echo "$html_headers" | grep -qi '^x-frame-options: SAMEORIGIN' || {
+                  echo "::error::interactive HTML X-Frame-Options is not SAMEORIGIN"
+                  exit 1
+                }
+                if echo "$html_headers" | grep -qi '^x-frame-options: DENY'; then
+                  echo "::error::interactive HTML still includes X-Frame-Options DENY"
+                  exit 1
+                fi
+                echo "$html_headers" | grep -qi "frame-ancestors 'self'" || {
+                  echo "::error::interactive HTML CSP does not allow same-origin framing"
+                  exit 1
+                }
+                if echo "$html_headers" | grep -qi "frame-ancestors 'none'"; then
+                  echo "::error::interactive HTML still includes frame-ancestors none"
+                  exit 1
+                fi
+                exit 0
+              fi
             fi
             sleep 5
           done
