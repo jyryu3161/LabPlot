@@ -160,6 +160,19 @@ def _pca_columns() -> list[str]:
     return [f"Gene_{idx}" for idx in range(1, 101)]
 
 
+def _pca_sample(df: pd.DataFrame) -> pd.DataFrame:
+    work = df.copy()
+    first_col = str(work.columns[0])
+    if first_col.startswith("Unnamed") or first_col == "":
+        work = work.rename(columns={work.columns[0]: "Sample"})
+    elif first_col != "Sample" and "Sample" not in work.columns:
+        work = work.rename(columns={work.columns[0]: "Sample"})
+    if "Group" in work.columns and "group" not in work.columns:
+        work = work.rename(columns={"Group": "group"})
+    leading = [col for col in ("Sample", "group") if col in work.columns]
+    return work[leading + [col for col in work.columns if col not in leading]]
+
+
 def _gene_heatmap(df: pd.DataFrame) -> pd.DataFrame:
     work = df.rename(columns={df.columns[0]: "Gene"}).copy()
     return work
@@ -1155,9 +1168,11 @@ SEEDS = [
         figure_name="PCA sample plot",
         dataset_name="Gallery seed - PCA sample plot",
         rel_csv="02_biology_medicine/data/08_pca_plot.csv",
+        transform=_pca_sample,
         plot_type="pca",
-        mapping={"columns": _pca_columns(), "color": "Group"},
+        mapping={"columns": _pca_columns(), "color": "group", "label": "Sample"},
         options={**COMMON_OPTIONS},
+        column_roles={"Sample": "text", "group": "group"},
     ),
     GallerySeed(
         key="gene_heatmap",

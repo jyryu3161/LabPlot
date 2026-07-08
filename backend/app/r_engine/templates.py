@@ -382,23 +382,35 @@ p <- ggplot(df, aes(x = {x_fac}, y = {_data(y)}, fill = {fill_fac})) +
 def _scatter(m, o):
     x, y = m["x"], m["y"]
     color = m.get("color")
+    label = m.get("label")
+    label_pre = f"\ndf$.labplot_sample_label <- as.character(df[[{rq(label)}]])\n" if label else ""
+    label_aes = ', text = .data[[".labplot_sample_label"]]' if label else ""
+    label_layer = (
+        f'  geom_text(aes(label = .data[[".labplot_sample_label"]]), '
+        f'vjust = -0.7, size = {_GEOM_TEXT_SIZE_7PT}, colour = "grey25", '
+        'show.legend = FALSE, check_overlap = TRUE) +\n'
+    ) if label and o.get("show_sample_labels") else ""
     smooth = '  geom_smooth(method = "lm", se = TRUE, colour = "#4C6F91", fill = "grey80", alpha = 0.4, linewidth = 0.35) +\n' if o.get("add_smooth", False) else ""
     if color:
-        aes = f"aes(x = {_data(x)}, y = {_data(y)}, colour = factor({_data(color)}))"
+        order_vec = _level_order_vec(o)
+        order_helper = _LEVEL_ORDER_R if order_vec else ""
+        color_expr = f".labplot_ordered_levels({_data(color)}, {order_vec})" if order_vec else f"factor({_data(color)})"
+        aes = f"aes(x = {_data(x)}, y = {_data(y)}, colour = {color_expr}{label_aes})"
         scale = "  scale_colour_manual(values = labplot_palette()) +\n"
         guide = f" + guides(colour = guide_legend(title = {rq(color)}))"
     else:
-        aes = f"aes(x = {_data(x)}, y = {_data(y)})"
+        order_helper = ""
+        aes = f"aes(x = {_data(x)}, y = {_data(y)}{label_aes})"
         scale = ""
         guide = ""
     pt_a = _alpha_r(o, "point_alpha", "0.8")
     fit_extra = _fit_stats_layer(x, y) if o.get("show_fit_stats") else ""
     y2_pre, y2_post = _y2_axis(o, x, y, "point", grouped=bool(color))
     t_pre, t_post = _temporal_x(o, x)
-    return f"""{t_pre}
+    return f"""{order_helper}{label_pre}{t_pre}
 {y2_pre}p <- ggplot(df, {aes}) +
 {smooth}  geom_point(size = 2.0, alpha = {pt_a}) +
-{scale}  {_labs(o, x, y)}{guide}
+{label_layer}{scale}  {_labs(o, x, y)}{guide}
 {y2_post}{fit_extra}{t_post}"""
 
 
@@ -761,21 +773,36 @@ def _pca(m, o):
     cols = m["columns"]
     col_vec = "c(" + ", ".join(rq(c) for c in cols) + ")"
     color = m.get("color")
+    label = m.get("label")
+    order_vec = _level_order_vec(o)
+    order_helper = _LEVEL_ORDER_R if color and order_vec else ""
+    label_aes = ', text = .data[[".labplot_sample_label"]]' if label else ""
+    label_line = f'.scores$.labplot_sample_label <- as.character(df[[{rq(label)}]][.ok])\n' if label else ""
+    label_layer = (
+        f'  geom_text(aes(label = .data[[".labplot_sample_label"]]), '
+        f'vjust = -0.7, size = {_GEOM_TEXT_SIZE_7PT}, colour = "grey25", '
+        'show.legend = FALSE, check_overlap = TRUE) +\n'
+    ) if label and o.get("show_sample_labels") else ""
     if color:
+        group_expr = (
+            f".labplot_ordered_levels(df[[{rq(color)}]][.ok], {order_vec})"
+            if order_vec else
+            f"factor(df[[{rq(color)}]][.ok])"
+        )
         color_block = f"""
-.scores$grp <- factor(df[[{rq(color)}]][.ok])
-p <- ggplot(.scores, aes(x = PC1, y = PC2, colour = grp)) +
+.scores$grp <- {group_expr}
+p <- ggplot(.scores, aes(x = PC1, y = PC2, colour = grp{label_aes})) +
   geom_point(size = 2.4, alpha = 0.85) +
-  scale_colour_manual(values = labplot_palette()) +
+{label_layer}  scale_colour_manual(values = labplot_palette()) +
   guides(colour = guide_legend(title = {rq(color)})) +
 """
     else:
-        color_block = """
-p <- ggplot(.scores, aes(x = PC1, y = PC2)) +
+        color_block = f"""
+p <- ggplot(.scores, aes(x = PC1, y = PC2{label_aes})) +
   geom_point(size = 2.4, alpha = 0.85, colour = "#4C6F91") +
-"""
+{label_layer}"""
     title = rq(o.get("title")) if o.get("title") else "NULL"
-    return f"""
+    return f"""{order_helper}
 .cols <- {col_vec}
 .X <- as.matrix(df[, .cols, drop = FALSE])
 storage.mode(.X) <- "double"
@@ -788,6 +815,7 @@ if (ncol(.X) < 2) stop("PCA needs at least 2 numeric columns with variance")
 .var <- (.pc$sdev^2) / sum(.pc$sdev^2) * 100
 .scores <- as.data.frame(.pc$x[, 1:2, drop = FALSE])
 colnames(.scores) <- c("PC1", "PC2")
+{label_line}
 {color_block}  labs(title = {title},
        x = sprintf("PC1 (%.1f%%)", .var[1]),
        y = sprintf("PC2 (%.1f%%)", .var[2]))
@@ -1017,9 +1045,11 @@ PLOT_TYPES = [
     {"type": "scatter", "label": "Scatter plot",
      "required": [{"key": "x", "label": "X (numeric)", "roles": ["numeric", "log2fc", "pvalue", "time"]},
                   {"key": "y", "label": "Y (numeric)", "roles": ["numeric", "log2fc", "pvalue"]}],
-     "optional": [{"key": "color", "label": "Color by", "roles": ["group", "category", "status"]}],
+     "optional": [{"key": "color", "label": "Color by", "roles": ["group", "category", "status"]},
+                  {"key": "label", "label": "Sample label", "roles": ["text", "category", "group", "gene", "status"]}],
      "options": [{"key": "add_smooth", "label": "Regression line", "type": "bool", "default": False},
                  {"key": "show_fit_stats", "label": "Show fit stats (R², slope)", "type": "bool", "default": False},
+                 {"key": "show_sample_labels", "label": "Show sample labels", "type": "bool", "default": False},
                  {"key": "y2_column", "label": "Secondary Y column", "type": "text", "default": ""},
                  {"key": "y2_label", "label": "Secondary Y-axis label", "type": "text", "default": ""},
                  {"key": "x_min", "label": "X-axis minimum", "type": "number", "default": None},
@@ -1125,8 +1155,9 @@ PLOT_TYPES = [
                  {"key": "label_top", "label": "Label top N", "type": "number", "default": 10}]},
     {"type": "pca", "label": "PCA plot",
      "required": [{"key": "columns", "label": "Feature columns", "roles": ["numeric", "log2fc"], "multi": True}],
-     "optional": [{"key": "color", "label": "Color by group", "roles": ["group", "category", "status"]}],
-     "options": []},
+     "optional": [{"key": "color", "label": "Color by group", "roles": ["group", "category", "status"]},
+                  {"key": "label", "label": "Sample label", "roles": ["text", "category", "group", "gene", "status"]}],
+     "options": [{"key": "show_sample_labels", "label": "Show sample labels", "type": "bool", "default": False}]},
     {"type": "kaplan_meier", "label": "Kaplan-Meier plot",
      "required": [{"key": "time", "label": "Time", "roles": ["time", "numeric"]},
                   {"key": "status", "label": "Status/Event", "roles": ["status", "group", "numeric"]}],

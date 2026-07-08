@@ -97,6 +97,7 @@ _BOOL_OPTIONS = {
     "show_values", "hide_legend", "log_x", "log_y", "flip_coords", "connect_points", "show_contour_lines",
     "cluster_rows", "cluster_cols", "show_row_names", "show_labels", "color_bars", "paired_rows_only",
     "transparent_background",
+    "show_sample_labels",
     "show_n", "show_significance", "show_fit_stats",
     # Per-type toggles for the new plot types (sina/qq/forest/dot_plot/lollipop/embedding).
     "show_violin", "show_line", "sort_by_estimate", "sort_desc", "show_cluster_labels",
