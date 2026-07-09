@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import sys
 import os
+import uuid
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.getcwd())
 
 from app.ai import models as _ai_models  # noqa: F401
-from app.ai.client import _neutralize_prompt_injection
+from app.ai.client import _neutralize_prompt_injection, _ready
 from app.ai.models import AIUsage
 from app.audit import models as _audit_models  # noqa: F401
 from app.organizations import models as _organization_models  # noqa: F401
@@ -25,18 +26,43 @@ from app.common.exceptions import AppError, BadRequestError
 from app.common.quotas import enforce_ai_quota
 from app.database import SessionLocal
 from app.figures.service import _sanitize_svg, sanitize_options
+from app.organizations.models import Organization, OrganizationMembership
 from app.r_engine.renderer import build_script
 
 
 def main() -> None:
     email = "reset-smoke@example.com"
     with SessionLocal() as db:
+        suffix = uuid.uuid4().hex[:10]
+        organization_user, created = auth_service.register_user(
+            db,
+            f"org-approval-{suffix}@example.com",
+            "OrgApprovalPass12345",
+            "Org Approval Smoke",
+            organization_name=f"Approval Smoke {suffix}",
+        )
+        assert created
+        assert organization_user.active_organization_id is not None
+        assert organization_user.is_approved is False
+        try:
+            _ready(db, organization_user)
+            raise AssertionError("organization without a key fell back to the global AI key")
+        except BadRequestError as exc:
+            assert exc.error_code == "AI_NO_ORG_KEY"
+        organization_id = organization_user.active_organization_id
+        db.query(OrganizationMembership).filter(
+            OrganizationMembership.organization_id == organization_id
+        ).delete(synchronize_session=False)
+        db.query(Organization).filter(Organization.id == organization_id).delete(synchronize_session=False)
+        db.query(User).filter(User.id == organization_user.id).delete(synchronize_session=False)
+        db.commit()
+
         existing = db.query(User).filter(User.email == email).first()
         if existing:
             db.delete(existing)
             db.commit()
 
-        user = auth_service.register_user(db, email, "ResetPass12345", "Reset Smoke")
+        user, _ = auth_service.register_user(db, email, "ResetPass12345", "Reset Smoke")
         user.is_approved = True
         user.ai_monthly_limit = 1
         db.commit()
@@ -111,7 +137,7 @@ def main() -> None:
 
         db.delete(user)
         db.commit()
-    print("PASS service scenario: password reset, AI quota, prompt neutralization, SVG sanitizer, option sanitizer")
+    print("PASS service scenario: org approval/key isolation, password reset, AI quota, prompt neutralization, SVG sanitizer, option sanitizer")
 
 
 if __name__ == "__main__":

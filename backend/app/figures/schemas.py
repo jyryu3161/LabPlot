@@ -167,6 +167,7 @@ class VersionResponse(BaseModel):
     eps_url: str | None = None
     html_url: str | None = None
     r_url: str | None = None
+    r_available: bool = False
     # Panel geometry captured at render time: {panel_px:{x0,x1,y0,y1}, img_px:
     # {w,h}, x_range, y_range, x_discrete, y_discrete}. Pixels are for figure.png
     # with y from the image TOP. None when the sidecar was unavailable.

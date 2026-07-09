@@ -23,7 +23,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Slider } from '@/components/ui/slider';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { CheckCircle2, Clipboard, Columns3, GripVertical, ImageIcon, Loader2, Sparkles, Star, Wand2, ArrowRight, ArrowUp, ArrowDown, X } from 'lucide-react';
+import { CheckCircle2, Clipboard, Columns3, GripVertical, ImageIcon, Loader2, Sparkles, Star, Wand2, ArrowRight, ArrowUp, ArrowDown, X, RefreshCw } from 'lucide-react';
 
 const ROLE_COLORS: Record<string, string> = {
   numeric: 'bg-blue-100 text-blue-700', group: 'bg-green-100 text-green-700',
@@ -335,7 +335,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
   const router = useRouter();
   const qc = useQueryClient();
 
-  const { data: ds, isLoading } = useQuery({ queryKey: ['dataset', id], queryFn: () => getDataset(id) });
+  const { data: ds, isLoading, isError, refetch } = useQuery({ queryKey: ['dataset', id], queryFn: () => getDataset(id) });
   const { data: savedAiSug, isFetched: savedAiSugFetched } = useQuery({
     queryKey: ['ai-recommendations', id],
     queryFn: () => getSavedChartRecommendations(id),
@@ -770,6 +770,20 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
     setOptions({ ...options, level_order: next });
   }
 
+  if (isError) {
+    return (
+      <div className="min-h-screen bg-muted/20">
+        <AppHeader />
+        <div className="flex flex-col items-center gap-4 px-4 py-20 text-center">
+          <p className="text-sm text-muted-foreground">Could not load this dataset.</p>
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={() => void refetch()}><RefreshCw className="mr-2 h-4 w-4" />Retry</Button>
+            <Button variant="ghost" onClick={() => router.push('/datasets')}>Back to datasets</Button>
+          </div>
+        </div>
+      </div>
+    );
+  }
   if (isLoading || !ds) {
     return (<div className="min-h-screen bg-muted/20"><AppHeader /><div className="flex justify-center py-20"><Loader2 className="h-6 w-6 animate-spin" /></div></div>);
   }

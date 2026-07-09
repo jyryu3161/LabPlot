@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session, joinedload
 from app.ai import client as ai_client
 from app.auth.models import User
 from app.common import storage
+from app.common.asset_tokens import signed_asset_url
 from app.common.exceptions import AppError, BadRequestError, ForbiddenError, NotFoundError
 from app.common.quotas import enforce_render_quota
 from app.config import settings
@@ -102,7 +103,7 @@ def _url(abs_path: str | None) -> str | None:
         return None
     if rel.startswith(".."):
         return None
-    return "/static/" + rel.replace(os.sep, "/")
+    return signed_asset_url(abs_path)
 
 
 def _friendly_error(log: str) -> str:
@@ -293,6 +294,7 @@ def version_response(v: FigureVersion) -> dict:
         "eps_url": _url(v.eps_path),
         "html_url": _url(v.html_path),
         "r_url": _url(v.r_path),
+        "r_available": bool(v.r_path and storage.exists(v.r_path)),
         "layout": _augmented_layout(v),
     }
 

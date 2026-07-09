@@ -278,6 +278,7 @@ export interface FigureVersion {
   eps_url?: string;
   html_url?: string;
   r_url?: string;
+  r_available?: boolean;
   // Panel geometry + data ranges for precise annotation placement (null when
   // the plot type has no standard ggplot panel, e.g. 3D/heatmap/network).
   layout?: FigureLayout | null;

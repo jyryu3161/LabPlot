@@ -49,7 +49,6 @@ class Settings(BaseSettings):
 
     # Password reset email. If SMTP_HOST is unset, reset links are not emailed.
     PASSWORD_RESET_EXPIRE_MINUTES: int = 30
-    PASSWORD_RESET_LOG_TOKEN: bool = False
     SMTP_HOST: str = ""
     SMTP_PORT: int = 587
     SMTP_USERNAME: str = ""

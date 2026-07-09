@@ -56,6 +56,14 @@ def main() -> None:
     status, _, _ = request("GET", f"{API_BASE}/static/uploads/not-real.csv")
     check("static uploads unavailable on backend", status == 404, f"status={status}")
 
+    status, _, _ = request("GET", f"{API_BASE}/static/figures/not-real.png")
+    check("static figures unavailable on backend", status == 404, f"status={status}")
+
+    status, _, headers = request("GET", f"{API_BASE}/api/assets/signed/invalid/figure.html")
+    lowered = {k.lower(): v for k, v in headers.items()}
+    check("invalid asset signature rejected", status == 404, f"status={status}")
+    check("interactive asset frame policy", lowered.get("x-frame-options") == "SAMEORIGIN")
+
     statuses = []
     for _ in range(21):
         status, _, _ = request(

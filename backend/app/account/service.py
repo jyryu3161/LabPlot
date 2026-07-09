@@ -78,6 +78,7 @@ def build_account_export(db: Session, user: User) -> tuple[str, str]:
     )
 
     tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+    tmp.close()
     with zipfile.ZipFile(tmp.name, "w", zipfile.ZIP_DEFLATED) as z:
         manifest = {
             "exported_at": datetime.utcnow().isoformat() + "Z",

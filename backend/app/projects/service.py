@@ -350,6 +350,7 @@ def build_project_pack(db: Session, project_id: uuid.UUID, owner_id: uuid.UUID) 
     figs = (db.query(Figure).filter(Figure.project_id == project_id)
             .order_by(Figure.created_at.asc()).all())
     tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+    tmp.close()
     legends = [f"# {proj.name} — figure pack\n"]
     with zipfile.ZipFile(tmp.name, "w", zipfile.ZIP_DEFLATED) as z:
         for i, f in enumerate(figs, start=1):

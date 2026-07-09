@@ -143,7 +143,6 @@ def create_organization(db: Session, user: User, data, request=None) -> Organiza
     )
     db.add(membership)
     user.active_organization_id = org.id
-    user.is_approved = True
     audit_service.log_event(
         db,
         actor_id=user.id,

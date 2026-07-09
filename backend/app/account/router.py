@@ -1,5 +1,8 @@
+import os
+
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 from sqlalchemy.orm import Session
 
 from app.account import service
@@ -20,7 +23,12 @@ def account_usage(db: Session = Depends(get_db), current_user: User = Depends(ge
 @router.get("/export", dependencies=[Depends(rate_limit("account_export", 10, 3600))])
 def export_account(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     path, filename = service.build_account_export(db, current_user)
-    return FileResponse(path, media_type="application/zip", filename=filename)
+    return FileResponse(
+        path,
+        media_type="application/zip",
+        filename=filename,
+        background=BackgroundTask(os.remove, path),
+    )
 
 
 @router.delete("", status_code=204, dependencies=[Depends(rate_limit("account_delete", 5, 3600))])

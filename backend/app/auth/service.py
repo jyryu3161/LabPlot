@@ -217,8 +217,6 @@ def send_email(to_email: str, subject: str, text_body: str) -> None:
 def _send_password_reset_email(email: str, token: str) -> None:
     link = f"{settings.APP_BASE_URL.rstrip('/')}/reset-password?token={token}"
     if not smtp_status()["configured"]:
-        if settings.PASSWORD_RESET_LOG_TOKEN:
-            logger.warning("Password reset link for %s: %s", email, link)
         raise EmailDeliveryError("SMTP is not configured")
     send_email(
         email,
@@ -248,8 +246,8 @@ def request_password_reset(db: Session, email: str) -> dict:
     db.commit()
     try:
         _send_password_reset_email(user.email, token)
-    except EmailDeliveryError as exc:
-        logger.warning("Password reset email delivery failed for %s: %s", user.email, exc)
+    except EmailDeliveryError:
+        logger.warning("Password reset email delivery failed")
     except Exception:
         logger.exception("Failed to send password reset email")
     return generic

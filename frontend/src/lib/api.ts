@@ -501,6 +501,14 @@ export async function downloadExport(figureId: string, versionId: string, fmt: s
   a.href = url; a.download = filename; document.body.appendChild(a); a.click();
   a.remove(); URL.revokeObjectURL(url);
 }
+export async function getExportText(figureId: string, versionId: string, fmt: string): Promise<string> {
+  const headers: Record<string, string> = {};
+  const token = getAccessToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const res = await fetch(exportUrl(figureId, versionId, fmt), { headers });
+  if (!res.ok) throw new ApiError('Export failed', res.status);
+  return res.text();
+}
 export async function downloadGalleryExport(figureId: string, versionId: string, fmt: string, filename: string): Promise<void> {
   const headers: Record<string, string> = {};
   const token = getAccessToken();

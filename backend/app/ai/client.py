@@ -221,6 +221,11 @@ def _ready(db: Session, user=None):
             model, key = org_service.decrypt_org_ai_key(org_cfg)
             if key:
                 return org_cfg.provider, model, key, org_id
+        if user.active_organization_id is not None:
+            raise BadRequestError(
+                "No enabled AI key is configured for the active organization",
+                error_code="AI_NO_ORG_KEY",
+            )
     cfg = get_config(db)
     if not cfg.enabled:
         raise BadRequestError("AI features are disabled", error_code="AI_DISABLED")

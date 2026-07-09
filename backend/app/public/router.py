@@ -1,7 +1,7 @@
 """Public (no-auth) endpoints for the curated showcase gallery.
 
-Only explicitly pinned root/admin figures are public. Rendered images are
-already served by the public /static mount.
+Only explicitly pinned root/admin figures are public. Rendered images use the
+same short-lived signed asset URLs as authenticated figure responses.
 """
 import uuid
 import re

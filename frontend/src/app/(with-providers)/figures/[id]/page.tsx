@@ -8,7 +8,7 @@ import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import {
   getFigure, getDataset, getPlotTypes, getStyles, getPalettes, rerenderFigure, reviewVersion,
-  improveVersion, applyImprovement, applyImprovements, updateFigure, generateLegend, downloadExport, enhancePrompt,
+  improveVersion, applyImprovement, applyImprovements, updateFigure, generateLegend, downloadExport, getExportText, enhancePrompt,
   deleteFigureVersion, getProject, saveFigureTemplateFavorite, deleteFigureTemplateFavorite, setFigureShare,
   createCustomPalette, updateCustomPalette, deleteCustomPalette, duplicateFigure,
   getColumnValues, getMethodsText, getAltText, ApiError,
@@ -254,7 +254,7 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
   const { id } = use(params);
   const qc = useQueryClient();
   const router = useRouter();
-  const { data: fig, isLoading } = useQuery({ queryKey: ['figure', id], queryFn: () => getFigure(id) });
+  const { data: fig, isLoading, isError, refetch } = useQuery({ queryKey: ['figure', id], queryFn: () => getFigure(id) });
   const { data: stylesData } = useQuery({ queryKey: ['styles'], queryFn: getStyles });
   const { data: plotTypesData } = useQuery({ queryKey: ['plot-types'], queryFn: getPlotTypes });
   const { data: palettesData } = useQuery({ queryKey: ['palettes'], queryFn: getPalettes });
@@ -788,11 +788,9 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
     catch { toast.error('Copy failed'); }
   }
   async function copyRCode() {
-    if (!version?.r_url) return;
+    if (!version?.r_available) return;
     try {
-      const res = await fetch(version.r_url);
-      if (!res.ok) throw new Error('fetch failed');
-      await copyToClipboard(await res.text(), 'R code');
+      await copyToClipboard(await getExportText(id, version.id, 'r'), 'R code');
     } catch { toast.error('Could not load R code'); }
   }
   function setLevelOrder(next: string[]) {
@@ -818,7 +816,7 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
     { fmt: 'tiff', label: 'TIFF', available: Boolean(version?.tiff_url) },
     { fmt: 'pdf', label: 'PDF', available: Boolean(version?.pdf_url) },
     { fmt: 'eps', label: 'EPS', available: Boolean(version?.eps_url) },
-    { fmt: 'r', label: 'R script', available: Boolean(version?.r_url) },
+    { fmt: 'r', label: 'R script', available: Boolean(version?.r_available) },
   ].filter((item) => item.available);
 
   function selectPlotType(pt: string) {
@@ -903,6 +901,20 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
     setOptions(nextOptions);
   }
 
+  if (isError) {
+    return (
+      <div className="min-h-screen bg-muted/20">
+        <AppHeader />
+        <div className="flex flex-col items-center gap-4 px-4 py-20 text-center">
+          <p className="text-sm text-muted-foreground">Could not load this figure.</p>
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={() => void refetch()}><RefreshCw className="mr-2 h-4 w-4" />Retry</Button>
+            <Button variant="ghost" onClick={() => router.push('/figures')}>Back to figures</Button>
+          </div>
+        </div>
+      </div>
+    );
+  }
   if (isLoading || !fig) {
     return (<div className="min-h-screen bg-muted/20"><AppHeader /><div className="flex justify-center py-20"><Loader2 className="h-6 w-6 animate-spin" /></div></div>);
   }
@@ -1107,7 +1119,7 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
               <CardHeader className="pb-2"><CardTitle className="flex items-center gap-2 text-base"><Download className="h-4 w-4" /> Export {version && `(v${version.version_number})`}</CardTitle></CardHeader>
               <CardContent className="flex flex-wrap gap-2">
                 {exportFormats.map((f) => <Button key={f.fmt} variant="outline" size="sm" onClick={() => doExport(f.fmt)}>{f.label}</Button>)}
-                {version?.r_url && (
+                {version?.r_available && (
                   <Button variant="outline" size="sm" onClick={copyRCode} aria-label="Copy R code to clipboard">
                     <Copy className="mr-1 h-4 w-4" /> Copy R code
                   </Button>

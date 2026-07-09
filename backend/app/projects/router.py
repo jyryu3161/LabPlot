@@ -1,7 +1,9 @@
+import os
 import uuid
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 from sqlalchemy.orm import Session
 
 from app.auth.models import User
@@ -80,7 +82,12 @@ def update_project(project_id: uuid.UUID, data: ProjectUpdate, db: Session = Dep
 @router.get("/{project_id}/export")
 def export_project(project_id: uuid.UUID, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     path, filename = service.build_project_pack(db, project_id, current_user.id)
-    return FileResponse(path, media_type="application/zip", filename=filename)
+    return FileResponse(
+        path,
+        media_type="application/zip",
+        filename=filename,
+        background=BackgroundTask(os.remove, path),
+    )
 
 
 @router.delete("/{project_id}", status_code=204)

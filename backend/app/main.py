@@ -3,7 +3,6 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
 from app.common.exceptions import AppError, app_error_handler
@@ -102,11 +101,8 @@ app.include_router(canvases_router)
 app.include_router(palettes_router)
 app.include_router(public_router)
 
-# static mount for rendered figures (/static/figures/...)
-_static_root = os.path.dirname(settings.figures_dir.rstrip("/"))
 os.makedirs(settings.figures_dir, exist_ok=True)
 os.makedirs(settings.upload_dir, exist_ok=True)
-app.mount("/static", StaticFiles(directory=_static_root), name="static")
 
 
 def _seed_root():
@@ -196,4 +192,18 @@ def on_startup():
 
 @app.get("/api/health")
 def health_check():
-    return {"status": "ok", "service": "labplot-ai", "ai_enabled": bool(settings.ANTHROPIC_API_KEY)}
+    from sqlalchemy.orm import Session
+
+    from app.ai.config_service import active_model_and_key, get_config
+
+    with Session(engine) as db:
+        db.execute(text("SELECT 1"))
+        cfg = get_config(db)
+        _, key = active_model_and_key(cfg)
+        return {
+            "status": "ok",
+            "service": "labplot-ai",
+            "database": "ok",
+            "ai_enabled": bool(cfg.enabled and key),
+            "ai_provider": cfg.provider if cfg.enabled else None,
+        }

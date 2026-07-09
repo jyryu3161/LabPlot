@@ -6,8 +6,9 @@ import os
 import posixpath
 import shutil
 from pathlib import Path
-from urllib.parse import quote, urlparse
+from urllib.parse import urlparse
 
+from app.common.asset_tokens import signed_asset_url
 from app.config import settings
 
 
@@ -60,13 +61,10 @@ def asset_url(ref: str | None) -> str | None:
         return None
     if not object_storage_enabled():
         return None
-    bucket, key = parse_object_ref(ref)
-    public_base = settings.OBJECT_STORAGE_PUBLIC_BASE_URL.strip().rstrip("/")
-    if public_base:
-        return f"{public_base}/{quote(key)}"
+    bucket, _ = parse_object_ref(ref)
     if bucket != _require_bucket():
         return None
-    return "/api/assets/" + quote(key)
+    return signed_asset_url(ref)
 
 
 def _safe_object_key(key: str) -> str:
