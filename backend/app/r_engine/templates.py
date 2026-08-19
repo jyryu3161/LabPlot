@@ -11,6 +11,27 @@ import re
 from typing import Any
 
 _HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+_URL_ID_TOKEN = r"(?:[A-Za-z0-9._~+\-]|%[0-9A-Fa-f]{2})+"
+_GROUPED_BAR_MARK_ID_RE = re.compile(
+    rf"^mark:grouped_bar:category={_URL_ID_TOKEN}&series={_URL_ID_TOKEN}$"
+)
+_SCATTER_MARK_ID_RE = re.compile(rf"^mark:scatter:row={_URL_ID_TOKEN}$")
+_HEATMAP_MARK_ID_RE = re.compile(
+    rf"^mark:heatmap:row={_URL_ID_TOKEN}&col={_URL_ID_TOKEN}$"
+)
+_CORRELATION_HEATMAP_MARK_ID_RE = re.compile(
+    rf"^mark:correlation_heatmap:x={_URL_ID_TOKEN}&y={_URL_ID_TOKEN}$"
+)
+_SOURCE_ROW_ID_COLUMN = ".labplot_source_row_id"
+_SOURCE_ROW_ID_COLUMN_RE = re.compile(r"^\.labplot_source_row_id(?:_[0-9]+)?$")
+
+_MARK_ID_R = """
+.labplot_url_token <- function(.values) {
+  vapply(as.character(.values), function(.value) {
+    utils::URLencode(.value, reserved = TRUE, repeated = TRUE)
+  }, character(1), USE.NAMES = FALSE)
+}
+"""
 
 
 # ---------------------------------------------------------------- helpers
@@ -90,6 +111,166 @@ _GEOM_TEXT_SIZE_7PT = 2.46
 
 def _choice(value, allowed: tuple[str, ...], default: str) -> str:
     return value if isinstance(value, str) and value in allowed else default
+
+
+def _source_row_id_column(options: dict) -> str:
+    value = options.get("_source_row_id_column")
+    if isinstance(value, str) and _SOURCE_ROW_ID_COLUMN_RE.fullmatch(value):
+        return value
+    return _SOURCE_ROW_ID_COLUMN
+
+
+def _element_override_vectors(
+    options: dict, id_pattern: re.Pattern[str],
+) -> tuple[str, bool, bool]:
+    """Return literal named color vectors for one renderer-issued ID family.
+
+    Persisted options normally pass through the service sanitizer first, but
+    exported/reproducible R code is also a direct code-generation boundary.
+    Revalidating the exact stable-ID grammar and six-digit HEX values here
+    prevents either map keys or values from becoming executable R.
+    """
+    raw = options.get("element_overrides")
+    if not isinstance(raw, dict):
+        return "", False, False
+    fills: list[tuple[str, str]] = []
+    strokes: list[tuple[str, str]] = []
+    accepted = 0
+    for raw_id, raw_style in raw.items():
+        if accepted >= 80:
+            break
+        if not isinstance(raw_id, str) or not isinstance(raw_style, dict):
+            continue
+        element_id = raw_id.strip()
+        if len(element_id) > 512 or id_pattern.fullmatch(element_id) is None:
+            continue
+        fill = raw_style.get("fill")
+        stroke = raw_style.get("stroke")
+        clean_fill = fill.upper() if isinstance(fill, str) and _HEX_COLOR_RE.fullmatch(fill) else None
+        clean_stroke = stroke.upper() if isinstance(stroke, str) and _HEX_COLOR_RE.fullmatch(stroke) else None
+        if clean_fill is None and clean_stroke is None:
+            continue
+        accepted += 1
+        if clean_fill is not None:
+            fills.append((element_id, clean_fill))
+        if clean_stroke is not None:
+            strokes.append((element_id, clean_stroke))
+    if not fills and not strokes:
+        return "", False, False
+
+    def vector(items: list[tuple[str, str]]) -> str:
+        if not items:
+            return "character()"
+        return "c(" + ", ".join(f"{rq(key)} = {rq(value)}" for key, value in items) + ")"
+
+    return (
+        f".labplot_element_fill_overrides <- {vector(fills)}\n"
+        f".labplot_element_stroke_overrides <- {vector(strokes)}\n",
+        bool(fills),
+        bool(strokes),
+    )
+
+
+def _grouped_bar_element_override_r(options: dict) -> tuple[str, str]:
+    """Return safe R declarations + an overlay layer for per-bar colors.
+
+    The base grouped-bar layer and its fill scale remain untouched, so legend
+    keys and every sibling bar retain their original semantics.  A second
+    full-data layer uses the same x/y/group/dodge geometry but paints only
+    rows whose stable semantic id has an override; `I()` treats the sanitized
+    HEX values as literal colors and `show.legend=FALSE` keeps the overlay out
+    of the legend.
+
+    The shared vector helper performs the direct-codegen safety validation.
+    """
+    declarations, has_fill, has_stroke = _element_override_vectors(
+        options, _GROUPED_BAR_MARK_ID_RE,
+    )
+    if not has_fill and not has_stroke:
+        return "", ""
+    layer = """  geom_col(
+    data = .plot,
+    aes(x = .x, y = .value, group = .series,
+        fill = I(.labplot_override_fill), colour = I(.labplot_override_stroke)),
+    inherit.aes = FALSE, position = position_dodge(width = 0.76),
+    width = %s, alpha = 1, linewidth = 0.25, show.legend = FALSE) +
+"""
+    return declarations, layer
+
+
+def _scatter_element_override_r(options: dict, alpha: str) -> tuple[str, str, str]:
+    """Return declarations, lookup mutation and non-legend point overlays.
+
+    Scatter's default solid point has one visual colour and no independent
+    outline.  A fill override therefore repaints the same solid glyph, while a
+    requested stroke adds a hollow shape-21 outline at the same center/size.
+    Both overlays retain the base point alpha and leave its legend layer alone.
+    """
+    declarations, has_fill, has_stroke = _element_override_vectors(
+        options, _SCATTER_MARK_ID_RE,
+    )
+    if not has_fill and not has_stroke:
+        return "", "", ""
+    mutate = """
+.plot$.labplot_override_fill <- unname(.labplot_element_fill_overrides[.plot$.labplot_mark_id])
+.plot$.labplot_override_stroke <- unname(.labplot_element_stroke_overrides[.plot$.labplot_mark_id])
+.plot$.labplot_mark_count <- ave(
+  seq_along(.plot$.labplot_mark_id), .plot$.labplot_mark_id, FUN = length)
+.plot$.labplot_override_fill[.plot$.labplot_mark_count != 1] <- NA_character_
+.plot$.labplot_override_stroke[.plot$.labplot_mark_count != 1] <- NA_character_
+"""
+    layers = ""
+    if has_fill:
+        layers += f"""  geom_point(
+    data = .plot[!is.na(.plot$.labplot_override_fill), , drop = FALSE],
+    aes(fill = I(.labplot_override_fill)),
+    inherit.aes = TRUE, shape = 21, size = 2.0, stroke = 0.5,
+    alpha = {alpha}, show.legend = FALSE) +
+"""
+    if has_stroke:
+        layers += f"""  geom_point(
+    data = .plot[!is.na(.plot$.labplot_override_stroke), , drop = FALSE],
+    aes(x = .data[[{rq('.labplot_x')}]], y = .data[[{rq('.labplot_y')}]],
+        colour = I(.labplot_override_stroke)),
+    inherit.aes = FALSE, shape = 21, fill = NA, size = 2.0, stroke = 0.45,
+    alpha = {alpha}, show.legend = FALSE) +
+"""
+    return declarations, mutate, layers
+
+
+def _tile_element_override_r(
+    options: dict,
+    id_pattern: re.Pattern[str],
+    *,
+    base_stroke: str,
+    linewidth: str,
+    x_aesthetic: str = "col",
+    y_aesthetic: str = "row",
+) -> tuple[str, str, str]:
+    """Return safe literal overlays for one heatmap-cell ID family."""
+    declarations, has_fill, has_stroke = _element_override_vectors(options, id_pattern)
+    if not has_fill and not has_stroke:
+        return "", "", ""
+    mutate = f"""
+.long$.labplot_override_fill <- unname(.labplot_element_fill_overrides[.long$.labplot_mark_id])
+.long$.labplot_override_stroke <- unname(.labplot_element_stroke_overrides[.long$.labplot_mark_id])
+.long$.labplot_mark_count <- ave(
+  seq_along(.long$.labplot_mark_id), .long$.labplot_mark_id, FUN = length)
+.long$.labplot_override_fill[.long$.labplot_mark_count != 1] <- NA_character_
+.long$.labplot_override_stroke[.long$.labplot_mark_count != 1] <- NA_character_
+.long$.labplot_override_stroke[
+  !is.na(.long$.labplot_override_fill) & is.na(.long$.labplot_override_stroke)
+] <- {rq(base_stroke)}
+.long$.labplot_override_selected <-
+  !is.na(.long$.labplot_override_fill) | !is.na(.long$.labplot_override_stroke)
+"""
+    layer = f"""  geom_tile(
+    data = .long[.long$.labplot_override_selected, , drop = FALSE],
+    aes(x = {x_aesthetic}, y = {y_aesthetic}, fill = I(.labplot_override_fill),
+        colour = I(.labplot_override_stroke)),
+    inherit.aes = FALSE, linewidth = {linewidth}, show.legend = FALSE) +
+"""
+    return declarations, mutate, layer
 
 
 # ---- date/time x-axis (scatter / line / area) --------------------------------
@@ -396,7 +577,7 @@ def _scatter(m, o):
         order_helper = _LEVEL_ORDER_R if order_vec else ""
         color_expr = f".labplot_ordered_levels({_data(color)}, {order_vec})" if order_vec else f"factor({_data(color)})"
         aes = f"aes(x = {_data(x)}, y = {_data(y)}, colour = {color_expr}{label_aes})"
-        scale = "  scale_colour_manual(values = labplot_palette()) +\n"
+        scale = "  scale_colour_manual(values = labplot_stroke_palette()) +\n"
         guide = f" + guides(colour = guide_legend(title = {rq(color)}))"
     else:
         order_helper = ""
@@ -404,12 +585,28 @@ def _scatter(m, o):
         scale = ""
         guide = ""
     pt_a = _alpha_r(o, "point_alpha", "0.8")
+    source_row_id_column = _source_row_id_column(o)
+    override_declarations, override_mutate, override_layers = _scatter_element_override_r(o, pt_a)
     fit_extra = _fit_stats_layer(x, y) if o.get("show_fit_stats") else ""
     y2_pre, y2_post = _y2_axis(o, x, y, "point", grouped=bool(color))
     t_pre, t_post = _temporal_x(o, x)
     return f"""{order_helper}{label_pre}{t_pre}
-{y2_pre}p <- ggplot(df, {aes}) +
-{smooth}  geom_point(size = 2.0, alpha = {pt_a}) +
+{y2_pre}{_MARK_ID_R}{override_declarations}
+.plot <- df %>%
+  dplyr::mutate(
+    .labplot_x = {_data(x)},
+    .labplot_y = {_data(y)},
+    .labplot_row_identity = as.character(.data[[{rq(source_row_id_column)}]]),
+    .labplot_mark_id = paste0(
+      "mark:scatter:row=", .labplot_url_token(.labplot_row_identity)))
+{override_mutate}p <- ggplot(.plot, {aes}) +
+{smooth}  suppressWarnings(geom_point(
+    aes(labplot_mark_id = .labplot_mark_id,
+        labplot_row_identity = .labplot_row_identity,
+        labplot_x_value = as.character(.labplot_x),
+        labplot_y_value = as.character(.labplot_y)),
+    size = 2.0, alpha = {pt_a})) +
+{override_layers}
 {label_layer}{scale}  {_labs(o, x, y)}{guide}
 {y2_post}{fit_extra}{t_post}"""
 
@@ -493,25 +690,88 @@ def _grouped_bar(m, o):
     stat = o.get("stat", "mean")
     fun = "sum" if stat == "sum" else "mean"
     width = max(0.2, min(1.0, _num(o.get("bar_width"), 0.68)))
+    fill_a = _alpha_r(o, "fill_alpha", "0.9")
+    point_a = _alpha_r(o, "point_alpha", "0.72")
     legend = o.get("legend_title") or group
     order_vec = _level_order_vec(o)
     order_helper = _LEVEL_ORDER_R if order_vec else ""
     x_fac = f".labplot_ordered_levels(.x_raw, {order_vec})" if order_vec else ".labplot_ordered_factor(.x_raw)"
+    error_type = _choice(o.get("error_type"), ("sd", "se", "ci95"), "sd")
+    if error_type == "se":
+        error_amount = ".sd / sqrt(.n)"
+    elif error_type == "ci95":
+        error_amount = "1.96 * .sd / sqrt(.n)"
+    else:
+        error_amount = ".sd"
+    error_layer = ""
+    if stat == "mean" and o.get("error_bars", False):
+        error_layer = (
+            f"  geom_errorbar(aes(ymin = .value - {error_amount}, ymax = .value + {error_amount}), "
+            "position = position_dodge(width = 0.76), width = 0.18, linewidth = 0.25) +\n"
+        )
+    point_layer = ""
+    colour_scale = ""
+    if o.get("show_points", False):
+        point_layer = (
+            "  geom_point(data = .raw, aes(x = .x, y = .value_raw, colour = .series, group = .series), "
+            "inherit.aes = FALSE, position = position_jitterdodge(jitter.width = 0.08, dodge.width = 0.76, seed = 1), "
+            f"size = 1.25, alpha = {point_a}) +\n"
+        )
+        colour_scale = "  scale_colour_manual(values = labplot_palette()) +\n"
+    override_declarations, override_layer = _grouped_bar_element_override_r(o)
+    override_layer = override_layer % width if override_layer else ""
+    override_mutate = ""
+    if override_declarations:
+        override_mutate = """
+.plot$.labplot_override_fill <- unname(.labplot_element_fill_overrides[.plot$.labplot_mark_id])
+.plot$.labplot_override_stroke <- unname(.labplot_element_stroke_overrides[.plot$.labplot_mark_id])
+.plot$.labplot_mark_count <- ave(
+  seq_along(.plot$.labplot_mark_id), .plot$.labplot_mark_id, FUN = length)
+.plot$.labplot_override_fill[.plot$.labplot_mark_count != 1] <- NA_character_
+.plot$.labplot_override_stroke[.plot$.labplot_mark_count != 1] <- NA_character_
+# The base grouped-bar layer always uses grey25 outlines.  Painting a
+# fill-only override with an NA colour would cover that outline with a
+# borderless rectangle, so carry the base outline onto the overlay unless the
+# request explicitly supplied a replacement stroke.
+.plot$.labplot_override_stroke[
+  !is.na(.plot$.labplot_override_fill) & is.na(.plot$.labplot_override_stroke)
+] <- "grey25"
+"""
     return f"""
 {_ORDERED_FACTOR_R}{order_helper}
-.plot <- df %>%
+{override_declarations}
+.raw <- df %>%
   dplyr::transmute(.x_raw = {_data(x)},
                    .value_raw = suppressWarnings(as.numeric({_data(y)})),
                    .series = factor({_data(group)})) %>%
   dplyr::filter(!is.na(.x_raw), !is.na(.value_raw), !is.na(.series)) %>%
-  dplyr::group_by(.x_raw, .series) %>%
-  dplyr::summarise(.value = {fun}(.value_raw, na.rm = TRUE), .groups = "drop") %>%
   dplyr::mutate(.x = {x_fac})
-p <- ggplot(.plot, aes(x = .x, y = .value, fill = .series)) +
-  geom_col(position = position_dodge(width = 0.76), width = {width}, alpha = 0.9,
-           colour = "grey25", linewidth = 0.25) +
-  scale_fill_manual(values = labplot_palette()) +
-  {_labs(o, x, y)} + guides(fill = guide_legend(title = {rq(legend)}))
+.plot <- .raw %>%
+  dplyr::group_by(.x_raw, .series) %>%
+  dplyr::summarise(.value = {fun}(.value_raw, na.rm = TRUE),
+                   .sd = stats::sd(.value_raw, na.rm = TRUE),
+                   .n = dplyr::n(), .groups = "drop") %>%
+  dplyr::mutate(.sd = dplyr::if_else(is.na(.sd), 0, .sd)) %>%
+  dplyr::mutate(.x = {x_fac},
+                .labplot_category = as.character(.x_raw),
+                .labplot_series = as.character(.series),
+                .labplot_mark_id = paste0(
+                  "mark:grouped_bar:category=",
+                  utils::URLencode(.labplot_category, reserved = TRUE, repeated = TRUE),
+                  "&series=",
+                  utils::URLencode(.labplot_series, reserved = TRUE, repeated = TRUE)))
+{override_mutate}
+# The labplot_* aesthetics are inert metadata carried through ggplot_build for
+# the layout sidecar. Explicit group=.series preserves the pre-metadata dodge
+# grouping, so these stable per-mark identifiers cannot change the chart.
+p <- ggplot(.plot, aes(x = .x, y = .value, fill = .series, group = .series)) +
+  suppressWarnings(geom_col(aes(labplot_mark_id = .labplot_mark_id,
+                                labplot_category = .labplot_category,
+                                labplot_series = .labplot_series),
+                            position = position_dodge(width = 0.76), width = {width}, alpha = {fill_a},
+                            colour = "grey25", linewidth = 0.25)) +
+{override_layer}{error_layer}{point_layer}  scale_fill_manual(values = labplot_palette()) +
+{colour_scale}  {_labs(o, x, y)} + guides(fill = guide_legend(title = {rq(legend)}), colour = "none")
 """
 
 
@@ -581,10 +841,49 @@ def _line(m, o):
     point_shape = _choice(o.get("point_shape"), tuple(_POINT_SHAPES.keys()), "circle")
     point_r_shape = _POINT_SHAPES[point_shape]
     line_color = o.get("line_color") if isinstance(o.get("line_color"), str) and o.get("line_color") else None
+    redundant_encoding = bool(o.get("redundant_series_encoding", False))
+    # Fresh grouped lines use redundant encodings when these global controls
+    # are absent. Once a user or AI explicitly supplies either control, that
+    # value is authoritative for its aesthetic while the other aesthetic may
+    # continue carrying accessible per-series redundancy.
+    redundant_linetype = bool(group and redundant_encoding and "line_type" not in o)
+    redundant_shape = bool(group and redundant_encoding and "point_shape" not in o)
     if group:
-        aes = f"aes(x = {_data(x)}, y = {_data(y)}, colour = factor({_data(group)}), group = factor({_data(group)}))"
-        scale = "  scale_colour_manual(values = labplot_palette()) +\n"
-        guide = f" + guides(colour = guide_legend(title = {rq(group)}))"
+        group_factor = f"factor({_data(group)})"
+        if redundant_encoding:
+            mapped_aesthetics = [
+                f"x = {_data(x)}",
+                f"y = {_data(y)}",
+                f"colour = {group_factor}",
+            ]
+            if redundant_linetype:
+                mapped_aesthetics.append(f"linetype = {group_factor}")
+            if redundant_shape:
+                mapped_aesthetics.append(f"shape = {group_factor}")
+            mapped_aesthetics.append(f"group = {group_factor}")
+            aes = (
+                f"aes({', '.join(mapped_aesthetics)})"
+            )
+            scale = f"  scale_colour_manual(name = {rq(group)}, values = labplot_stroke_palette()) +\n"
+            if redundant_linetype:
+                scale += (
+                    f'  scale_linetype_manual(name = {rq(group)}, values = '
+                    'rep(c("solid", "dashed", "dotdash", "dotted"), length.out = 100)) +\n'
+                )
+            if redundant_shape:
+                scale += (
+                    f"  scale_shape_manual(name = {rq(group)}, values = "
+                    "rep(c(16, 17, 15, 18), length.out = 100)) +\n"
+                )
+            # Giving all three scales the same explicit name lets ggplot2 merge
+            # them into one legend whose keys retain colour, linetype and shape.
+            # Hiding the secondary guides flattens every key to a solid circle,
+            # which defeats the non-colour encoding for readers using the legend.
+            guide = ""
+        else:
+            aes = f"aes(x = {_data(x)}, y = {_data(y)}, colour = {group_factor}, group = {group_factor})"
+            scale = "  scale_colour_manual(values = labplot_stroke_palette()) +\n"
+            guide = f" + guides(colour = guide_legend(title = {rq(group)}))"
         line_color_arg = ""
         point_color_arg = ""
     else:
@@ -593,12 +892,16 @@ def _line(m, o):
         guide = ""
         line_color_arg = f", colour = {rq(line_color)}" if line_color else ""
         point_color_arg = f", colour = {rq(line_color)}" if line_color else ""
-    point_layer = "" if point_r_shape is None else f"  geom_point(size = 1.8, shape = {point_r_shape}{point_color_arg}) +\n"
+    if redundant_shape:
+        point_layer = "" if point_r_shape is None else "  geom_point(size = 1.8) +\n"
+    else:
+        point_layer = "" if point_r_shape is None else f"  geom_point(size = 1.8, shape = {point_r_shape}{point_color_arg}) +\n"
+    line_type_arg = "" if redundant_linetype else f", linetype = {rq(line_type)}"
     y2_pre, y2_post = _y2_axis(o, x, y, "line", grouped=bool(group))
     t_pre, t_post = _temporal_x(o, x)
     return f"""{t_pre}
 {y2_pre}p <- ggplot(df, {aes}) +
-  geom_line(linewidth = 0.35, linetype = {rq(line_type)}{line_color_arg}) +
+  geom_line(linewidth = 0.35{line_type_arg}{line_color_arg}) +
 {point_layer}{scale}  {_labs(o, x, y)}{guide}
 {y2_post}{t_post}"""
 
@@ -661,23 +964,40 @@ def _correlation_heatmap(m, o):
     if method not in ("pearson", "spearman"):
         method = "pearson"
     show_values = "TRUE" if o.get("show_values", True) else "FALSE"
+    override_declarations, override_mutate, override_layer = _tile_element_override_r(
+        o,
+        _CORRELATION_HEATMAP_MARK_ID_RE,
+        base_stroke="white",
+        linewidth="0.2",
+        x_aesthetic="x",
+        y_aesthetic="y",
+    )
     return f"""
+{_MARK_ID_R}{override_declarations}
 .cols <- {col_vec}
 .mat <- as.matrix(df[, .cols, drop = FALSE])
 storage.mode(.mat) <- "double"
 .cor <- stats::cor(.mat, use = "pairwise.complete.obs", method = {rq(method)})
 .long <- as.data.frame(as.table(.cor))
 colnames(.long) <- c("x", "y", "value")
+.long$.labplot_x <- as.character(.long$x)
+.long$.labplot_y <- as.character(.long$y)
+.long$.labplot_mark_id <- paste0(
+  "mark:correlation_heatmap:x=", .labplot_url_token(.long$.labplot_x),
+  "&y=", .labplot_url_token(.long$.labplot_y))
 .long$x <- factor(.long$x, levels = .cols)
 .long$y <- factor(.long$y, levels = rev(.cols))
-p <- ggplot(.long, aes(x = x, y = y, fill = value)) +
-  geom_tile(colour = "white", linewidth = 0.2) +
+{override_mutate}p <- ggplot(.long, aes(x = x, y = y, fill = value)) +
+  suppressWarnings(geom_tile(
+    aes(labplot_mark_id = .labplot_mark_id,
+        labplot_x = .labplot_x, labplot_y = .labplot_y,
+        labplot_value = value),
+    colour = "white", linewidth = 0.2)) +
+{override_layer}
   scale_fill_gradient2(low = "#4C6F91", mid = "white", high = "#B24745", midpoint = 0,
                        limits = c(-1, 1), name = "r") +
   {_labs(o, "", "")} +
-  coord_equal() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1),
-        panel.grid = element_blank())
+  coord_equal()
 if ({show_values}) {{
   p <- p + geom_text(aes(label = sprintf("%.2f", value)), size = {_GEOM_TEXT_SIZE_7PT}, colour = "grey20")
 }}
@@ -692,8 +1012,10 @@ def _heatmap(m, o):
     row_label = m.get("row_label")
     if row_label:
         rowid = f'as.character(df[[{rq(row_label)}]])'
+        semantic_rowid = ".rowid"
     else:
         rowid = "as.character(seq_len(nrow(df)))"
+        semantic_rowid = f'as.character(df[[{rq(_source_row_id_column(o))}]])'
     scale_rows_on = bool(o.get("scale_rows", False))
     scale_rows = ""
     if scale_rows_on:
@@ -715,22 +1037,39 @@ def _heatmap(m, o):
         fill_scale = f'scale_fill_gradient2(low = "#4C6F91", mid = "white", high = "#B24745", midpoint = {midpoint_r}, na.value = "grey90")'
     else:
         fill_scale = f"scale_fill_viridis_c(option = {rq(palette)}, na.value = \"grey85\")"
+    override_declarations, override_mutate, override_layer = _tile_element_override_r(
+        o,
+        _HEATMAP_MARK_ID_RE,
+        base_stroke="grey90",
+        linewidth="0.1",
+    )
     return f"""
+{_MARK_ID_R}{override_declarations}
 .cols <- {col_vec}
 .mat <- as.matrix(df[, .cols, drop = FALSE])
 storage.mode(.mat) <- "double"
 .rowid <- {rowid}
+.semantic_rowid <- {semantic_rowid}
 {scale_rows}.long <- data.frame(
   row = factor(rep(.rowid, times = ncol(.mat)), levels = rev(unique(.rowid))),
   col = factor(rep(.cols, each = nrow(.mat)), levels = .cols),
-  value = as.vector(.mat)
+  value = as.vector(.mat),
+  .labplot_row = rep(.semantic_rowid, times = ncol(.mat)),
+  .labplot_col = rep(.cols, each = nrow(.mat)),
+  stringsAsFactors = FALSE
 )
-p <- ggplot(.long, aes(x = col, y = row, fill = value)) +
-  geom_tile(colour = "grey90", linewidth = 0.1) +
+.long$.labplot_mark_id <- paste0(
+  "mark:heatmap:row=", .labplot_url_token(.long$.labplot_row),
+  "&col=", .labplot_url_token(.long$.labplot_col))
+{override_mutate}p <- ggplot(.long, aes(x = col, y = row, fill = value)) +
+  suppressWarnings(geom_tile(
+    aes(labplot_mark_id = .labplot_mark_id,
+        labplot_row = .labplot_row, labplot_col = .labplot_col,
+        labplot_value = value),
+    colour = "grey90", linewidth = 0.1)) +
+{override_layer}
   {fill_scale} +
-  {_labs(o, "", "")} +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1),
-        axis.text.y = element_text(size = 7))
+  {_labs(o, "", "")}
 """
 
 
@@ -830,7 +1169,14 @@ def _kaplan_meier(m, o):
         if group else
         '.grp <- rep("All", nrow(df))'
     )
-    legend = "none" if not group else "right"
+    # Hide the pointless single-key "All" legend through guides(), not
+    # theme(legend.position): labplot_theme() is a complete theme appended
+    # AFTER the template body, so any theme() set here would be reset.
+    guide_r = (
+        f"guides(colour = guide_legend(title = {rq(group)}))"
+        if group else
+        'guides(colour = "none")'
+    )
     return f"""
 .time <- suppressWarnings(as.numeric(df[[{rq(time)}]]))
 .sv <- tolower(trimws(as.character(df[[{rq(status)}]])))
@@ -863,8 +1209,7 @@ p <- ggplot(.curves, aes(x = time, y = surv, colour = factor(grp))) +
   scale_colour_manual(values = labplot_palette()) +
   coord_cartesian(ylim = c(0, 1)) +
   {_labs(o, "Time", "Survival probability")} +
-  guides(colour = guide_legend(title = {rq(group) if group else 'NULL'})) +
-  theme(legend.position = "{legend}")
+  {guide_r}
 """
 
 
@@ -1068,10 +1413,13 @@ PLOT_TYPES = [
     {"type": "grouped_bar", "label": "Grouped bar chart",
      "required": [{"key": "x", "label": "Category / benchmark (X)", "roles": ["group", "category", "status", "time", "numeric"]},
                   {"key": "y", "label": "Value / score (Y)", "roles": ["numeric", "log2fc"]},
-                  {"key": "group", "label": "Series / method", "roles": ["group", "category", "status"]}],
+                  {"key": "group", "label": "Series / method", "roles": ["group", "category", "status", "time"]}],
      "optional": [],
      "options": [{"key": "stat", "label": "Statistic", "type": "select", "choices": ["mean", "sum"], "default": "mean"},
-                 {"key": "bar_width", "label": "Bar width", "type": "number", "default": 0.68}]},
+                 {"key": "bar_width", "label": "Bar width", "type": "number", "default": 0.68},
+                 {"key": "show_points", "label": "Show individual observations", "type": "bool", "default": False},
+                 {"key": "error_bars", "label": "Error bars", "type": "bool", "default": False},
+                 {"key": "error_type", "label": "Error bar type", "type": "select", "choices": ["sd", "se", "ci95"], "default": "sd"}]},
     {"type": "overlap_bar", "label": "Overlapped bar chart",
      "required": [{"key": "x", "label": "X / bin", "roles": ["numeric", "group", "category", "time"]},
                   {"key": "y", "label": "Value / count", "roles": ["numeric"]}],
@@ -1535,10 +1883,12 @@ labplot_apply_series_styles <- function(plot) {{
     if (!length(limits)) return(current_plot)
     hits <- intersect(names(.override), limits)
     if (!length(hits)) return(current_plot)
-    values <- labplot_palette(length(limits))
+    values <- if (identical(aesthetic, "colour")) labplot_stroke_palette(length(limits)) else labplot_palette(length(limits))
     names(values) <- limits
     values[hits] <- .override[hits]
-    suppressMessages(current_plot + scale_fun(values = values))
+    # Replacing a colour scale without its name splits a redundant
+    # colour/linetype/shape legend into separate guides.
+    suppressMessages(current_plot + scale_fun(name = sc$name, values = values))
   }}
   plot <- .apply(plot, "fill", ggplot2::scale_fill_manual)
   plot <- .apply(plot, "colour", ggplot2::scale_colour_manual)
@@ -1546,12 +1896,41 @@ labplot_apply_series_styles <- function(plot) {{
 }}
 p <- labplot_apply_series_styles(p)
 """)
+    if linetypes or shapes:
+        parts.append("""
+labplot_apply_series_aesthetic <- function(plot, aesthetic, override, scale_fun, na_value) {
+  built <- tryCatch(ggplot2::ggplot_build(plot), error = function(e) NULL)
+  if (is.null(built)) return(plot)
+  sc <- built$plot$scales$get_scales(aesthetic)
+  if (is.null(sc)) return(plot)
+  is_discrete <- tryCatch(isTRUE(sc$is_discrete()), error = function(e) FALSE)
+  if (!is_discrete) return(plot)
+  limits <- tryCatch(sc$get_limits(), error = function(e) character())
+  limits <- as.character(limits[!is.na(limits)])
+  if (!length(limits)) return(plot)
+  values <- tryCatch(sc$map(limits), error = function(e) NULL)
+  if (is.null(values) || length(values) != length(limits)) return(plot)
+  names(values) <- limits
+  hits <- intersect(names(override), limits)
+  if (!length(hits)) return(plot)
+  values[hits] <- override[hits]
+  # Preserve the shared scale name so ggplot2 keeps one merged legend whose
+  # keys show the final colour, linetype and shape together.
+  suppressMessages(plot + scale_fun(name = sc$name, values = values, na.value = na_value))
+}
+""")
     if linetypes:
         vec = ", ".join(f"{rq(k)} = {rq(v)}" for k, v in list(linetypes.items())[:80])
-        parts.append(f'p <- p + scale_linetype_manual(values = c({vec}), na.value = "solid")\n')
+        parts.append(
+            f'p <- labplot_apply_series_aesthetic(p, "linetype", c({vec}), '
+            'ggplot2::scale_linetype_manual, "solid")\n'
+        )
     if shapes:
         vec = ", ".join(f"{rq(k)} = {v}" for k, v in list(shapes.items())[:80])
-        parts.append(f'p <- p + scale_shape_manual(values = c({vec}), na.value = 16)\n')
+        parts.append(
+            f'p <- labplot_apply_series_aesthetic(p, "shape", c({vec}), '
+            'ggplot2::scale_shape_manual, 16)\n'
+        )
     return "".join(parts)
 
 
@@ -1804,8 +2183,7 @@ p <- ggplot() +
   scale_linewidth(range = c(0.5, 5.2), guide = "none") +
   scale_size(range = c(2.5, 6), guide = "none") +
   scale_x_continuous(limits = c(-0.35, 1.35), breaks = c(0, 1), labels = c({rq(src)}, {rq(tgt)})) +
-  {_labs(o, "", "Flow")} +
-  theme(axis.text.y = element_blank(), axis.ticks.y = element_blank(), panel.grid = element_blank())
+  {_labs(o, "", "Flow")}
 """
 
 
@@ -2035,8 +2413,7 @@ p <- ggplot(.long, aes(x = metric, y = value, group = .id, colour = .grp)) +
   geom_line(alpha = 0.35, linewidth = 0.25) +
   geom_point(alpha = 0.55, size = 0.8) +
   scale_colour_manual(values = labplot_palette()) +
-  {_labs(o, "", "Scaled value")}{guide} +
-  theme(axis.text.x = element_text(angle = 35, hjust = 1), panel.grid.minor = element_blank())
+  {_labs(o, "", "Scaled value")}{guide}
 """
 
 
@@ -2052,8 +2429,7 @@ p <- ggplot(.tab, aes(x = Predicted, y = Actual, fill = Freq)) +
   geom_text(aes(label = Freq), size = {_GEOM_TEXT_SIZE_7PT}, colour = "grey10") +
   scale_fill_gradient(low = "grey95", high = "#4C6F91", name = "Count") +
   coord_equal() +
-  {_labs(o, "Predicted", "Actual")} +
-  theme(panel.grid = element_blank())
+  {_labs(o, "Predicted", "Actual")}
 """
 
 
@@ -2186,6 +2562,28 @@ _BUILDERS.update({
 # plot types that render via base-graphics devices (not ggsave) / skip ggplot theme
 DEVICE_TYPES = {"annotated_heatmap", "upset", "surface_3d", "scatter_3d", "contour_3d", "chord_diagram", "tri_surface", "wireframe_3d"}
 NO_THEME_TYPES = {"network", "annotated_heatmap", "upset", "surface_3d", "scatter_3d", "contour_3d", "chord_diagram", "tri_surface", "wireframe_3d"}
+
+# labplot_theme() is a COMPLETE theme appended after the template body, so a
+# theme() call inside a themed template is silently reset and must not exist.
+# Template-intent theme tweaks instead live here and are appended by
+# build_script() AFTER labplot_theme(), before the user's option-driven
+# overrides (which therefore always win).
+#
+# DEFAULT_X_TEXT_ANGLE: per-type default x tick-label rotation applied only
+# while options.x_text_angle is unset; the renderer routes it through the same
+# post-theme block as the user option so hjust/vjust stay consistent.
+DEFAULT_X_TEXT_ANGLE = {
+    "heatmap": 45,
+    "correlation_heatmap": 45,
+    "parallel_coordinates": 35,
+}
+POST_THEME_R = {
+    "correlation_heatmap": 'p <- p + theme(panel.grid = element_blank())\n',
+    "parallel_coordinates": 'p <- p + theme(panel.grid.minor = element_blank())\n',
+    "sankey": ('p <- p + theme(axis.text.y = element_blank(), '
+               'axis.ticks.y = element_blank(), panel.grid = element_blank())\n'),
+    "confusion_matrix": 'p <- p + theme(panel.grid = element_blank())\n',
+}
 
 # plot types that render a continuous/gradient colour or fill scale (no discrete
 # series scale for series_styles/category_colors to target). Combined with

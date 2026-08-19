@@ -83,6 +83,7 @@ export interface ColumnProfile {
   name: string;
   dtype: string;
   role: string;
+  role_source?: string | null;
   n_unique: number;
   n_missing: number;
   sample_values: unknown[];
@@ -111,14 +112,29 @@ export interface DatasetListItem {
 
 export interface DescriptiveStat {
   column: string; n: number;
-  mean?: number; sd?: number; median?: number; min?: number; max?: number; q1?: number; q3?: number;
+  mean?: number | null; sd?: number | null; median?: number | null; min?: number | null; max?: number | null; q1?: number | null; q3?: number | null;
 }
-export interface GroupStat { level: string; n: number; mean?: number; sd?: number; }
+export interface GroupStat { level: string; n: number; mean?: number | null; sd?: number | null; }
+export interface NonparametricComparison {
+  test: string;
+  statistic?: number | null;
+  p_value?: number | null;
+  p_value_adjusted?: number | null;
+  significant: boolean;
+}
 export interface Comparison {
   group_column: string; value_column: string; test: string;
-  statistic?: number; p_value?: number; significant: boolean; groups: GroupStat[];
+  statistic?: number | null; p_value?: number | null; p_value_adjusted?: number | null;
+  significant: boolean; significant_fdr?: boolean; groups: GroupStat[];
+  nonparametric?: NonparametricComparison;
 }
-export interface DatasetStatistics { descriptive: DescriptiveStat[]; comparisons: Comparison[]; }
+export interface DatasetStatistics {
+  descriptive: DescriptiveStat[];
+  comparisons: Comparison[];
+  comparison_policy?: string;
+  one_factor_comparisons_suppressed?: boolean;
+  fdr_method?: string;
+}
 
 export interface ProjectCollaborator {
   id: string;
@@ -198,11 +214,41 @@ export interface ChartSuggestion {
   plot_type: string;
   title?: string;
   score?: number;
+  scores?: {
+    data_structure_fit: number;
+    user_intent_match: number;
+    statistical_suitability: number;
+    overall: number;
+  };
   rank?: number;
   fit?: string;
   rationale?: string;
   suggested_mapping?: Record<string, unknown>;
+  suggested_options?: Record<string, unknown>;
   required_vars?: Record<string, unknown>;
+  intent?: {
+    show_individual_observations?: boolean;
+    group_mapping_required?: boolean;
+    group_mapping_status?: 'not_requested' | 'satisfied' | 'selection_required';
+    group_mapping_candidates?: string[];
+    individual_observation_support?: {
+      status?: 'not_requested' | 'satisfied' | 'selection_required' | 'unsupported';
+      mode?: 'not_requested' | 'individual_points_with_summary' | 'individual_points' | 'raw_trajectories' | 'summary_only';
+      reason?: 'renderer_cannot_group_by_replicate' | 'replicate_id_required' | 'renderer_does_not_show_individual_observations';
+    };
+    line_policy?: {
+      replicate_id_column?: string | null;
+      raw_trajectory_grouping?: 'not_requested' | 'not_supported_by_renderer' | 'replicate_id_required';
+      same_time_replicates?: 'do_not_connect_without_aggregation';
+      summary_mode?: 'not_configured' | 'selection_required';
+      error_summary?: 'sd' | 'se' | 'ci95' | 'none';
+      support_status?: 'not_requested' | 'selection_required';
+      blocking_reason?: 'renderer_cannot_group_by_replicate' | 'replicate_id_required';
+      requires_confirmation?: boolean;
+    };
+  };
+  mapping_complete?: boolean;
+  missing_required_mappings?: Array<{ key: string; label: string }>;
   example_usage?: string;
   source: string;
 }
@@ -228,6 +274,8 @@ export interface PaletteDef {
   label: string;
   colorblind_safe: boolean;
   hex: string[];
+  is_default_for_new_figures?: boolean;
+  usage_note?: string | null;
   custom?: boolean;
   id?: string;
   name?: string;
@@ -405,6 +453,61 @@ export interface Review {
     suitability?: { score?: number; comments?: string[] };
     strengths?: string[];
     issues?: string[];
+    review_prompt_version?: string;
+    review_schema_version?: string;
+    accessibility_checks?: {
+      schema_version?: string;
+      palette?: {
+        status?: 'evaluated' | 'not_evaluable' | string;
+        source?: string | null;
+        colors?: string[];
+        series_count?: number | null;
+        reason?: string | null;
+      };
+      cvd?: {
+        status?: 'pass' | 'needs_review' | 'not_evaluable' | string;
+        method?: string;
+        threshold_delta_e?: number;
+        simulations?: Array<{
+          mode?: 'protanopia' | 'deuteranopia' | 'tritanopia' | string;
+          status?: 'pass' | 'needs_review' | 'not_evaluable' | string;
+          min_delta_e?: number | null;
+          closest_pair?: [string, string] | null;
+        }>;
+        reason?: string | null;
+      };
+      grayscale?: {
+        status?: 'pass' | 'needs_review' | 'not_evaluable' | string;
+        method?: string;
+        threshold_delta_l?: number;
+        min_delta_l?: number | null;
+        closest_pair?: [string, string] | null;
+        reason?: string | null;
+      };
+      minimum_contrast?: {
+        status?: 'pass' | 'needs_review' | 'not_evaluable' | string;
+        method?: string;
+        threshold_ratio?: number;
+        ratio?: number | null;
+        foreground?: string | null;
+        background?: string;
+        reason?: string | null;
+      };
+    };
+    evidence?: {
+      render?: { version_id?: string; version_number?: number; image_available?: boolean };
+      plot_type?: string;
+      style_preset?: string;
+      mapping?: Record<string, unknown>;
+      options?: Record<string, unknown>;
+      last_ai_request?: string | null;
+      dataset?: {
+        name?: string | null;
+        column_count?: number;
+        columns?: Array<{ name?: string; role?: string; dtype?: string }>;
+        columns_truncated?: boolean;
+      };
+    };
   };
   created_at: string;
 }
@@ -415,6 +518,24 @@ export interface Review {
 export interface UnsupportedRequestItem {
   request: string;
   reason: string;
+  mark_id?: string;
+  resolved_target?: string;
+}
+
+export interface ImprovementEditScope {
+  scope_id?: string;
+  mark_id?: string | null;
+  mark_label?: string | null;
+  mark_type?: AiMarkType | null;
+  request?: string;
+  status?: 'supported' | 'unsupported' | 'blocked' | 'partial' | string;
+  resolved_target?: string | AiResolvedMarkTarget | null;
+  allowed_patch_keys?: string[];
+  reason?: string;
+  confidence?: number;
+  requested_target_override?: AiResolvedMarkTarget | null;
+  accepted_target_override?: AiResolvedMarkTarget | null;
+  target_override_status?: 'accepted' | 'rejected' | string | null;
 }
 
 export interface Improvement {
@@ -424,11 +545,25 @@ export interface Improvement {
   current_state?: string;
   recommended?: string;
   param_patch: Record<string, unknown>;
+  edit_scope?: ImprovementEditScope | null;
   priority?: string;
   applied: boolean;
   // Dotted paths this suggestion proposed that were dropped by sanitization.
   skipped?: string[];
   unsupported?: UnsupportedRequestItem[];
+  // Optional legacy mark-traceability metadata. `edit_scope` is authoritative;
+  // old explicit Mark A / Mark #1 fields or prose can still be recognized, but
+  // unlinked response rows are never assigned by response order.
+  mark_id?: string;
+  mark_label?: string;
+  mark_type?: 'region' | 'arrow' | 'note';
+  support_status?: 'supported' | 'unsupported' | 'blocked';
+  unsupported_reason?: string;
+  confidence?: number;
+  // Explicit safety signals for forward-compatible AI providers. A false
+  // value means the patch must never become selectable in the client.
+  requested?: boolean;
+  unrequested_changes?: string[];
   created_at: string;
 }
 
@@ -437,6 +572,9 @@ export interface AppliedChangeItem {
   key: string;
   from: unknown;
   to: unknown;
+  /** True when `from` is the renderer-effective default of a previously
+   * unset option rather than a stored value. */
+  from_is_default?: boolean;
 }
 
 // (U10c) Self-verify loop outcome, present only when the apply call opted in
@@ -448,6 +586,8 @@ export interface VerificationResult {
   // Machine-readable reason verification could not run (AI_QUOTA_EXCEEDED,
   // AI_API_ERROR, NO_IMAGE, ...). Null/absent when it ran normally.
   skipped?: string | null;
+  allowed_patch_keys?: string[];
+  unrequested_changes?: AppliedChangeItem[];
 }
 
 // Response shape for both apply endpoints (U10b/U10c). Wraps FigureVersion
@@ -460,13 +600,65 @@ export interface ImprovementApplyResult {
   verification?: VerificationResult | null;
 }
 
-export interface MethodsTextResponse { methods_text: string; }
-export interface AltTextResponse { alt_text: string; }
+export interface FigureTextGrounding {
+  schema_version?: string;
+  total_rows?: number;
+  row_count_semantics?: string;
+  mapped_columns?: Record<string, unknown>;
+  series?: Record<string, unknown> | null;
+  representation?: Record<string, unknown>;
+  descriptive_trends?: Array<Record<string, unknown>>;
+}
+
+export interface LegendResponse {
+  legend: string;
+  grounding?: FigureTextGrounding;
+  prompt_version?: string | null;
+}
+
+export interface MethodsTextResponse {
+  methods_text: string;
+  grounding?: FigureTextGrounding;
+  runtime_versions?: Record<string, string>;
+  generator_version?: string | null;
+}
+
+export interface AltTextResponse {
+  alt_text: string;
+  grounding?: FigureTextGrounding;
+  prompt_version?: string | null;
+}
 
 export interface FigureCodeResponse {
   language: 'python' | 'latex';
   filename: string;
   code: string;
+}
+
+export interface FigurePixelBox {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}
+
+export interface FigureSceneElement {
+  id: string;
+  kind?: string;
+  role: string;
+  geom?: string;
+  bbox_px: FigurePixelBox;
+  category?: string | null;
+  series?: string | null;
+  panel_id?: number | null;
+  layer_index?: number | null;
+  fill?: string | null;
+  editable?: boolean;
+  setting_path?: string | null;
+  unsupported_reason?: string | null;
+  /** Degenerate "add here" band for an element that is not actually rendered
+   * (e.g. an unset axis label); excluded from automatic hit-testing. */
+  placeholder?: boolean;
 }
 
 export interface FigureLayout {
@@ -476,6 +668,46 @@ export interface FigureLayout {
   y_range: [number, number];
   x_discrete: boolean;
   y_discrete: boolean;
+  // Renderer-sidecar hit regions. Optional for old renders and plot types
+  // without standard ggplot text/axis geometry.
+  title_px?: FigurePixelBox;
+  subtitle_px?: FigurePixelBox;
+  xlab_px?: FigurePixelBox;
+  ylab_px?: FigurePixelBox;
+  x_axis_px?: FigurePixelBox;
+  y_axis_px?: FigurePixelBox;
+  scene_elements?: FigureSceneElement[];
+}
+
+export type AiMarkType = 'region' | 'arrow' | 'note';
+
+export interface AiResolvedMarkTarget {
+  type: 'title' | 'subtitle' | 'x_label' | 'y_label' | 'x_axis' | 'y_axis' | 'bar' | 'point' | 'cell'
+    | 'x_tick_labels' | 'y_tick_labels' | 'colorbar' | 'legend' | 'scene_element';
+  label: string;
+  setting_path?: string | null;
+  element_id?: string;
+  role?: string;
+  category?: string | null;
+  series?: string | null;
+  editable?: boolean;
+  unsupported_reason?: string | null;
+  placeholder?: boolean;
+}
+
+export interface AiEditMark {
+  id: string;
+  label: string;
+  display_number: number;
+  type: AiMarkType;
+  memo: string;
+  bbox_normalized?: { x: number; y: number; width: number; height: number };
+  point_normalized?: { x: number; y: number };
+  resolved_target?: AiResolvedMarkTarget;
+  // Explicit user correction. The server validates this against the
+  // persisted renderer scene graph; `resolved_target` remains audit evidence
+  // for the client's automatic hit-test.
+  target_override?: AiResolvedMarkTarget;
 }
 
 export type AnnotationCoord = 'data' | 'relative';

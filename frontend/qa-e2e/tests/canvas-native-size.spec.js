@@ -82,11 +82,9 @@ test.describe('canvas native-size placement', () => {
 
     await authedPage(page, tokens);
     await page.goto(`/canvases/${c.id}`, { waitUntil: 'networkidle' });
-    const stage = page.locator('canvas').first();
-    await expect(stage).toBeVisible();
-    // Select the panel: 60×45mm at (20,20) on a fitted A4 sheet — click inside it.
-    const box = await stage.boundingBox();
-    await page.mouse.click(box.x + box.width * 0.42, box.y + box.height * 0.16);
+    // Select through Layers instead of a viewport-dependent canvas coordinate.
+    // This also covers the supported path for selecting a covered object.
+    await page.getByRole('button', { name: /Layer 1 of 1: Figure panel A/ }).click();
     const resetBtn = page.getByRole('button', { name: 'Original size' });
     await expect(resetBtn).toBeVisible();
     await resetBtn.click();

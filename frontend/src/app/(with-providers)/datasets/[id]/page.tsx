@@ -13,6 +13,7 @@ import {
 import { Textarea } from '@/components/ui/textarea';
 import type { ChartSuggestion, FigureDetail, FigureListItem, FigureTemplateFavoriteItem, PlotTypeDef } from '@/lib/types';
 import { formatStylePreset } from '@/lib/style-presets';
+import { automaticStatisticsDesign, formatPValue } from '@/lib/statistics';
 import { AppHeader } from '@/components/layout/AppHeader';
 import { TransformDialog } from '@/components/datasets/TransformDialog';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -24,11 +25,13 @@ import { Label } from '@/components/ui/label';
 import { Slider } from '@/components/ui/slider';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { CheckCircle2, Clipboard, Columns3, GripVertical, ImageIcon, Loader2, Sparkles, Star, Wand2, ArrowRight, ArrowUp, ArrowDown, X, RefreshCw } from 'lucide-react';
+import { useUrlTab } from '@/hooks/useUrlTab';
 
 const ROLE_COLORS: Record<string, string> = {
   numeric: 'bg-blue-100 text-blue-700', group: 'bg-green-100 text-green-700',
   category: 'bg-green-100 text-green-700', time: 'bg-purple-100 text-purple-700',
   status: 'bg-orange-100 text-orange-700', log2fc: 'bg-red-100 text-red-700',
+  id: 'bg-slate-100 text-slate-700', replicate: 'bg-cyan-100 text-cyan-700',
   pvalue: 'bg-pink-100 text-pink-700', gene: 'bg-amber-100 text-amber-700', text: 'bg-gray-100 text-gray-600',
 };
 
@@ -36,6 +39,69 @@ type ColumnShape = { name: string; role: string; dtype: string; sample_values?: 
 type BuildEntryMode = 'manual' | 'recommendation' | 'template';
 type DropPosition = 'before' | 'after';
 type DropTarget = { id: string; position: DropPosition } | null;
+const DATASET_WORKSPACE_TABS = ['preview', 'stats', 'visualize', 'figures'] as const;
+const DEFAULT_NEW_FIGURE_PALETTE = 'publication_muted_v2';
+const SERIES_AUTO_OPTION = '__series_auto__';
+const DEFAULT_NEW_FIGURE_OPTIONS: Readonly<Record<string, unknown>> = {
+  palette_name: DEFAULT_NEW_FIGURE_PALETTE,
+  font_family: 'dejavu_sans',
+  base_size: 7,
+  axis_line_width_pt: 0.5,
+  data_line_width_pt: 0.8,
+  linewidth_scale: 1,
+  redundant_series_encoding: true,
+};
+
+function recommendationScoreRows(suggestion: ChartSuggestion) {
+  const fallback = suggestion.score;
+  return [
+    ['Data structure fit', suggestion.scores?.data_structure_fit ?? fallback],
+    ['User intent match', suggestion.scores?.user_intent_match ?? fallback],
+    ['Statistical suitability', suggestion.scores?.statistical_suitability ?? fallback],
+    ['Overall', suggestion.scores?.overall ?? fallback],
+  ] as const;
+}
+
+function linePolicyText(suggestion: ChartSuggestion): string | null {
+  const policy = suggestion.intent?.line_policy;
+  if (!policy?.requires_confirmation) return null;
+  if (policy.blocking_reason === 'replicate_id_required') {
+    return 'Individual trajectories cannot be applied: select a Subject/Replicate ID, or choose an individual-points + summary recommendation.';
+  }
+  if (policy.blocking_reason === 'renderer_cannot_group_by_replicate') {
+    return `Individual trajectories cannot be applied safely: ${policy.replicate_id_column ?? 'the replicate ID'} is known, but this line renderer cannot group by it. Choose an individual-points + summary recommendation.`;
+  }
+  return 'Choose how repeated observations should be grouped or summarized before applying this line recommendation.';
+}
+
+function linePolicyBlocksApply(suggestion: ChartSuggestion): boolean {
+  const policy = suggestion.intent?.line_policy;
+  return Boolean(policy?.requires_confirmation && policy.support_status === 'selection_required');
+}
+
+function individualObservationBlockText(suggestion: ChartSuggestion): string | null {
+  const lineMessage = linePolicyText(suggestion);
+  if (lineMessage) return lineMessage;
+  const support = suggestion.intent?.individual_observation_support;
+  if (!suggestion.intent?.show_individual_observations || support?.status !== 'unsupported') return null;
+  return 'This chart cannot render the requested individual observations. Choose an individual-points + summary recommendation.';
+}
+
+function missingMappingBlockText(suggestion: ChartSuggestion): string | null {
+  if (suggestion.mapping_complete !== false) return null;
+  const labels = (suggestion.missing_required_mappings ?? [])
+    .map((field) => field.label)
+    .filter(Boolean);
+  return labels.length
+    ? `Select required mapping before applying: ${labels.join(', ')}`
+    : 'Complete the required column mappings before applying this recommendation.';
+}
+
+function recommendationBlocksApply(suggestion: ChartSuggestion): boolean {
+  return missingMappingBlockText(suggestion) !== null
+    || linePolicyBlocksApply(suggestion)
+    || individualObservationBlockText(suggestion) !== null;
+}
 
 function moveFigure(items: FigureListItem[], activeId: string, overId: string, position: DropPosition): FigureListItem[] {
   const from = items.findIndex((item) => item.id === activeId);
@@ -86,6 +152,8 @@ const COLUMN_ROLE_OPTIONS = [
   { value: 'group', label: 'Group' },
   { value: 'time', label: 'Time' },
   { value: 'status', label: 'Status' },
+  { value: 'id', label: 'ID' },
+  { value: 'replicate', label: 'Replicate' },
   { value: 'gene', label: 'Gene' },
   { value: 'log2fc', label: 'log2FC' },
   { value: 'pvalue', label: 'p-value' },
@@ -104,6 +172,9 @@ function isContinuousFill(plotType: string): boolean {
 const FONT_FAMILY_OPTIONS = [
   { value: '', label: 'Default (sans)' },
   { value: 'sans', label: 'Sans-serif' },
+  { value: 'arial', label: 'Arial-compatible sans' },
+  { value: 'dejavu_sans', label: 'DejaVu Sans (installed Arial-compatible fallback)' },
+  { value: 'helvetica', label: 'Helvetica-compatible sans' },
   { value: 'serif', label: 'Serif' },
   { value: 'mono', label: 'Monospace' },
 ];
@@ -144,6 +215,14 @@ function numberOption(options: Record<string, unknown>, key: string, raw: string
   const parsed = Number(value);
   if (Number.isFinite(parsed)) next[key] = parsed;
   return next;
+}
+function scalarInputValue(value: unknown, fallback: unknown = ''): string {
+  const stringify = (candidate: unknown): string | null => {
+    if (typeof candidate === 'string') return candidate;
+    if (typeof candidate === 'number' && Number.isFinite(candidate)) return String(candidate);
+    return null;
+  };
+  return stringify(value) ?? stringify(fallback) ?? '';
 }
 function stringListOption(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
@@ -276,8 +355,39 @@ function defaultOptions(def: PlotTypeDef | undefined) {
   return options;
 }
 
-function defaultBuildOptions(def: PlotTypeDef | undefined, paletteName = 'journal_muted') {
-  return { ...defaultOptions(def), palette_name: paletteName };
+function defaultBuildOptions(def: PlotTypeDef | undefined, paletteName = DEFAULT_NEW_FIGURE_PALETTE) {
+  const options: Record<string, unknown> = {
+    ...defaultOptions(def),
+    ...DEFAULT_NEW_FIGURE_OPTIONS,
+    palette_name: paletteName,
+  };
+  // Absence means “cycle by series” for fresh grouped lines. Keeping the
+  // metadata defaults here would make solid/circle look explicit and prevent
+  // the renderer from distinguishing the accessible default from a user edit.
+  if (def?.type === 'line') {
+    delete options.line_type;
+    delete options.point_shape;
+  }
+  return options;
+}
+
+function offersSeriesAutoOption(plotType: string, optionKey: string, options: Record<string, unknown>) {
+  return plotType === 'line'
+    && options.redundant_series_encoding === true
+    && (optionKey === 'line_type' || optionKey === 'point_shape');
+}
+
+function usesSeriesAutoOption(plotType: string, optionKey: string, options: Record<string, unknown>) {
+  return offersSeriesAutoOption(plotType, optionKey, options)
+    && !Object.prototype.hasOwnProperty.call(options, optionKey);
+}
+
+function preservedFormatOptions() {
+  // A saved template's stored options are authoritative. Renderer fallbacks
+  // already reproduce omitted per-plot defaults; materializing today's UI
+  // defaults here can change semantics (notably accessible grouped-line
+  // encodings whose line_type/point_shape are intentionally absent).
+  return { palette_name: 'preset' };
 }
 
 function templateOptionSummary(options: Record<string, unknown> | undefined): string {
@@ -333,6 +443,7 @@ function remapTemplateMapping(def: PlotTypeDef | undefined, sourceMapping: Recor
 export default function DatasetDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const router = useRouter();
+  const [activeWorkspaceTab, setActiveWorkspaceTab] = useUrlTab(DATASET_WORKSPACE_TABS, 'visualize');
   const qc = useQueryClient();
 
   const { data: ds, isLoading, isError, refetch } = useQuery({ queryKey: ['dataset', id], queryFn: () => getDataset(id) });
@@ -418,9 +529,11 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
   const paletteOptions = useMemo(() => (
     palettes.length
       ? palettes
-      : [{ key: 'journal_muted', label: 'LabPlot Academic muted', colorblind_safe: false, hex: [] }]
+      : [{ key: DEFAULT_NEW_FIGURE_PALETTE, label: 'Muted publication · teal/coral', colorblind_safe: false, hex: [], is_default_for_new_figures: true }]
   ), [palettes]);
   const columns = useMemo(() => (ds?.column_profile ?? []) as ColumnShape[], [ds?.column_profile]);
+  const statisticsDesign = useMemo(() => automaticStatisticsDesign(columns), [columns]);
+  const oneFactorComparisonsSuppressed = ds?.statistics?.one_factor_comparisons_suppressed === true;
   const savedColumnRoles = useMemo(() => columnRoleSnapshot(columns), [columns]);
   const columnRoles = columnRolesDraft ?? savedColumnRoles;
   const columnRoleOverrides = useMemo(() => changedColumnRoles(columns, columnRoles), [columns, columnRoles]);
@@ -534,7 +647,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
   const [formatFigureId, setFormatFigureId] = useState('');
   const [buildEntryMode, setBuildEntryMode] = useState<BuildEntryMode>('manual');
   const [showFormatTemplatePicker, setShowFormatTemplatePicker] = useState(false);
-  const buildPaletteKey = String(options.palette_name ?? 'journal_muted');
+  const buildPaletteKey = String(options.palette_name ?? DEFAULT_NEW_FIGURE_PALETTE);
   const selectedBuildPalette = paletteOptions.find((palette) => palette.key === buildPaletteKey);
   const continuousFill = isContinuousFill(plotType);
   const orderingColumnName = orderingColumn(plotType, mapping);
@@ -591,7 +704,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
         const def = plotTypes.find((plot) => plot.type === template.plot_type);
         setPlotType(template.plot_type);
         setMapping(remapTemplateMapping(def, template.mapping ?? {}, columns));
-        setOptions({ ...defaultBuildOptions(def), ...(template.options ?? {}) });
+        setOptions({ ...preservedFormatOptions(), ...(template.options ?? {}) });
         setStyle(template.style_preset);
         setName(`${ds?.name ?? 'figure'} - ${template.name} format`);
         setFormatFigureId(template.figure_id);
@@ -616,7 +729,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
       const def = plotTypes.find((plot) => plot.type === source.plot_type);
       setPlotType(source.plot_type);
       setMapping(remapTemplateMapping(def, version.mapping ?? {}, columns));
-      setOptions({ ...defaultBuildOptions(def), ...(version.options ?? {}) });
+      setOptions({ ...preservedFormatOptions(), ...(version.options ?? {}) });
       setStyle(version.style_preset);
       setName(`${ds?.name ?? 'figure'} - ${source.name} format`);
       setFormatFigureId(source.id);
@@ -634,21 +747,37 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
     presetMapping?: Record<string, unknown>,
     entryMode: BuildEntryMode = buildEntryMode,
     showTemplates = showFormatTemplatePicker,
+    presetOptions?: Record<string, unknown>,
   ) {
     const def = plotTypes.find((p) => p.type === pt);
+    if (entryMode !== 'template') setFormatFigureId('');
     setBuildEntryMode(entryMode);
     setShowFormatTemplatePicker(entryMode === 'manual' && showTemplates);
     setPlotType(pt);
     setMapping(presetMapping ? { ...presetMapping } : {});
-    setOptions(defaultBuildOptions(def, buildPaletteKey));
+    setOptions({ ...defaultBuildOptions(def, buildPaletteKey), ...(presetOptions ?? {}) });
     if (!name) setName(`${ds?.name ?? 'figure'} - ${def?.label ?? pt}`);
     setVisualizeStep('build');
     document.getElementById('builder')?.scrollIntoView({ behavior: 'smooth' });
   }
 
   function applySuggestion(s: ChartSuggestion) {
+    if (recommendationBlocksApply(s)) {
+      toast.error(
+        missingMappingBlockText(s)
+        ?? individualObservationBlockText(s)
+        ?? 'Choose a supported repeated-observation policy first',
+      );
+      return;
+    }
     setFormatFigureId('');
-    selectPlotType(s.plot_type, (s.suggested_mapping as Record<string, unknown>) || {}, 'recommendation', false);
+    selectPlotType(
+      s.plot_type,
+      (s.suggested_mapping as Record<string, unknown>) || {},
+      'recommendation',
+      false,
+      s.suggested_options,
+    );
   }
 
   function openManualBuild() {
@@ -735,6 +864,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
       mapping,
       options: { ...options, palette_name: buildPaletteKey },
       style_preset: style,
+      defaults_profile: buildEntryMode === 'template' || Boolean(formatFigureId) ? 'preserve' : 'publication_v2',
     }),
     onSuccess: (fig) => { toast.success('Figure created'); router.push(`/figures/${fig.id}`); },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Render failed'),
@@ -826,7 +956,10 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
           <TransformDialog datasetId={id} datasetName={ds.name} columns={columns.map((c) => c.name)} disabled={!canEditDataset} />
         </div>
 
-        <Tabs defaultValue="visualize">
+        <Tabs
+          value={activeWorkspaceTab}
+          onValueChange={(value) => setActiveWorkspaceTab(value as (typeof DATASET_WORKSPACE_TABS)[number])}
+        >
           <TabsList>
             <TabsTrigger value="preview">Preview</TabsTrigger>
             <TabsTrigger value="stats">Statistics</TabsTrigger>
@@ -859,14 +992,27 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
             <Card>
               <CardHeader><CardTitle className="text-base">Group comparisons</CardTitle></CardHeader>
               <CardContent className="space-y-3">
+                {oneFactorComparisonsSuppressed && (
+                  <div data-testid="group-time-statistics-notice" className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
+                    <p className="font-medium">Group + time design detected</p>
+                    <p className="mt-1 text-xs leading-relaxed">
+                      Automatic pooled one-factor comparisons are suppressed because they would ignore time and the group × time interaction. Choose and confirm a two-way model
+                      {statisticsDesign.hasRepeatedUnit ? ' and use a repeated-measures or mixed-effects method because an ID/replicate column is present.' : '; if the same experimental units are measured over time, use a repeated-measures or mixed-effects method.'}
+                    </p>
+                  </div>
+                )}
                 {(ds.statistics?.comparisons ?? []).length === 0 ? (
-                  <p className="text-sm text-muted-foreground">No group comparisons (needs a grouping column with 2–8 levels).</p>
+                  <p className="text-sm text-muted-foreground">
+                    {oneFactorComparisonsSuppressed
+                      ? 'No automatic group comparison is shown for this group + time design.'
+                      : 'No group comparisons (needs a grouping column with 2–8 levels).'}
+                  </p>
                 ) : (ds.statistics?.comparisons ?? []).map((c, i) => (
                   <div key={i} className="rounded border p-3 text-sm">
                     <div className="flex items-center justify-between">
                       <span className="font-medium">{c.value_column} by {c.group_column}</span>
                       <Badge variant={c.significant ? 'default' : 'secondary'}>
-                        {c.test} · p = {c.p_value ?? '–'}{c.significant ? ' *' : ''}
+                        {c.test} · {formatPValue(c.p_value)}{c.significant ? ' *' : ''}
                       </Badge>
                     </div>
                     <div className="mt-2 flex flex-wrap gap-3 text-xs text-muted-foreground">
@@ -874,7 +1020,11 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                     </div>
                   </div>
                 ))}
-                <p className="text-xs text-muted-foreground">Welch t-test (2 groups) or one-way ANOVA (&gt;2). Advisory summary — confirm with a full analysis. *p&lt;0.05.</p>
+                <p className="text-xs text-muted-foreground">
+                  {oneFactorComparisonsSuppressed
+                    ? 'Select the factors, repeated-unit structure, and interaction model before running inferential statistics.'
+                    : 'Welch t-test (2 groups) or one-way ANOVA (>2). Advisory summary — confirm with a full analysis. *p<0.05.'}
+                </p>
               </CardContent>
             </Card>
           </TabsContent>
@@ -1158,7 +1308,9 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                     <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                       {displayedSuggestions.map(({ suggestion: s }, i) => (
                         <button key={`${s.plot_type}-${i}`} onClick={() => applySuggestion(s)}
-                          className="rounded-lg border p-3 text-left transition hover:border-primary hover:shadow-sm">
+                          disabled={recommendationBlocksApply(s)}
+                          aria-disabled={recommendationBlocksApply(s)}
+                          className={`rounded-lg border p-3 text-left transition hover:border-primary hover:shadow-sm aria-disabled:cursor-not-allowed aria-disabled:opacity-75 ${s.mapping_complete === false || recommendationBlocksApply(s) ? 'border-amber-300 bg-amber-50/40' : ''}`}>
                           <div className="flex items-start justify-between gap-2">
                             <span className="font-medium">{s.title ?? s.plot_type}</span>
                             <div className="flex shrink-0 items-center gap-1">
@@ -1166,12 +1318,43 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                               <Badge variant={s.source === 'rule' ? 'outline' : 'default'}>{s.source === 'rule' ? 'rule' : 'AI'}</Badge>
                             </div>
                           </div>
+                          <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                            {recommendationScoreRows(s).map(([label, value]) => typeof value === 'number' && (
+                              <div key={label} className="flex items-center justify-between gap-2">
+                                <dt>{label}</dt>
+                                <dd className="font-medium tabular-nums text-foreground">{Math.round(value * 100)}%</dd>
+                              </div>
+                            ))}
+                          </dl>
                           <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                            {typeof s.score === 'number' && <span>{Math.round(s.score * 100)}% fit</span>}
                             {s.fit && <span className="capitalize">{s.fit}</span>}
+                            {s.intent?.show_individual_observations && s.suggested_options?.show_points === true && (
+                              <Badge variant="outline">
+                                {s.suggested_options?.error_bars === true
+                                  ? `individual points + ${String(s.suggested_options?.error_type ?? 'error bars').toUpperCase()}`
+                                  : 'individual points'}
+                              </Badge>
+                            )}
                           </div>
                           {s.rationale && <p className="mt-1 line-clamp-3 text-xs text-muted-foreground">{s.rationale}</p>}
-                          <span className="mt-2 inline-flex items-center text-xs text-primary">Use this <ArrowRight className="ml-1 h-3 w-3" /></span>
+                          {individualObservationBlockText(s) && (
+                            <p className="mt-2 rounded border border-amber-300 bg-amber-50 px-2 py-1.5 text-xs text-amber-900">
+                              {individualObservationBlockText(s)}
+                            </p>
+                          )}
+                          {s.mapping_complete === false && (
+                            <p className="mt-2 text-xs font-medium text-amber-800">
+                              Select required mapping: {(s.missing_required_mappings ?? []).map((field) => field.label).join(', ')}
+                            </p>
+                          )}
+                          <span className="mt-2 inline-flex items-center text-xs text-primary">
+                            {s.mapping_complete === false
+                              ? 'Complete mapping before applying'
+                              : recommendationBlocksApply(s)
+                              ? 'Choose a supported points + summary chart'
+                              : 'Use this'}
+                            {!recommendationBlocksApply(s) && <ArrowRight className="ml-1 h-3 w-3" />}
+                          </span>
                         </button>
                       ))}
                     </div>
@@ -1326,11 +1509,19 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                 {currentDef && (
                   <>
                     <div className="grid gap-4 md:grid-cols-2">
-                      {[...currentDef.required.map((f) => ({ ...f, req: true })), ...currentDef.optional.map((f) => ({ ...f, req: false }))].map((f) => (
+                      {[...currentDef.required.map((f) => ({ ...f, req: true })), ...currentDef.optional.map((f) => ({ ...f, req: false }))].map((f) => {
+                        const missing = f.req && missingRequiredFields.some((field) => field.key === f.key);
+                        const errorId = `mapping-${f.key}-error`;
+                        return (
                         <div key={f.key} className="space-y-1">
                           <Label>{f.label}{f.req && <span className="text-red-500"> *</span>}</Label>
                           {f.multi ? (
-                            <div className="max-h-32 overflow-y-auto rounded-md border p-2">
+                            <div
+                              className="max-h-32 overflow-y-auto rounded-md border p-2"
+                              role="group"
+                              aria-label={f.label}
+                              aria-describedby={missing ? errorId : undefined}
+                            >
                               {columns.map((c) => {
                                 const arr = (mapping[f.key] as string[]) || [];
                                 const checked = arr.includes(c.name);
@@ -1347,14 +1538,19 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                             </div>
                           ) : (
                             <select className="w-full rounded-md border px-3 py-2 text-sm"
-                              value={(mapping[f.key] as string) ?? ''}
+                              aria-label={f.label}
+                              aria-invalid={missing || undefined}
+                              aria-describedby={missing ? errorId : undefined}
+                              value={scalarInputValue(mapping[f.key])}
                               onChange={(e) => setMapping({ ...mapping, [f.key]: e.target.value || null })}>
                               <option value="">{f.req ? 'Select…' : '(none)'}</option>
                               {columns.map((c) => <option key={c.name} value={c.name}>{c.name} ({c.role})</option>)}
                             </select>
                           )}
+                          {missing && <p id={errorId} role="alert" className="text-xs font-medium text-amber-800">Choose a column for {f.label}.</p>}
                         </div>
-                      ))}
+                        );
+                      })}
                     </div>
 
                     {currentDef.options.length > 0 && (
@@ -1367,13 +1563,23 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                                 <input type="checkbox" checked={Boolean(options[o.key])} onChange={(e) => setOptions({ ...options, [o.key]: e.target.checked })} /> enabled
                               </label>
                             ) : o.type === 'select' ? (
-                              <select className="w-full rounded-md border px-3 py-2 text-sm" value={String(options[o.key] ?? o.default ?? '')} onChange={(e) => setOptions({ ...options, [o.key]: e.target.value })}>
+                              <select
+                                aria-label={o.label}
+                                className="w-full rounded-md border px-3 py-2 text-sm"
+                                value={usesSeriesAutoOption(plotType, o.key, options) ? SERIES_AUTO_OPTION : scalarInputValue(options[o.key], o.default)}
+                                onChange={(e) => setOptions(e.target.value === SERIES_AUTO_OPTION
+                                  ? deleteOption(options, o.key)
+                                  : { ...options, [o.key]: e.target.value })}
+                              >
+                                {offersSeriesAutoOption(plotType, o.key, options) && (
+                                  <option value={SERIES_AUTO_OPTION}>Auto by series (accessible)</option>
+                                )}
                                 {o.choices?.map((c) => <option key={c} value={c}>{c}</option>)}
                               </select>
                             ) : o.type === 'number' ? (
-                              <Input type="number" value={String(options[o.key] ?? o.default ?? '')} onChange={(e) => setOptions({ ...options, [o.key]: parseFloat(e.target.value) })} />
+                              <Input aria-label={o.label} type="number" value={scalarInputValue(options[o.key], o.default)} onChange={(e) => setOptions(numberOption(options, o.key, e.target.value))} />
                             ) : (
-                              <Input value={String(options[o.key] ?? '')} onChange={(e) => setOptions({ ...options, [o.key]: e.target.value })} />
+                              <Input aria-label={o.label} value={scalarInputValue(options[o.key])} onChange={(e) => setOptions({ ...options, [o.key]: e.target.value })} />
                             )}
                           </div>
                         ))}
@@ -1383,7 +1589,7 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                     <div className="grid gap-4 md:grid-cols-3">
                       <div className="space-y-1">
                         <Label>In-plot title (usually blank)</Label>
-                        <Input data-testid="in-plot-title" value={String(options.title ?? '')} onChange={(e) => setOptions({ ...options, title: e.target.value })} placeholder="Leave blank for manuscript-style figures" />
+                        <Input data-testid="in-plot-title" aria-label="In-plot title" value={scalarInputValue(options.title)} onChange={(e) => setOptions({ ...options, title: e.target.value })} placeholder="Leave blank for manuscript-style figures" />
                       </div>
                       <div className="space-y-1">
                         <Label>Style preset</Label>
@@ -1392,11 +1598,12 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                         </select>
                       </div>
                       <div className="space-y-1">
-                        <Label>Color palette</Label>
+                        <Label htmlFor="build-color-palette">Color palette</Label>
                         {continuousFill ? (
                           <p className="rounded-md border bg-muted/20 px-2 py-1.5 text-xs text-muted-foreground">This chart uses a continuous color scale — set it with the chart-specific color options above. The discrete palette does not apply.</p>
                         ) : (<>
                           <select
+                            id="build-color-palette"
                             className="w-full rounded-md border px-3 py-2 text-sm"
                             value={buildPaletteKey}
                             onChange={(e) => setOptions({ ...options, palette_name: e.target.value })}
@@ -1414,7 +1621,11 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                               </div>
                             ) : null}
                             {selectedBuildPalette?.colorblind_safe && <Badge variant="outline" className="text-[10px]">Colorblind-safe</Badge>}
+                            {selectedBuildPalette?.is_default_for_new_figures && <Badge variant="outline" className="text-[10px]">New figure default</Badge>}
                           </div>
+                          {selectedBuildPalette?.usage_note && (
+                            <p className="pt-1 text-xs text-muted-foreground">{selectedBuildPalette.usage_note}</p>
+                          )}
                         </>)}
                       </div>
                     </div>
@@ -1438,44 +1649,47 @@ export default function DatasetDetailPage({ params }: { params: Promise<{ id: st
                       {plotType === 'bar' && !currentDef.options.some((o) => o.key === 'error_type') && (
                         <div className="space-y-1">
                           <Label htmlFor="build-error-type">Error bars</Label>
-                          <select id="build-error-type" className="w-full rounded-md border px-3 py-2 text-sm" value={String(options.error_type ?? 'sd')} onChange={(e) => setOptions({ ...options, error_type: e.target.value })}>
+                          <select id="build-error-type" className="w-full rounded-md border px-3 py-2 text-sm" value={scalarInputValue(options.error_type, 'sd')} onChange={(e) => setOptions({ ...options, error_type: e.target.value })}>
                             {ERROR_TYPE_OPTIONS.map((opt) => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
                           </select>
                         </div>
                       )}
                       <div className="space-y-1">
                         <Label htmlFor="build-hline">Horizontal ref. line (y)</Label>
-                        <Input id="build-hline" type="number" step="any" value={String(options.hline_at ?? '')} onChange={(e) => setOptions(numberOption(options, 'hline_at', e.target.value))} placeholder="none" />
+                        <Input id="build-hline" type="number" step="any" value={scalarInputValue(options.hline_at)} onChange={(e) => setOptions(numberOption(options, 'hline_at', e.target.value))} placeholder="none" />
                       </div>
                       <div className="space-y-1">
                         <Label htmlFor="build-vline">Vertical ref. line (x)</Label>
-                        <Input id="build-vline" type="number" step="any" value={String(options.vline_at ?? '')} onChange={(e) => setOptions(numberOption(options, 'vline_at', e.target.value))} placeholder="none" />
+                        <Input id="build-vline" type="number" step="any" value={scalarInputValue(options.vline_at)} onChange={(e) => setOptions(numberOption(options, 'vline_at', e.target.value))} placeholder="none" />
                       </div>
                       <div className="space-y-1">
                         <Label htmlFor="build-facet">Split into panels by…</Label>
-                        <select id="build-facet" className="w-full rounded-md border px-3 py-2 text-sm" value={String(options.facet_by ?? '')} onChange={(e) => setOptions(setStringOption(options, 'facet_by', e.target.value))}>
+                        <select id="build-facet" className="w-full rounded-md border px-3 py-2 text-sm" value={scalarInputValue(options.facet_by)} onChange={(e) => setOptions(setStringOption(options, 'facet_by', e.target.value))}>
                           <option value="">No panels</option>
                           {columns.map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}
                         </select>
                       </div>
                       <div className="space-y-1">
                         <Label htmlFor="build-facet-scales">Panel axis scales</Label>
-                        <select id="build-facet-scales" className="w-full rounded-md border px-3 py-2 text-sm disabled:opacity-60" disabled={!options.facet_by} value={String(options.facet_scales ?? 'fixed')} onChange={(e) => setOptions({ ...options, facet_scales: e.target.value })}>
+                        <select id="build-facet-scales" className="w-full rounded-md border px-3 py-2 text-sm disabled:opacity-60" disabled={!options.facet_by} value={scalarInputValue(options.facet_scales, 'fixed')} onChange={(e) => setOptions({ ...options, facet_scales: e.target.value })}>
                           {FACET_SCALE_OPTIONS.map((opt) => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
                         </select>
                       </div>
                       <div className="space-y-1">
                         <Label htmlFor="build-dpi">Export DPI</Label>
-                        <select id="build-dpi" className="w-full rounded-md border px-3 py-2 text-sm" value={String(options.dpi ?? '')} onChange={(e) => setOptions(e.target.value ? { ...options, dpi: Number(e.target.value) } : deleteOption(options, 'dpi'))}>
+                        <select id="build-dpi" className="w-full rounded-md border px-3 py-2 text-sm" value={scalarInputValue(options.dpi)} onChange={(e) => setOptions(e.target.value ? { ...options, dpi: Number(e.target.value) } : deleteOption(options, 'dpi'))}>
                           <option value="">Default (300)</option>
                           {DPI_OPTIONS.map((d) => <option key={d} value={d}>{d} dpi</option>)}
                         </select>
                       </div>
                       <div className="space-y-1">
                         <Label htmlFor="build-font">Font family</Label>
-                        <select id="build-font" className="w-full rounded-md border px-3 py-2 text-sm" value={String(options.font_family ?? '')} onChange={(e) => setOptions(setStringOption(options, 'font_family', e.target.value))}>
+                        <select id="build-font" className="w-full rounded-md border px-3 py-2 text-sm" value={scalarInputValue(options.font_family)} onChange={(e) => setOptions(setStringOption(options, 'font_family', e.target.value))}>
                           {FONT_FAMILY_OPTIONS.map((opt) => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
                         </select>
+                        {options.font_family === 'dejavu_sans' && (
+                          <p className="text-xs text-muted-foreground">Exported R uses the installed Arial-compatible fallback: DejaVu Sans.</p>
+                        )}
                       </div>
                       <label className="flex items-center gap-2 self-end text-sm">
                         <input type="checkbox" checked={Boolean(options.transparent_background)} onChange={(e) => setOptions({ ...options, transparent_background: e.target.checked })} /> Transparent background

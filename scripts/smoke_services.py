@@ -19,6 +19,7 @@ from app.ai.client import _neutralize_prompt_injection, _ready
 from app.ai.models import AIUsage
 from app.audit import models as _audit_models  # noqa: F401
 from app.organizations import models as _organization_models  # noqa: F401
+from app.palettes import models as _palette_models  # noqa: F401
 from app.projects import models as _project_models  # noqa: F401
 from app.auth import service as auth_service
 from app.auth.models import User

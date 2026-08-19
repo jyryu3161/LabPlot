@@ -42,6 +42,9 @@ class Figure(Base):
 
 class FigureVersion(Base):
     __tablename__ = "figure_versions"
+    __table_args__ = (
+        UniqueConstraint("figure_id", "version_number", name="uq_figure_versions_figure_number"),
+    )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     figure_id = Column(UUID(as_uuid=True), ForeignKey("figures.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -64,6 +67,10 @@ class FigureVersion(Base):
     layout = Column(JSONB, nullable=True)
     render_log = Column(Text, nullable=True)
     change_note = Column(String(512), nullable=True)
+    # Structured provenance for AI-applied edits. Review uses the exact user
+    # request plus server-observed applied changes instead of guessing intent
+    # from pixels or a generic change_note.
+    edit_context = Column(JSONB, nullable=True)
     created_at = Column(DateTime(timezone=True), default=_now)
 
     figure = relationship("Figure", back_populates="versions")
@@ -162,6 +169,10 @@ class Improvement(Base):
     current_state = Column(Text, nullable=True)
     recommended = Column(Text, nullable=True)
     param_patch = Column(JSONB, nullable=False, default=dict)
+    # Server-grounded request scope for localized AI edits. Unlike provider
+    # prose, this survives plan reload/apply and carries the stable Mark #n
+    # identity plus the exact request-authorized patch paths.
+    edit_scope = Column(JSONB, nullable=True)
     priority = Column(String(16), nullable=True)
     applied = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime(timezone=True), default=_now)

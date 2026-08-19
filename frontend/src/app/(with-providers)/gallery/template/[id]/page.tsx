@@ -165,10 +165,14 @@ export default function GalleryTemplatePage({ params }: { params: Promise<{ id: 
   const { data: plotTypesData } = useQuery({ queryKey: ['plot-types'], queryFn: getPlotTypes });
   const [projectId, setProjectId] = useState('');
   const [selectedDatasetId, setSelectedDatasetId] = useState('');
+  const [datasetSearch, setDatasetSearch] = useState('');
+  const [showExampleDatasets, setShowExampleDatasets] = useState(false);
   const [dataset, setDataset] = useState<DatasetDetail | null>(null);
   const [mapping, setMapping] = useState<Record<string, unknown>>({});
   const [figureName, setFigureName] = useState('');
-  const editableProjects = useMemo(() => (projects ?? []).filter((project) => project.role === 'owner' || project.role === 'editor'), [projects]);
+  const editableProjects = useMemo(() => (projects ?? [])
+    .filter((project) => project.role === 'owner' || project.role === 'editor')
+    .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()), [projects]);
   const activeProjectId = projectId || editableProjects?.[0]?.id || '';
   const { data: projectDatasets, isLoading: projectDatasetsLoading } = useQuery({
     queryKey: ['datasets', activeProjectId],
@@ -180,6 +184,20 @@ export default function GalleryTemplatePage({ params }: { params: Promise<{ id: 
     [plotTypesData?.plot_types, template?.plot_type],
   );
   const columns = dataset?.column_profile ?? [];
+  const isExampleDataset = (item: { name: string; description?: string }) => (
+    /^Gallery seed\b/i.test(item.name)
+    || /curated public gallery seed/i.test(item.description ?? '')
+  );
+  const personalDatasets = (projectDatasets ?? []).filter((item) => !isExampleDataset(item));
+  const exampleDatasets = (projectDatasets ?? []).filter(isExampleDataset);
+  const normalizedDatasetSearch = datasetSearch.trim().toLowerCase();
+  const matchesDatasetSearch = (item: { name: string; original_filename: string }) => (
+    !normalizedDatasetSearch
+    || item.name.toLowerCase().includes(normalizedDatasetSearch)
+    || item.original_filename.toLowerCase().includes(normalizedDatasetSearch)
+  );
+  const visiblePersonalDatasets = personalDatasets.filter(matchesDatasetSearch);
+  const visibleExampleDatasets = showExampleDatasets ? exampleDatasets.filter(matchesDatasetSearch) : [];
   const missingRequiredFields = useMemo(() => (plotDef?.required ?? []).filter((field) => {
     const value = mapping[field.key];
     return field.multi ? !Array.isArray(value) || value.length === 0 : !value;
@@ -193,8 +211,12 @@ export default function GalleryTemplatePage({ params }: { params: Promise<{ id: 
         name: figureName || `${dataset.name} - ${template.name}`,
         plot_type: template.plot_type,
         mapping,
-        options: optionsForTargetDataset(template.options, mapping),
+        options: {
+          palette_name: 'preset',
+          ...optionsForTargetDataset(template.options, mapping),
+        },
         style_preset: template.style_preset,
+        defaults_profile: 'preserve',
       });
     },
     onSuccess: (figure) => {
@@ -231,6 +253,8 @@ export default function GalleryTemplatePage({ params }: { params: Promise<{ id: 
     setSelectedDatasetId('');
     setMapping({});
     setFigureName('');
+    setDatasetSearch('');
+    setShowExampleDatasets(false);
   }
 
   if (templateLoading || projectsLoading) {
@@ -281,18 +305,23 @@ export default function GalleryTemplatePage({ params }: { params: Promise<{ id: 
                       <Link href="/projects"><Button className="ml-3" size="sm">Go to projects</Button></Link>
                     </div>
                   ) : (
-                    <select
-                      className="h-9 w-full max-w-md rounded-md border bg-background px-3 text-sm"
-                      value={activeProjectId}
-                      onChange={(e) => {
-                        setProjectId(e.target.value);
-                        clearDatasetSelection();
-                      }}
-                    >
-                      {editableProjects.map((project) => (
-                        <option key={project.id} value={project.id}>{project.name}{project.role !== 'owner' ? ' (shared)' : ''}</option>
-                      ))}
-                    </select>
+                    <div className="max-w-md space-y-1.5">
+                      <Label htmlFor="template-project">Project</Label>
+                      <select
+                        id="template-project"
+                        className="h-9 w-full rounded-md border bg-background px-3 text-sm"
+                        value={activeProjectId}
+                        onChange={(e) => {
+                          setProjectId(e.target.value);
+                          clearDatasetSelection();
+                        }}
+                      >
+                        {editableProjects.map((project) => (
+                          <option key={project.id} value={project.id}>{project.name}{project.role !== 'owner' ? ' (shared)' : ''}</option>
+                        ))}
+                      </select>
+                      <p className="text-xs text-muted-foreground">The most recently updated editable project is selected by default.</p>
+                    </div>
                   )}
                 </CardContent>
               </Card>
@@ -316,8 +345,33 @@ export default function GalleryTemplatePage({ params }: { params: Promise<{ id: 
                           No datasets have been uploaded to this project yet.
                         </div>
                       ) : (
-                        <div className="grid gap-3 md:grid-cols-[1fr_auto] md:items-end">
-                          <div className="space-y-1">
+                        <div className="space-y-3">
+                          <div className="grid gap-3 sm:grid-cols-[1fr_auto] sm:items-end">
+                            <div className="space-y-1">
+                              <Label htmlFor="dataset-search">Search datasets</Label>
+                              <Input
+                                id="dataset-search"
+                                type="search"
+                                value={datasetSearch}
+                                placeholder="Dataset or filename"
+                                onChange={(event) => setDatasetSearch(event.target.value)}
+                              />
+                            </div>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              aria-expanded={showExampleDatasets}
+                              onClick={() => setShowExampleDatasets((value) => !value)}
+                            >
+                              {showExampleDatasets ? 'Hide example datasets' : 'Show example datasets'}
+                              {exampleDatasets.length > 0 ? ` (${exampleDatasets.length})` : ''}
+                            </Button>
+                          </div>
+                          <p role="status" aria-label="Dataset availability" className="text-xs text-muted-foreground">
+                            {personalDatasets.length} personal datasets · {exampleDatasets.length} example datasets {showExampleDatasets ? 'shown' : 'hidden'}
+                          </p>
+                          <div className="grid gap-3 md:grid-cols-[1fr_auto] md:items-end">
+                            <div className="space-y-1">
                             <Label htmlFor="existing-dataset">Project dataset</Label>
                             <select
                               id="existing-dataset"
@@ -326,22 +380,32 @@ export default function GalleryTemplatePage({ params }: { params: Promise<{ id: 
                               onChange={(event) => setSelectedDatasetId(event.target.value)}
                             >
                               <option value="">Select an existing dataset...</option>
-                              {projectDatasets.map((item) => (
-                                <option key={item.id} value={item.id}>
-                                  {item.name} ({item.n_rows} x {item.n_cols})
-                                </option>
-                              ))}
+                              {visiblePersonalDatasets.length > 0 && (
+                                <optgroup label="My datasets">
+                                  {visiblePersonalDatasets.map((item) => (
+                                    <option key={item.id} value={item.id}>{item.name} ({item.n_rows} x {item.n_cols})</option>
+                                  ))}
+                                </optgroup>
+                              )}
+                              {visibleExampleDatasets.length > 0 && (
+                                <optgroup label="Example datasets">
+                                  {visibleExampleDatasets.map((item) => (
+                                    <option key={item.id} value={item.id}>{item.name} ({item.n_rows} x {item.n_cols})</option>
+                                  ))}
+                                </optgroup>
+                              )}
                             </select>
+                            </div>
+                            <Button
+                              type="button"
+                              variant="secondary"
+                              onClick={() => loadExistingDataset.mutate(selectedDatasetId)}
+                              disabled={!selectedDatasetId || loadExistingDataset.isPending}
+                            >
+                              {loadExistingDataset.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <TableProperties className="mr-2 h-4 w-4" />}
+                              Use dataset
+                            </Button>
                           </div>
-                          <Button
-                            type="button"
-                            variant="secondary"
-                            onClick={() => loadExistingDataset.mutate(selectedDatasetId)}
-                            disabled={!selectedDatasetId || loadExistingDataset.isPending}
-                          >
-                            {loadExistingDataset.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <TableProperties className="mr-2 h-4 w-4" />}
-                            Use dataset
-                          </Button>
                         </div>
                       )}
                       {dataset && (

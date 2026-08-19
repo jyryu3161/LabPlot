@@ -382,7 +382,9 @@ def improve(figure_id: uuid.UUID, version_id: uuid.UUID, data: ImprovementReques
     req = data or ImprovementRequest()
     return service.improve_version(
         db, figure_id, version_id, current_user.id,
-        prompt=req.prompt, annotated_image=req.annotated_image,
+        prompt=req.prompt, original_request=req.original_request,
+        annotated_image=req.annotated_image,
+        marks=[mark.model_dump(exclude_none=True) for mark in req.marks],
     )
 
 
@@ -419,7 +421,11 @@ def apply_improvements(figure_id: uuid.UUID, data: ImprovementApplyRequest, requ
                        db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     result = service.apply_improvements(
         db, figure_id, data.improvement_ids, current_user.id,
-        verify=data.verify, original_request=data.original_request, allow_retry=data.retry,
+        verify=data.verify,
+        original_request=data.original_request,
+        verification_request=data.verification_request,
+        expected_base_version_id=data.expected_base_version_id,
+        allow_retry=data.retry,
     )
     _log_verify_retry(request, db, current_user, figure_id, result)
     return result
@@ -433,7 +439,11 @@ def apply_improvement(figure_id: uuid.UUID, improvement_id: uuid.UUID, request: 
     req = data or ImprovementApplyOneRequest()
     result = service.apply_improvement(
         db, figure_id, improvement_id, current_user.id,
-        verify=req.verify, original_request=req.original_request, allow_retry=req.retry,
+        verify=req.verify,
+        original_request=req.original_request,
+        verification_request=req.verification_request,
+        expected_base_version_id=req.expected_base_version_id,
+        allow_retry=req.retry,
     )
     _log_verify_retry(request, db, current_user, figure_id, result)
     return result

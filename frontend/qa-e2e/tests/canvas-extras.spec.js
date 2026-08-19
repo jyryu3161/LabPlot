@@ -260,7 +260,7 @@ test.describe('canvas extras (U9: rulers/grid/grid-snap, raster export, duplicat
     }, { timeout: 15000 }).toBeCloseTo(35, 1); // toBeCloseTo(_, 1) === within 0.05mm
 
     // ---- zoom shortcuts: '1' = 100%, Shift+1 = fit ----
-    const zoomLabel = page.locator('span.tabular-nums');
+    const zoomLabel = page.getByRole('status', { name: 'Canvas zoom' });
     await expect(zoomLabel).toBeVisible();
     // Captured while still at the editor's initial/reload fit view. By
     // construction (fitView() in CanvasEditor.tsx always sets zoom:1 — the

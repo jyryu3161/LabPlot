@@ -35,3 +35,13 @@ lighthouse-*.html
 # os
 .DS_Store
 frontend/tsconfig.tsbuildinfo
+
+# local tooling / session artifacts (never ship)
+.agents/
+.claude/
+.playwright-mcp/
+skills-lock.json
+backups/
+test-results/
+frontend/test-results/
+frontend/playwright-report/

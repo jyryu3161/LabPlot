@@ -1,6 +1,9 @@
 .next
 node_modules
 npm-debug.log*
+playwright-report
+test-results
+qa-e2e/.auth
 .env
 .env.*
 *.log

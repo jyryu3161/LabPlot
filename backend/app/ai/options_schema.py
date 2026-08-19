@@ -80,6 +80,20 @@ def _number_schema(key: str) -> dict:
 # _UNIVERSAL_OPTION_KEYS and the per-plot-type option keys below.
 _STRUCTURAL_SHAPES = {
     "category_colors": {"type": "object", "additionalProperties": {"type": "string"}},
+    # Stable semantic scene-element id -> a deliberately tiny visual patch.
+    # The service sanitizer remains authoritative for the id grammar, entry
+    # bound, and #RRGGBB validation; this schema only constrains model output
+    # to the renderer-supported fill/stroke surface.
+    "element_overrides": {
+        "type": "object",
+        "additionalProperties": {
+            "type": "object",
+            "properties": {
+                "fill": {"type": "string"},
+                "stroke": {"type": "string"},
+            },
+        },
+    },
     "level_order": {"type": "array", "items": {"type": "string"}},
     "axis_break_x": {"type": "array", "items": {"type": "number"}},
     "axis_break_y": {"type": "array", "items": {"type": "number"}},

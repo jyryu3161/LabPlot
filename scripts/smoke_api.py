@@ -91,23 +91,21 @@ def assert_ok(condition: bool, message: str) -> None:
 
 
 def db_helpers():
-    try:
-        from app.ai import models as _ai_models  # noqa: F401
-        from app.ai.models import AIUsage
-        from app.audit import models as _audit_models  # noqa: F401
-        from app.auth import models as _auth_models  # noqa: F401
-        from app.canvases import models as _canvas_models  # noqa: F401
-        from app.canvases.models import FigureCanvas
-        from app.client_errors.models import ClientErrorEvent
-        from app.organizations import models as _org_models  # noqa: F401
-        from app.organizations.models import Organization
-        from app.projects import models as _project_models  # noqa: F401
-        from app.common.encryption import is_encrypted_private_file
-        from app.database import SessionLocal
-        from app.datasets.models import Dataset
-        from app.figures.models import Figure, FigureCodeArtifact
-    except Exception:
-        return None
+    from app.ai import models as _ai_models  # noqa: F401
+    from app.ai.models import AIUsage
+    from app.audit import models as _audit_models  # noqa: F401
+    from app.auth import models as _auth_models  # noqa: F401
+    from app.canvases import models as _canvas_models  # noqa: F401
+    from app.canvases.models import Canvas as FigureCanvas
+    from app.client_errors.models import ClientErrorEvent
+    from app.organizations import models as _org_models  # noqa: F401
+    from app.organizations.models import Organization
+    from app.palettes import models as _palette_models  # noqa: F401
+    from app.projects import models as _project_models  # noqa: F401
+    from app.common.encryption import is_encrypted_private_file
+    from app.database import SessionLocal
+    from app.datasets.models import Dataset
+    from app.figures.models import Figure, FigureCodeArtifact
     return SessionLocal, Dataset, Figure, FigureCodeArtifact, FigureCanvas, AIUsage, ClientErrorEvent, Organization, is_encrypted_private_file
 
 
@@ -265,39 +263,37 @@ def main() -> None:
     status, canvas, _ = request(
         "POST",
         "/api/canvases",
-        {"name": "Smoke Figure 1", "preset": "double_column", "width_px": 720, "height_px": 500},
+        {
+            "name": "Smoke Figure 1",
+            "preset": "nature_double",
+            "width_mm": 182.88,
+            "height_mm": 131.67,
+        },
         user_headers,
     )
     assert_ok(status == 201, f"canvas create failed: {status} {canvas}")
     canvas_id = canvas["id"]
-    canvas_state = {
-        "version": 1,
-        "preset": "double_column",
-        "widthPx": 720,
-        "heightPx": 500,
-        "widthIn": 7.2,
-        "heightIn": 5.0,
-        "exportDpi": 300,
-        "panelLabelMode": "letters",
-        "unifiedFontSize": 9,
-        "items": [{
-            "id": "panel-a",
-            "figureId": figure_id,
-            "versionId": current_version["id"],
-            "name": "Smoke box plot",
+    status, panel, _ = request(
+        "POST",
+        f"/api/canvases/{canvas_id}/panels",
+        {
+            "figure_id": figure_id,
+            "x_mm": 10.0,
+            "y_mm": 10.0,
+            "width_mm": 100.0,
+            "height_mm": 80.0,
             "label": "A",
-            "x": 40,
-            "y": 50,
-            "width": 300,
-            "height": 220,
-            "svgUrl": current_version.get("svg_url"),
-            "pngUrl": current_version.get("png_url"),
-        }],
-    }
-    status, canvas, _ = request("PATCH", f"/api/canvases/{canvas_id}", {"state": canvas_state}, user_headers)
-    assert_ok(status == 200 and len(canvas["state"]["items"]) == 1, f"canvas update failed: {status} {canvas}")
+        },
+        user_headers,
+    )
+    assert_ok(
+        status == 201 and panel.get("effective_version_id") == current_version["id"],
+        f"canvas panel add failed: {status} {panel}",
+    )
+    status, canvas, _ = request("GET", f"/api/canvases/{canvas_id}", headers=user_headers)
+    assert_ok(status == 200 and len(canvas["panels"]) == 1, f"canvas detail failed: {status} {canvas}")
     status, canvases, _ = request("GET", "/api/canvases", headers=user_headers)
-    assert_ok(status == 200 and any(c["id"] == canvas_id and c["item_count"] == 1 for c in canvases), f"canvas list failed: {status} {canvases}")
+    assert_ok(status == 200 and any(c["id"] == canvas_id and c["panel_count"] == 1 for c in canvases), f"canvas list failed: {status} {canvases}")
 
     status, blocked, _ = request(
         "POST",

@@ -19,9 +19,11 @@ import { Textarea } from '@/components/ui/textarea';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Check, GripVertical, LayoutGrid, Layers, Loader2, FileSpreadsheet, Trash2, Images, Database, Package, FlaskConical, Pencil, Plus, Sparkles, Users, X } from 'lucide-react';
 import { formatStylePreset } from '@/lib/style-presets';
+import { useUrlTab } from '@/hooks/useUrlTab';
 
 type DropPosition = 'before' | 'after';
 type DropTarget = { id: string; position: DropPosition } | null;
+const PROJECT_WORKSPACE_TABS = ['datasets', 'figures', 'canvases'] as const;
 
 function moveItem<T extends { id: string }>(items: T[], activeId: string, overId: string, position: DropPosition): T[] {
   const from = items.findIndex((item) => item.id === activeId);
@@ -69,6 +71,7 @@ function DropIndicator({ active, position }: { active: boolean; position: DropPo
 export default function ProjectWorkspace({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const router = useRouter();
+  const [activeWorkspaceTab, setActiveWorkspaceTab] = useUrlTab(PROJECT_WORKSPACE_TABS, 'datasets');
   const qc = useQueryClient();
   const { data: project } = useQuery({ queryKey: ['project', id], queryFn: () => getProject(id) });
   const { data: datasets, isLoading: dsLoading } = useQuery({ queryKey: ['datasets', id], queryFn: () => listDatasets(id) });
@@ -322,7 +325,10 @@ export default function ProjectWorkspace({ params }: { params: Promise<{ id: str
           </CardContent>
         </Card>
 
-        <Tabs defaultValue="datasets">
+        <Tabs
+          value={activeWorkspaceTab}
+          onValueChange={(value) => setActiveWorkspaceTab(value as (typeof PROJECT_WORKSPACE_TABS)[number])}
+        >
           <TabsList>
             <TabsTrigger value="datasets">Datasets ({datasets?.length ?? 0})</TabsTrigger>
             <TabsTrigger value="figures">Figures ({figures?.length ?? 0})</TabsTrigger>

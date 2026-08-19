@@ -11,6 +11,49 @@ _HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
 _JOURNAL_MUTED = ["#4C6F91", "#B24745", "#6A8A6B", "#8E6C8A", "#B79A43",
                   "#5D8D8A", "#8C7A6B", "#7A7A7A", "#A06B5F"]
 
+# Immutable palette for figures created with the current publication defaults.
+# Keep this separate from _JOURNAL_MUTED: stored legacy FigureVersion rows refer
+# to the old key and must reproduce the same colors during rerender/export.
+_PUBLICATION_MUTED_V2 = [
+    "#62B9C5",  # teal
+    "#E4776B",  # coral
+    "#7569AE",  # indigo
+    "#61A574",  # green
+    "#E7A85A",  # amber
+    "#C36CA5",  # magenta
+    "#8BB8D4",  # sky
+    "#B5BAC0",  # neutral
+]
+_PUBLICATION_MUTED_V2_STROKES = [
+    "#2F8998",
+    "#B94A3F",
+    "#51458E",
+    "#347B49",
+    "#B97626",
+    "#913C75",
+    "#557E9E",
+    "#707780",
+]
+
+DEFAULT_NEW_FIGURE_PALETTE = "publication_muted_v2"
+DEFAULT_NEW_FIGURE_OPTIONS = {
+    "palette_name": DEFAULT_NEW_FIGURE_PALETTE,
+    # The backend image does not contain the proprietary Arial face. Persist
+    # the exact installed family used by R instead of silently aliasing Arial.
+    "font_family": "dejavu_sans",
+    "base_size": 7,
+    # Publication dimensions are authored in points, then converted explicitly
+    # to ggplot2's millimetre linewidth unit in generated R.
+    "axis_line_width_pt": 0.5,
+    "data_line_width_pt": 0.8,
+    # User-facing multiplier around the point tokens above. Legacy versions
+    # without point tokens retain the old multiplier-only behavior.
+    "linewidth_scale": 1.0,
+    # New grouped line figures use color plus linetype/marker, so information
+    # is not encoded by hue alone. Existing versions omit this opt-in key.
+    "redundant_series_encoding": True,
+}
+
 PALETTES = {
     "nature": _JOURNAL_MUTED,
     "science": ["#4F658C", "#8C5D5B", "#5F7E63", "#8B7B55", "#6E648B",
@@ -165,6 +208,7 @@ _FONT_FAMILIES = {
     "mono": "mono",             # R generic mono (back-compat)
     "helvetica": "DejaVu Sans",  # metric-compatible sans
     "arial": "DejaVu Sans",      # metric-compatible sans
+    "dejavu_sans": "DejaVu Sans",  # exact installed fallback exposed in UI/R
     "times": "DejaVu Serif",     # Times substitute
     "noto_sans": "Noto Sans",
     "noto_serif": "Noto Serif",
@@ -176,6 +220,7 @@ FONT_FAMILIES = tuple(_FONT_FAMILIES.keys())
 # Named discrete palettes the user can pick by name (verified hex). Overrides the
 # preset palette when set. Curated for scientific figures; cb = colorblind-safe.
 NAMED_PALETTES = {
+    "publication_muted_v2": _PUBLICATION_MUTED_V2,
     "journal_muted": _JOURNAL_MUTED,
     "okabe_ito":  ["#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7", "#000000"],
     "tol_bright": ["#4477AA", "#EE6677", "#228833", "#CCBB44", "#66CCEE", "#AA3377", "#BBBBBB", "#000000"],
@@ -183,7 +228,11 @@ NAMED_PALETTES = {
     "npg":        ["#E64B35", "#4DBBD5", "#00A087", "#3C5488", "#F39B7F", "#8491B4", "#91D1C2", "#DC0000"],
     "tableau10":  ["#4E79A7", "#F28E2B", "#E15759", "#76B7B2", "#59A14F", "#EDC948", "#B07AA1", "#FF9DA7"],
 }
+NAMED_PALETTE_STROKES = {
+    "publication_muted_v2": _PUBLICATION_MUTED_V2_STROKES,
+}
 _PALETTE_META = {
+    "publication_muted_v2": ("Muted publication · teal/coral", False),
     "journal_muted": ("LabPlot Academic muted", False),
     "okabe_ito":  ("Okabe–Ito (colorblind-safe)", True),
     "tol_bright": ("Paul Tol Bright (colorblind-safe)", True),
@@ -191,15 +240,34 @@ _PALETTE_META = {
     "npg":        ("Nature (NPG)", False),
     "tableau10":  ("Tableau 10", False),
 }
+_PALETTE_USAGE_NOTES = {
+    "publication_muted_v2": (
+        "Teal/coral-first fills with darker line strokes. Grouped line charts "
+        "also use marker and line-type redundancy; verify dense figures in grayscale."
+    ),
+}
 
 
 def list_palettes(custom_palettes: list[dict] | None = None) -> list[dict]:
-    out = [{"key": "preset", "label": "Match style preset", "colorblind_safe": False, "hex": []}]
+    out = [{
+        "key": "preset",
+        "label": "Match style preset",
+        "colorblind_safe": False,
+        "hex": [],
+        "is_default_for_new_figures": False,
+    }]
     for k, hexes in NAMED_PALETTES.items():
         label, cb = _PALETTE_META.get(k, (k, False))
-        out.append({"key": k, "label": label, "colorblind_safe": cb, "hex": hexes})
+        out.append({
+            "key": k,
+            "label": label,
+            "colorblind_safe": cb,
+            "hex": hexes,
+            "is_default_for_new_figures": k == DEFAULT_NEW_FIGURE_PALETTE,
+            "usage_note": _PALETTE_USAGE_NOTES.get(k),
+        })
     if custom_palettes:
-        out.extend(custom_palettes)
+        out.extend({**palette, "is_default_for_new_figures": False} for palette in custom_palettes)
     return out
 
 
@@ -224,7 +292,9 @@ def theme_r(preset: str, color_mode: str = "color", font_scale: float = 1.0,
             palette_name: str | None = None, custom_palette_values: list[str] | None = None,
             font_family: str | None = None, transparent_background: bool = False,
             legend_key_size: float | None = None,
-            base_size: int | float | None = None) -> str:
+            base_size: int | float | None = None,
+            axis_line_width_pt: int | float | None = None,
+            data_line_width_pt: int | float | None = None) -> str:
     cfg = _BASE.get(preset, _BASE["nature"])
     fam = _FONT_FAMILIES.get(font_family or "sans", "")
     family_arg = f', family = "{fam}"' if fam else ""
@@ -239,12 +309,16 @@ def theme_r(preset: str, color_mode: str = "color", font_scale: float = 1.0,
             legend_key_line = ""
     if color_mode == "grayscale":
         pal = _GREYS
+        stroke_pal = pal
     elif palette_name and (palette_name == "custom" or palette_name.startswith("custom:")) and custom_palette_values:
         pal = custom_palette_values
+        stroke_pal = pal
     elif palette_name and palette_name in NAMED_PALETTES:
         pal = NAMED_PALETTES[palette_name]
+        stroke_pal = NAMED_PALETTE_STROKES.get(palette_name, pal)
     else:
         pal = PALETTES.get(preset, PALETTES["nature"])
+        stroke_pal = pal
     # Validate/normalize every color before it reaches generated R. Drop anything
     # that is not a strict 6-digit hex; fall back to the built-in Nature palette
     # if nothing valid remains. Built-in palettes are already valid hex, so this
@@ -252,8 +326,27 @@ def theme_r(preset: str, color_mode: str = "color", font_scale: float = 1.0,
     valid = [c.upper() for c in pal if isinstance(c, str) and _HEX_COLOR_RE.fullmatch(c)]
     if not valid:
         valid = [c.upper() for c in PALETTES["nature"]]
+    valid_strokes = [
+        c.upper() for c in stroke_pal
+        if isinstance(c, str) and _HEX_COLOR_RE.fullmatch(c)
+    ]
+    if not valid_strokes:
+        valid_strokes = valid
     pal_r = ", ".join(f'"{c}"' for c in valid)
+    stroke_pal_r = ", ".join(f'"{c}"' for c in valid_strokes)
     size = resolve_base_size(base_size, font_scale, cfg["size"])
+    pt_helper = ""
+    axis_line_width_r = "0.4"
+    axis_tick_width_r = "0.35"
+    if axis_line_width_pt is not None or data_line_width_pt is not None:
+        pt_helper = "labplot_pt_to_mm <- function(pt) pt * 25.4 / 72.27\n\n"
+    if axis_line_width_pt is not None:
+        try:
+            axis_pt = max(0.1, min(3.0, float(axis_line_width_pt)))
+            axis_line_width_r = f"labplot_pt_to_mm({axis_pt:g})"
+            axis_tick_width_r = axis_line_width_r
+        except (TypeError, ValueError):
+            pass
     grid_line = (
         'panel.grid.major = element_line(colour = "grey92", linewidth = 0.18), panel.grid.minor = element_blank(),'
         if cfg["grid"] else
@@ -261,8 +354,13 @@ def theme_r(preset: str, color_mode: str = "color", font_scale: float = 1.0,
     )
     bg_fill = "NA" if transparent_background else '"white"'
     return f"""
-labplot_palette <- function(n = 100) {{
+{pt_helper}labplot_palette <- function(n = 100) {{
   pal <- c({pal_r})
+  rep(pal, length.out = max(n, length(pal)))
+}}
+
+labplot_stroke_palette <- function(n = 100) {{
+  pal <- c({stroke_pal_r})
   rep(pal, length.out = max(n, length(pal)))
 }}
 
@@ -279,8 +377,8 @@ labplot_theme <- function() {{
     plot.caption = element_text(size = {size}, colour = "grey35"),
     axis.title = element_text(face = "bold", colour = "black", size = {size}),
     axis.text = element_text(colour = "black", size = {size}),
-    axis.line = element_line(colour = "black", linewidth = 0.4),
-    axis.ticks = element_line(colour = "black", linewidth = 0.35),
+    axis.line = element_line(colour = "black", linewidth = {axis_line_width_r}),
+    axis.ticks = element_line(colour = "black", linewidth = {axis_tick_width_r}),
     axis.ticks.length = grid::unit(2.2, "pt"),
     legend.position = "right",
     {legend_key_line}legend.title = element_text(face = "bold", colour = "black", size = {size}),

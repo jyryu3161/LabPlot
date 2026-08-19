@@ -8,12 +8,18 @@ import { Loader2, RotateCcw, Check } from 'lucide-react';
 import {
   getFigure, getPlotTypes, rerenderFigure, renderCanvasPreview, ApiError,
 } from '@/lib/api';
-import type { CanvasPanel, CanvasPreviewResult, SeriesStyle } from '@/lib/types';
+import type { CanvasDetail, CanvasPanel, CanvasPreviewResult, FigureDetail, FigureVersion, SeriesStyle } from '@/lib/types';
+import { publishFigureVersionCreated } from '@/lib/figure-version-events';
 
 // This editor only ever mounts for FIGURE panels (the canvas editor routes
 // imported-image panels to a plain info sidebar instead), so figure_id is
 // non-null by construction here.
 type FigurePanel = CanvasPanel & { figure_id: string };
+export type CanvasImageApplyAck = {
+  panelId: string;
+  imageKey: string;
+};
+export type WaitForCanvasImageApply = (expected: CanvasImageApplyAck) => Promise<void>;
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -48,18 +54,22 @@ function previewKey(panel: FigurePanel): string {
  * SVG text so it can be inlined and recolored client-side.
  */
 function usePanelPreview(panel: FigurePanel, enabled: boolean) {
-  const [state, setState] = useState<{ result: CanvasPreviewResult | null; svgText: string | null; loading: boolean }>(
-    { result: null, svgText: null, loading: enabled },
+  const [state, setState] = useState<{ key: string | null; result: CanvasPreviewResult | null; svgText: string | null; loading: boolean }>(
+    { key: null, result: null, svgText: null, loading: enabled },
   );
   const key = previewKey(panel);
 
   useEffect(() => {
     if (!enabled) {
-      setState({ result: null, svgText: null, loading: false });
+      setState({ key: null, result: null, svgText: null, loading: false });
       return;
     }
     let cancelled = false;
-    setState((s) => ({ ...s, loading: true }));
+    // A new version/size must never keep the previous SVG overlay mounted:
+    // it can cover the correctly-updating Konva image and make the canvas look
+    // stale even though its version badge advanced. Key the state explicitly
+    // so the render before this effect also returns an empty pending preview.
+    setState({ key, result: null, svgText: null, loading: true });
     (async () => {
       try {
         const result = await renderCanvasPreview({
@@ -68,18 +78,23 @@ function usePanelPreview(panel: FigurePanel, enabled: boolean) {
           width_mm: roundMm(panel.width_mm),
           height_mm: roundMm(panel.height_mm),
         });
-        const svgText = await fetch(result.svg_url).then((r) => r.text());
+        const svgText = await fetch(result.svg_url).then((response) => {
+          if (!response.ok) throw new Error(`Preview SVG failed (${response.status})`);
+          return response.text();
+        });
         if (cancelled) return;
-        setState({ result, svgText, loading: false });
+        setState({ key, result, svgText, loading: false });
       } catch {
-        if (!cancelled) setState({ result: null, svgText: null, loading: false });
+        if (!cancelled) setState({ key, result: null, svgText: null, loading: false });
       }
     })();
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabled, key]);
 
-  return state;
+  return state.key === key
+    ? state
+    : { key, result: null, svgText: null, loading: enabled };
 }
 
 export function CanvasColorEditor({
@@ -88,6 +103,7 @@ export function CanvasColorEditor({
   canvasName,
   containerEl,
   overlayRect,
+  waitForCanvasImageApply,
   gestureActive = false,
 }: {
   panel: FigurePanel;
@@ -95,6 +111,9 @@ export function CanvasColorEditor({
   canvasName: string;
   containerEl: HTMLElement | null;
   overlayRect: { left: number; top: number; width: number; height: number } | null;
+  /** Resolves only after CanvasEditor has painted the matching panel image
+   * following HTMLImageElement.onload; rejects on that image's onerror. */
+  waitForCanvasImageApply: WaitForCanvasImageApply;
   /** True while a panel drag/resize gesture is in flight. The positioned SVG
    * overlay is pinned to the panel's COMMITTED rect, so during a gesture it
    * would freeze at the origin (the "ghost"); we hide it via CSS (keeping it
@@ -104,6 +123,7 @@ export function CanvasColorEditor({
   const qc = useQueryClient();
   const [edits, setEdits] = useState<Record<string, string>>({});
   const [selectedSeries, setSelectedSeries] = useState<string | null>(null);
+  const [commitStage, setCommitStage] = useState<'idle' | 'rendering' | 'canvas'>('idle');
   const svgWrapRef = useRef<HTMLDivElement>(null);
 
   // Capability: type→color_editable map + this figure's plot_type + resolved series.
@@ -152,12 +172,15 @@ export function CanvasColorEditor({
 
   // ── text elements (U4 P1): title / x label / y label ──
   // Effective version's stored options — prefill source for text edits.
+  const effectiveVersion = useMemo(() => {
+    if (!figure) return undefined;
+    const effId = panel.effective_version_id ?? figure.current_version_id;
+    return figure.versions.find((v) => v.id === effId);
+  }, [figure, panel.effective_version_id]);
   const effOptions = useMemo(() => {
     if (!figure) return {} as Record<string, unknown>;
-    const effId = panel.effective_version_id ?? figure.current_version_id;
-    const version = figure.versions.find((v) => v.id === effId) ?? figure.versions[0];
-    return (version?.options as Record<string, unknown>) ?? {};
-  }, [figure, panel.effective_version_id]);
+    return (effectiveVersion?.options as Record<string, unknown>) ?? {};
+  }, [figure, effectiveVersion]);
   const optionText = (key: string): string => {
     const v = effOptions[key];
     return typeof v === 'string' ? v : '';
@@ -194,16 +217,105 @@ export function CanvasColorEditor({
   // invalidation) would wipe half-typed drafts.
   const effVersionId = panel.effective_version_id ?? figure?.current_version_id ?? null;
   const [textDrafts, setTextDrafts] = useState<{ title: string; x_label: string; y_label: string } | null>(null);
+  const seededTextRef = useRef<{ title: string; x_label: string; y_label: string } | null>(null);
+  const effTextSignature = JSON.stringify({
+    title: optionText('title'),
+    x_label: optionText('x_label'),
+    y_label: optionText('y_label'),
+  });
   useEffect(() => {
-    if (figure) {
-      setTextDrafts({
-        title: optionText('title'),
-        x_label: optionText('x_label'),
-        y_label: optionText('y_label'),
-      });
-    }
+    // During a canvas/figure refetch the panel can already point at the new
+    // version while the figure query still contains only the old versions.
+    // Waiting for the matching version prevents the old fallback values from
+    // briefly replacing what the user just submitted.
+    if (!figure || (effVersionId && !effectiveVersion)) return;
+    const next = JSON.parse(effTextSignature) as { title: string; x_label: string; y_label: string };
+    setTextDrafts((current) => {
+      const priorSeed = seededTextRef.current;
+      const hasUnsubmittedDraft = Boolean(current && priorSeed && (
+        current.title.trim() !== priorSeed.title.trim()
+        || current.x_label.trim() !== priorSeed.x_label.trim()
+        || current.y_label.trim() !== priorSeed.y_label.trim()
+      ));
+      seededTextRef.current = next;
+      return hasUnsubmittedDraft ? current : next;
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [figure?.id, effVersionId]);
+  }, [figure?.id, effVersionId, effectiveVersion?.id, effTextSignature]);
+
+  async function synchronizeCreatedVersion(version: FigureVersion): Promise<'applied' | 'pinned'> {
+    // Seed the figure cache immediately, but keep the canvas on its last good
+    // image while the new version is rendered at this panel's physical size.
+    // Rotating the panel key before this request completes makes the canvas
+    // appear to go blank/stale and lets a success toast race ahead of R.
+    qc.setQueryData<FigureDetail>(['figure', panel.figure_id], (old) => old ? {
+      ...old,
+      current_version_id: version.id,
+      versions: [...old.versions.filter((v) => v.id !== version.id), version],
+    } : old);
+    const followsLatest = !panel.pinned_version_id;
+    if (followsLatest) setCommitStage('canvas');
+
+    try {
+      await renderCanvasPreview({
+        figure_id: panel.figure_id,
+        version_id: version.id,
+        width_mm: roundMm(panel.width_mm),
+        height_mm: roundMm(panel.height_mm),
+      });
+    } catch {
+      // This call only pre-warms the derived artifact. CanvasEditor's own
+      // key-scoped loader retries the same preview and its onload/onerror ack
+      // below is authoritative for whether the image was actually applied.
+    }
+
+    // The panel-size render is now in the derived cache. Rotate both the local
+    // canvas and other tabs only after that artifact is ready.
+    qc.setQueryData<CanvasDetail>(['canvas', canvasId], (old) => old ? {
+      ...old,
+      panels: old.panels.map((p) => (
+        p.figure_id === panel.figure_id && !p.pinned_version_id
+          ? { ...p, effective_version_id: version.id }
+          : p
+      )),
+    } : old);
+    publishFigureVersionCreated({
+      figureId: panel.figure_id,
+      versionId: version.id,
+      versionNumber: version.version_number,
+      source: 'canvas-editor',
+    });
+    const expectedImageKey = `${panel.figure_id}|${version.id}|${roundMm(panel.width_mm)}|${roundMm(panel.height_mm)}`;
+    await Promise.all([
+      qc.invalidateQueries({ queryKey: ['canvas', canvasId] }),
+      qc.invalidateQueries({ queryKey: ['figure', panel.figure_id] }),
+      // A pinned panel deliberately keeps its old image/version. The edit is
+      // still a durable figure version, but there is no new canvas image to
+      // acknowledge until the user chooses Update/follow-latest.
+      followsLatest
+        ? waitForCanvasImageApply({ panelId: panel.id, imageKey: expectedImageKey })
+        : Promise.resolve(),
+    ]);
+    return followsLatest ? 'applied' : 'pinned';
+  }
+
+  async function rebaseAfterVersionConflict(): Promise<void> {
+    // A 409 means another tab/panel advanced the figure after this editor
+    // captured its merge base. Keep every local draft, but move the conflict
+    // guard to the latest durable version so the user's explicit Retry can
+    // succeed. Merely invalidating the query is insufficient because this
+    // component stays mounted (keyed by panel id) and the ref would otherwise
+    // keep submitting the same stale base forever.
+    try {
+      const latest = await getFigure(panel.figure_id);
+      baseVersionIdRef.current = latest.current_version_id
+        ?? latest.versions[latest.versions.length - 1]?.id
+        ?? null;
+      qc.setQueryData<FigureDetail>(['figure', panel.figure_id], latest);
+    } finally {
+      await qc.invalidateQueries({ queryKey: ['canvas', canvasId] });
+    }
+  }
 
   // Commit a text-option patch through the same rerender path as colors. One
   // FigureVersion per commit; base_version_id guards cross-tab conflicts; the
@@ -232,38 +344,52 @@ export function CanvasColorEditor({
         base_version_id: baseVersionIdRef.current ?? undefined,
       });
     },
-    onSuccess: (version, vars) => {
+    onMutate: () => setCommitStage('rendering'),
+    onSuccess: async (version, vars) => {
       // Advance the conflict guard to the version we just created, else the
       // NEXT commit from this editor would 409 against our own edit.
       baseVersionIdRef.current = version.id;
       setTextEdit(null);
       setAxisEdit(null);
-      qc.invalidateQueries({ queryKey: ['canvas', canvasId] });
-      qc.invalidateQueries({ queryKey: ['figure', panel.figure_id] });
       const kindLabel = vars.kind === 'axis' ? 'Axis'
         : vars.kind === 'font' ? 'Font size'
         : vars.kind === 'line' ? 'Line width'
         : 'Text';
-      if (vars.revert) {
-        const revert = vars.revert;
-        toast.success(`${kindLabel} updated`, {
-          action: {
-            label: 'Undo',
-            onClick: () => commitText.mutate({
-              patch: revert,
-              note: `Canvas '${canvasName}': revert ${vars.kind ?? 'text'} edit`,
-            }),
-          },
-        });
-      } else {
-        toast.success(`${kindLabel} updated`);
+      try {
+        const syncOutcome = await synchronizeCreatedVersion(version);
+        const successMessage = syncOutcome === 'pinned'
+          ? `${kindLabel} saved as v${version.version_number}; canvas remains pinned to its previous version`
+          : `${kindLabel} updated`;
+        if (vars.revert) {
+          const revert = vars.revert;
+          toast.success(successMessage, {
+            action: {
+              label: 'Undo',
+              onClick: () => commitText.mutate({
+                patch: revert,
+                note: `Canvas '${canvasName}': revert ${vars.kind ?? 'text'} edit`,
+              }),
+            },
+          });
+        } else {
+          toast.success(successMessage);
+        }
+      } catch {
+        toast.error(`${kindLabel} was saved, but the canvas preview could not update. Retry or reload the canvas.`);
+      } finally {
+        setCommitStage('idle');
       }
     },
-    onError: (err) => {
+    onError: async (err) => {
+      setCommitStage('idle');
       if (err instanceof ApiError && err.status === 409) {
-        toast.error('This figure changed elsewhere — reload the canvas and retry.');
-        qc.invalidateQueries({ queryKey: ['canvas', canvasId] });
-        qc.invalidateQueries({ queryKey: ['figure', panel.figure_id] });
+        try {
+          await rebaseAfterVersionConflict();
+          toast.error('This figure changed elsewhere. The latest version is loaded and your draft is kept — retry when ready.');
+        } catch {
+          toast.error('This figure changed elsewhere, but the latest version could not be loaded. Reload the canvas and retry.');
+          await qc.invalidateQueries({ queryKey: ['figure', panel.figure_id] });
+        }
         return;
       }
       toast.error(err instanceof ApiError ? err.message : 'Could not update text');
@@ -368,38 +494,51 @@ export function CanvasColorEditor({
         base_version_id: baseVersionIdRef.current ?? undefined,
       });
     },
-    onSuccess: (version) => {
+    onMutate: () => setCommitStage('rendering'),
+    onSuccess: async (version) => {
       // Advance the conflict guard so a second commit from this same editor
       // doesn't 409 against the version we just created.
       baseVersionIdRef.current = version.id;
-      toast.success('Colors applied');
-      setEdits({});
-      // New version → follow-latest panels pick up the new current_version_id and the
-      // preview refetches (keyed on effective_version_id) → overlay shows the committed
-      // colors, matching the freshly re-rendered raster.
-      qc.invalidateQueries({ queryKey: ['canvas', canvasId] });
-      qc.invalidateQueries({ queryKey: ['figure', panel.figure_id] });
+      try {
+        const syncOutcome = await synchronizeCreatedVersion(version);
+        toast.success(syncOutcome === 'pinned'
+          ? `Colors saved as v${version.version_number}; canvas remains pinned to its previous version`
+          : 'Colors applied');
+      } catch {
+        toast.error('Colors were saved, but the canvas preview could not update. Retry or reload the canvas.');
+      } finally {
+        // Keep the instant recolor visible while the panel-sized R render is
+        // prepared. Clearing earlier briefly showed the old color again
+        // between the figure render and the canvas image swap.
+        setEdits({});
+        setCommitStage('idle');
+      }
     },
-    onError: (err) => {
+    onError: async (err) => {
+      setCommitStage('idle');
       if (err instanceof ApiError && err.status === 409) {
         // The figure was changed elsewhere (another panel / tab) since this editor
         // loaded it. KEEP the user's edits so they can retry after refreshing, and
         // reload the newer version underneath (canvas + figure) so the next attempt
         // bases on the up-to-date version.
-        toast.error('This figure changed elsewhere — reload the canvas and retry.');
-        qc.invalidateQueries({ queryKey: ['canvas', canvasId] });
-        qc.invalidateQueries({ queryKey: ['figure', panel.figure_id] });
+        try {
+          await rebaseAfterVersionConflict();
+          toast.error('This figure changed elsewhere. The latest version is loaded and your color draft is kept — retry when ready.');
+        } catch {
+          toast.error('This figure changed elsewhere, but the latest version could not be loaded. Reload the canvas and retry.');
+          await qc.invalidateQueries({ queryKey: ['figure', panel.figure_id] });
+        }
         return;
       }
-      // Generic failure: backend created NO version → roll back the instant preview by
-      // discarding the uncommitted edits so the overlay reverts to the committed
-      // colors. Never leave a half-applied state.
-      setEdits({});
+      // Keep the user's draft + instant preview so the failed request is
+      // visible and retryable. The committed canvas remains unchanged until a
+      // later successful render, so no false success state is shown.
       toast.error(err instanceof ApiError ? err.message : 'Could not apply colors');
     },
   });
 
   const editCount = Object.keys(edits).length;
+  const editorBusy = commitText.isPending || apply.isPending;
 
   // ── overlay (portal into the stage container, positioned over the konva panel) ──
   // Two modes: COLOR mode (canEdit) inlines the SVG for scoped recolor — the
@@ -597,6 +736,16 @@ export function CanvasColorEditor({
         <span className="font-semibold">Edit panel</span>
         {loading && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />}
       </div>
+      {commitStage !== 'idle' && (
+        <div data-testid="canvas-edit-progress" role="status" aria-live="polite" className="rounded-md border border-primary/30 bg-primary/5 px-2 py-1.5 text-xs text-primary">
+          <span className="inline-flex items-center gap-1.5">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            {commitStage === 'rendering'
+              ? 'Saving settings · rendering in R…'
+              : 'Render complete · updating canvas…'}
+          </span>
+        </div>
+      )}
 
       {/* ── text: title + axis labels (all plot types; commits a new version) ── */}
       {textDrafts && (
@@ -620,6 +769,7 @@ export function CanvasColorEditor({
                 maxLength={200}
                 value={textDrafts[key]}
                 placeholder={key === 'title' ? 'No title' : 'Default (empty hides)'}
+                disabled={editorBusy}
                 onChange={(e) => setTextDrafts((d) => (d ? { ...d, [key]: e.target.value } : d))}
               />
             </span>
@@ -628,7 +778,7 @@ export function CanvasColorEditor({
             <Button
               type="button"
               size="sm"
-              disabled={commitText.isPending}
+              disabled={editorBusy}
               onClick={() => {
                 if (!textDrafts) return;
                 const patch: Record<string, string | null> = {};
@@ -665,7 +815,7 @@ export function CanvasColorEditor({
           <select
             id="panel-font-size"
             className="h-7 flex-1 rounded border bg-background px-1.5 text-xs disabled:opacity-60"
-            disabled={commitText.isPending || loading}
+            disabled={editorBusy || loading}
             value={currentBaseSize ?? ''}
             onChange={(e) => {
               const next = e.target.value === '' ? null : Number(e.target.value);
@@ -687,7 +837,7 @@ export function CanvasColorEditor({
           <select
             id="panel-line-width"
             className="h-7 flex-1 rounded border bg-background px-1.5 text-xs disabled:opacity-60"
-            disabled={commitText.isPending || loading}
+            disabled={editorBusy || loading}
             value={currentLineWidth ?? ''}
             onChange={(e) => {
               const next = e.target.value === '' ? null : Number(e.target.value);
@@ -736,6 +886,7 @@ export function CanvasColorEditor({
                   <input
                     type="color"
                     value={HEX_RE.test(effective) ? effective : '#000000'}
+                    disabled={editorBusy}
                     onChange={(e) => setColor(series, e.target.value)}
                     onClick={(e) => e.stopPropagation()}
                     className="h-6 w-8 shrink-0 cursor-pointer rounded border p-0"
@@ -763,7 +914,7 @@ export function CanvasColorEditor({
               type="button"
               size="sm"
               className="flex-1"
-              disabled={editCount === 0 || apply.isPending}
+              disabled={editCount === 0 || editorBusy}
               onClick={() => apply.mutate()}
             >
               {apply.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}

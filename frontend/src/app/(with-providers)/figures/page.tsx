@@ -4,7 +4,7 @@ import { useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { bulkStyleFigures, deleteFigureTemplateFavorite, duplicateFigure, listFigures, deleteFigure, saveFigureTemplateFavorite, updateFigure } from '@/lib/api';
+import { bulkStyleFigures, deleteFigureTemplateFavorite, duplicateFigure, listDatasets, listFigures, listProjects, deleteFigure, saveFigureTemplateFavorite, updateFigure } from '@/lib/api';
 import { AppHeader } from '@/components/layout/AppHeader';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -13,10 +13,18 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { AlertTriangle, Check, Copy, Images, ListChecks, Loader2, Palette, Pencil, RotateCcw, Search, SearchX, Star, Trash2, X } from 'lucide-react';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import { AlertTriangle, Check, Copy, Images, ListChecks, Loader2, MoreHorizontal, Palette, Pencil, RotateCcw, Search, SearchX, Star, Trash2, X } from 'lucide-react';
 import { formatStylePreset } from '@/lib/style-presets';
 
 const MAX_BULK_TARGETS = 20;
+const FIGURES_PER_PAGE = 24;
 
 type SortKey = 'saved' | 'name' | 'newest' | 'oldest';
 const SORT_LABELS: Record<SortKey, string> = {
@@ -32,24 +40,40 @@ export default function FiguresPage() {
   const [editingName, setEditingName] = useState('');
   const [search, setSearch] = useState('');
   const [sort, setSort] = useState<SortKey>('saved');
+  const [projectFilter, setProjectFilter] = useState('all');
+  const [page, setPage] = useState(1);
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [styleSourceId, setStyleSourceId] = useState('');
   const { data: figures, isLoading, isError, error, refetch } = useQuery({ queryKey: ['figures'], queryFn: () => listFigures() });
+  const { data: projects } = useQuery({ queryKey: ['projects'], queryFn: listProjects });
+  const { data: datasets } = useQuery({ queryKey: ['datasets'], queryFn: () => listDatasets() });
+  const projectNames = useMemo(() => new Map((projects ?? []).map((project) => [project.id, project.name])), [projects]);
+  const datasetNames = useMemo(() => new Map((datasets ?? []).map((dataset) => [dataset.id, dataset.name])), [datasets]);
 
-  const visibleFigures = useMemo(() => {
+  const filteredFigures = useMemo(() => {
     if (!figures) return [];
     const q = search.trim().toLowerCase();
-    const filtered = q
+    const searched = q
       ? figures.filter((f) => f.name.toLowerCase().includes(q) || f.plot_type.toLowerCase().includes(q))
       : figures;
+    const filtered = searched.filter((figure) => (
+      projectFilter === 'all'
+      || (projectFilter === 'personal' ? !figure.project_id : figure.project_id === projectFilter)
+    ));
     if (sort === 'saved') return filtered;
     const sorted = [...filtered];
     if (sort === 'name') sorted.sort((a, b) => a.name.localeCompare(b.name));
     else if (sort === 'newest') sorted.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
     else if (sort === 'oldest') sorted.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
     return sorted;
-  }, [figures, search, sort]);
+  }, [figures, projectFilter, search, sort]);
+  const pageCount = Math.max(1, Math.ceil(filteredFigures.length / FIGURES_PER_PAGE));
+  const currentPage = Math.min(page, pageCount);
+  const visibleFigures = filteredFigures.slice(
+    (currentPage - 1) * FIGURES_PER_PAGE,
+    currentPage * FIGURES_PER_PAGE,
+  );
   const del = useMutation({
     mutationFn: deleteFigure,
     onSuccess: () => { toast.success('Figure deleted'); qc.invalidateQueries({ queryKey: ['figures'] }); },
@@ -57,11 +81,12 @@ export default function FiguresPage() {
   });
   const rename = useMutation({
     mutationFn: ({ id, name }: { id: string; name: string }) => updateFigure(id, { name }),
-    onSuccess: () => {
+    onSuccess: (_, { id }) => {
       toast.success('Figure renamed');
       setEditingId(null);
       setEditingName('');
       qc.invalidateQueries({ queryKey: ['figures'] });
+      focusFigureActions(id);
     },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Rename failed'),
   });
@@ -103,6 +128,18 @@ export default function FiguresPage() {
     setEditingName(name);
   }
 
+  function focusFigureActions(id: string) {
+    requestAnimationFrame(() => {
+      document.querySelector<HTMLButtonElement>(`[data-figure-actions-id="${id}"]`)?.focus();
+    });
+  }
+
+  function cancelRename(id: string) {
+    setEditingId(null);
+    setEditingName('');
+    focusFigureActions(id);
+  }
+
   function exitSelectMode() {
     setSelectMode(false);
     setSelectedIds(new Set());
@@ -124,8 +161,7 @@ export default function FiguresPage() {
   function submitRename(id: string, fallbackName: string) {
     const name = editingName.trim();
     if (!name || name === fallbackName) {
-      setEditingId(null);
-      setEditingName('');
+      cancelRename(id);
       return;
     }
     rename.mutate({ id, name });
@@ -150,14 +186,27 @@ export default function FiguresPage() {
           </div>
         ) : (
           <>
-            <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="mb-6 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+              <div className="flex w-full flex-col gap-2 sm:flex-row lg:max-w-2xl">
               <div className="relative w-full sm:max-w-xs">
                 <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                 <Label htmlFor="figures-search" className="sr-only">Search figures</Label>
-                <Input id="figures-search" type="search" placeholder="Search figures…" className="pl-8" value={search} onChange={(e) => setSearch(e.target.value)} />
+                <Input id="figures-search" type="search" placeholder="Search figures…" className="pl-8" value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} />
+              </div>
+              <Label htmlFor="figures-project" className="sr-only">Filter figures by project</Label>
+              <select
+                id="figures-project"
+                className="h-9 w-full rounded-md border bg-background px-3 text-sm sm:w-56"
+                value={projectFilter}
+                onChange={(event) => { setProjectFilter(event.target.value); setPage(1); }}
+              >
+                <option value="all">All projects</option>
+                <option value="personal">No project</option>
+                {(projects ?? []).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+              </select>
               </div>
               <div className="flex items-center gap-2">
-                <Select value={sort} onValueChange={(value) => setSort(value as SortKey)}>
+                <Select value={sort} onValueChange={(value) => { setSort(value as SortKey); setPage(1); }}>
                   <SelectTrigger id="figures-sort" size="sm" aria-label="Sort figures" className="w-[160px]">
                     <SelectValue>{(value) => SORT_LABELS[value as SortKey] ?? SORT_LABELS.saved}</SelectValue>
                   </SelectTrigger>
@@ -213,7 +262,7 @@ export default function FiguresPage() {
                 </div>
               </div>
             )}
-            {visibleFigures.length === 0 ? (
+            {filteredFigures.length === 0 ? (
               <div className="rounded-lg border border-dashed p-12 text-center text-muted-foreground">
                 <SearchX className="mx-auto mb-2 h-8 w-8" /> No figures match your search.
               </div>
@@ -245,20 +294,18 @@ export default function FiguresPage() {
                             value={editingName}
                             maxLength={255}
                             autoFocus
+                            aria-label={`New name for ${f.name}`}
                             onChange={(event) => setEditingName(event.target.value)}
                             onKeyDown={(event) => {
                               if (event.key === 'Enter') submitRename(f.id, f.name);
-                              if (event.key === 'Escape') {
-                                setEditingId(null);
-                                setEditingName('');
-                              }
+                              if (event.key === 'Escape') cancelRename(f.id);
                             }}
                           />
                           <div className="flex gap-1">
-                            <Button type="button" size="icon-xs" variant="secondary" disabled={rename.isPending} onClick={() => submitRename(f.id, f.name)}>
+                            <Button type="button" size="icon-xs" variant="secondary" aria-label={`Save renamed figure ${f.name}`} disabled={rename.isPending} onClick={() => submitRename(f.id, f.name)}>
                               {rename.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}
                             </Button>
-                            <Button type="button" size="icon-xs" variant="ghost" onClick={() => { setEditingId(null); setEditingName(''); }}>
+                            <Button type="button" size="icon-xs" variant="ghost" aria-label={`Cancel renaming ${f.name}`} onClick={() => cancelRename(f.id)}>
                               <X className="h-3 w-3" />
                             </Button>
                           </div>
@@ -267,48 +314,70 @@ export default function FiguresPage() {
                         <Link href={`/figures/${f.id}`} className="block min-w-0">
                           <p className="truncate text-sm font-medium">{f.name}</p>
                           <p className="text-xs text-muted-foreground">{f.plot_type}</p>
+                          <p className="mt-1 truncate text-[10px] text-muted-foreground" title={`${projectNames.get(f.project_id ?? '') ?? 'No project'} · ${datasetNames.get(f.dataset_id) ?? 'Dataset'}`}>
+                            {projectNames.get(f.project_id ?? '') ?? 'No project'} · {datasetNames.get(f.dataset_id) ?? 'Dataset'} · {new Date(f.created_at).toLocaleDateString()}
+                          </p>
                         </Link>
                       )}
                     </div>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      aria-label={`Rename ${f.name}`}
-                      onClick={() => beginRename(f.id, f.name)}
-                      disabled={rename.isPending && editingId === f.id}
-                    >
-                      <Pencil className="h-4 w-4 text-muted-foreground" />
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      aria-label={f.is_favorite ? `Remove ${f.name} from saved templates` : `Save ${f.name} as template`}
-                      onClick={() => favorite.mutate({ id: f.id, next: !f.is_favorite })}
-                      disabled={favorite.isPending}
-                    >
-                      <Star className={`h-4 w-4 ${f.is_favorite ? 'fill-amber-400 text-amber-500' : 'text-muted-foreground'}`} />
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      aria-label={`Duplicate ${f.name}`}
-                      onClick={() => duplicate.mutate(f.id)}
-                      disabled={duplicate.isPending}
-                    >
-                      <Copy className="h-4 w-4 text-muted-foreground" />
-                    </Button>
-                    <Button type="button" variant="ghost" size="sm" aria-label={`Delete ${f.name}`} onClick={() => { if (confirm(`Delete ${f.name}?`)) del.mutate(f.id); }}>
-                      <Trash2 className="h-4 w-4 text-muted-foreground" />
-                    </Button>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger
+                        render={(
+                          <Button
+                            // Leave the DOM id under Base UI's ownership. A
+                            // custom trigger id can break its focus-owner
+                            // bookkeeping after keyboard activation when a
+                            // large card list is still settling.
+                            data-figure-actions-id={f.id}
+                            type="button"
+                            variant="ghost"
+                            size="icon-sm"
+                            aria-label={`Figure actions for ${f.name}`}
+                          />
+                        )}
+                      >
+                        <MoreHorizontal className="h-4 w-4 text-muted-foreground" />
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end" className="w-48" aria-label={`Figure actions for ${f.name}`}>
+                        <DropdownMenuItem
+                          disabled={rename.isPending && editingId === f.id}
+                          onClick={() => beginRename(f.id, f.name)}
+                        >
+                          <Pencil /> Rename
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          disabled={favorite.isPending}
+                          onClick={() => favorite.mutate({ id: f.id, next: !f.is_favorite })}
+                        >
+                          <Star className={f.is_favorite ? 'fill-amber-400 text-amber-500' : undefined} />
+                          {f.is_favorite ? 'Remove from saved templates' : 'Save as template'}
+                        </DropdownMenuItem>
+                        <DropdownMenuItem disabled={duplicate.isPending} onClick={() => duplicate.mutate(f.id)}>
+                          <Copy /> Duplicate
+                        </DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem
+                          variant="destructive"
+                          disabled={del.isPending}
+                          onClick={() => { if (confirm(`Delete ${f.name}?`)) del.mutate(f.id); }}
+                        >
+                          <Trash2 /> Delete
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
                   </div>
                   <Badge variant="outline" className="mt-2">{formatStylePreset(f.style_preset)}</Badge>
                 </CardContent>
               </Card>
                 ))}
               </div>
+            )}
+            {filteredFigures.length > FIGURES_PER_PAGE && (
+              <nav className="mt-6 flex items-center justify-center gap-3" aria-label="Figures pagination">
+                <Button type="button" variant="outline" size="sm" disabled={currentPage <= 1} onClick={() => setPage(currentPage - 1)}>Previous</Button>
+                <span className="text-sm text-muted-foreground" aria-live="polite">Page {currentPage} of {pageCount} · {filteredFigures.length} figures</span>
+                <Button type="button" variant="outline" size="sm" disabled={currentPage >= pageCount} onClick={() => setPage(currentPage + 1)}>Next</Button>
+              </nav>
             )}
           </>
         )}

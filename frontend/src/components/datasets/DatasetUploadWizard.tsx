@@ -38,6 +38,8 @@ const COLUMN_ROLE_OPTIONS = [
   { value: 'group', label: 'Group' },
   { value: 'time', label: 'Time' },
   { value: 'status', label: 'Status' },
+  { value: 'id', label: 'ID' },
+  { value: 'replicate', label: 'Replicate' },
   { value: 'gene', label: 'Gene' },
   { value: 'log2fc', label: 'log2FC' },
   { value: 'pvalue', label: 'p-value' },

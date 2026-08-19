@@ -33,6 +33,69 @@ async function authedPage(page, tokens) {
   await page.goto('/login', { waitUntil: 'domcontentloaded' });
   await page.evaluate(([a, r]) => { localStorage.setItem('access_token', a); localStorage.setItem('refresh_token', r); }, [tokens.access_token, tokens.refresh_token]);
 }
+async function responseJson(response, action) {
+  if (!response.ok()) {
+    const body = await response.text().catch(() => '');
+    throw new Error(`${action} failed (${response.status()}): ${body.slice(0, 500)}`);
+  }
+  return response.json();
+}
+async function getFigure(request, auth, figureId) {
+  const response = await request.get(`${ENV.BASE}/api/figures/${figureId}`, { headers: auth });
+  return responseJson(response, `get figure ${figureId}`);
+}
+async function duplicateFigure(request, auth, sourceFigureId) {
+  const response = await request.post(`${ENV.BASE}/api/figures/${sourceFigureId}/duplicate`, { headers: auth });
+  return responseJson(response, `duplicate figure ${sourceFigureId}`);
+}
+function figureVersionState(figure) {
+  return {
+    currentVersionId: figure.current_version_id ?? null,
+    versionCount: Array.isArray(figure.versions) ? figure.versions.length : 0,
+  };
+}
+async function cleanupApiResources(request, auth, resources) {
+  const allowedCollections = new Set(['canvases', 'figures', 'projects']);
+  const failures = [];
+  for (const { collection, id } of resources) {
+    if (!id) continue;
+    if (!allowedCollections.has(collection)) {
+      failures.push(`refused unknown cleanup collection ${collection}`);
+      continue;
+    }
+    try {
+      const response = await request.delete(`${ENV.BASE}/api/${collection}/${id}`, { headers: auth });
+      if (!response.ok() && response.status() !== 404) {
+        const body = await response.text().catch(() => '');
+        failures.push(`${collection}/${id}: ${response.status()} ${body.slice(0, 300)}`);
+      }
+    } catch (error) {
+      failures.push(`${collection}/${id}: ${error?.message || error}`);
+    }
+  }
+  if (failures.length) throw new Error(`QA cleanup failed:\n${failures.join('\n')}`);
+}
+async function cleanupAndVerifySourceFigure(request, auth, resources, sourceFigureId, sourceState) {
+  const failures = [];
+  try {
+    await cleanupApiResources(request, auth, resources);
+  } catch (error) {
+    failures.push(error?.message || String(error));
+  }
+  if (sourceFigureId && sourceState) {
+    try {
+      const after = figureVersionState(await getFigure(request, auth, sourceFigureId));
+      if (after.currentVersionId !== sourceState.currentVersionId || after.versionCount !== sourceState.versionCount) {
+        failures.push(
+          `source figure ${sourceFigureId} changed: before=${JSON.stringify(sourceState)} after=${JSON.stringify(after)}`,
+        );
+      }
+    } catch (error) {
+      failures.push(`source figure verification failed: ${error?.message || error}`);
+    }
+  }
+  if (failures.length) throw new Error(`QA fixture isolation failed:\n${failures.join('\n')}`);
+}
 async function runAxe(page) {
   await page.addScriptTag({ path: require.resolve('axe-core') });
   return page.evaluate(async () => {
@@ -41,4 +104,15 @@ async function runAxe(page) {
     return res.violations.map((v) => ({ id: v.id, impact: v.impact, n: v.nodes.length, help: v.help }));
   });
 }
-module.exports = { ENV, attachConsole, apiLogin, authedPage, runAxe };
+module.exports = {
+  ENV,
+  attachConsole,
+  apiLogin,
+  authedPage,
+  cleanupAndVerifySourceFigure,
+  cleanupApiResources,
+  duplicateFigure,
+  figureVersionState,
+  getFigure,
+  runAxe,
+};

@@ -2,7 +2,13 @@ const { test, expect } = require('@playwright/test');
 const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
-const { ENV, apiLogin, authedPage } = require('../helpers');
+const {
+  ENV,
+  apiLogin,
+  authedPage,
+  cleanupAndVerifySourceFigure,
+  figureVersionState,
+} = require('../helpers');
 
 // U10: AI edit quality — schema auto-gen from renderer metadata (U10a),
 // transparency chips for unsupported/dropped changes (U10b), and a self-verify
@@ -114,6 +120,21 @@ const COMMON_EDIT_COVERAGE = [
 ];
 
 test.describe('AI edit quality (U10)', () => {
+  // The review-workflow test uses QA_FIG read-only and mocks every write.
+  // This guard proves no rerender/apply escaped those routes, even on failure.
+  let sourceGuard = null;
+  test.beforeEach(() => { sourceGuard = null; });
+  test.afterEach(async ({ request }) => {
+    if (!sourceGuard) return;
+    await cleanupAndVerifySourceFigure(
+      request,
+      sourceGuard.auth,
+      [],
+      sourceGuard.figureId,
+      sourceGuard.state,
+    );
+  });
+
   test('U10 regression: the AI patch vocabulary covers common figure-edit intents (no silent-drop)', () => {
     const { keys, skip } = readOptionSchemaKeys();
     test.skip(!keys, skip || 'schema unavailable');
@@ -216,5 +237,313 @@ test.describe('AI edit quality (U10)', () => {
     const verifyToggleAfterReload = page.getByRole('switch', { name: verifyName });
     await expect(verifyToggleAfterReload).toBeVisible({ timeout: 20000 });
     await expect(verifyToggleAfterReload).not.toBeChecked();
+  });
+
+  test('AI editor exposes a review-first, keyboard-accessible settings workflow', async ({ page, request }) => {
+    test.skip(!ENV.FIG, 'set QA_FIG to a figure id');
+    const tokens = await apiLogin(request);
+    const auth = { Authorization: `Bearer ${tokens.access_token}` };
+    const figureResponse = await request.get(`${ENV.BASE}/api/figures/${ENV.FIG}`, {
+      headers: auth,
+    });
+    expect(figureResponse.ok()).toBeTruthy();
+    const sourceFigure = await figureResponse.json();
+    const sourceVersion = sourceFigure.versions.find((item) => item.id === sourceFigure.current_version_id)
+      || sourceFigure.versions[sourceFigure.versions.length - 1];
+    expect(sourceVersion?.id).toBeTruthy();
+    const sourceState = figureVersionState(sourceFigure);
+    sourceGuard = { auth, figureId: ENV.FIG, state: sourceState };
+    await authedPage(page, tokens);
+    await page.goto(`/figures/${ENV.FIG}`, { waitUntil: 'networkidle' });
+
+    const editorHeading = page.getByRole('heading', { name: /AI editor/ });
+    await expect(editorHeading).toBeVisible({ timeout: 20_000 });
+    const editor = editorHeading.locator('xpath=ancestor::*[@data-slot="card"][1]');
+
+    let livePreviewBody = null;
+    await page.route('**/api/figures/*/rerender', async (route) => {
+      livePreviewBody = route.request().postDataJSON();
+      await route.fulfill({
+        status: 409,
+        contentType: 'application/json',
+        body: JSON.stringify({ detail: 'Version conflict', error_code: 'VERSION_CONFLICT' }),
+      });
+    });
+    const livePreviewToggle = page.getByRole('switch', { name: /Live preview|Auto re-render/ });
+    await livePreviewToggle.click();
+    const manualTitle = page.getByLabel('In-plot title (usually blank)');
+    await manualTitle.fill('Unsaved conflict-safe draft');
+    await expect.poll(() => livePreviewBody, { timeout: 10_000 }).not.toBeNull();
+    expect(livePreviewBody.base_version_id).toBe(sourceVersion.id);
+    await expect(manualTitle).toHaveValue('Unsaved conflict-safe draft');
+    await expect(page.getByText(/Live preview was not applied because this figure changed elsewhere/)).toBeVisible();
+    await livePreviewToggle.click();
+
+    const workflow = editor.getByRole('region', { name: 'AI editing workflow' });
+    await expect(workflow).toContainText('Review the change plan before applying');
+    await expect(workflow).toContainText('settings-only plan, not a rendered image preview');
+    await expect(workflow.getByRole('button', { name: 'Review change plan' })).toBeEnabled();
+    await expect(workflow.getByRole('button', { name: 'Apply now (skip plan)' })).toBeDisabled();
+
+    const prompt = editor.getByRole('textbox', { name: 'Edit request' });
+    await prompt.fill('Change the title and make Knockout blue; add a secondary legend.');
+    await expect(workflow.getByRole('button', { name: 'Apply now (skip plan)' })).toBeEnabled();
+
+    // Mock only the model-dependent planning response. This exercises the
+    // production component state without spending quota or making assertions
+    // about a nondeterministic provider response.
+    await page.route('**/api/figures/*/versions/*/improve', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify([{
+          id: '11111111-1111-4111-8111-111111111111',
+          figure_version_id: sourceVersion.id,
+          suggestion_type: 'Labels and color',
+          current_state: 'The current title and Knockout color do not match the request.',
+          recommended: 'Update the title and use blue for the Knockout category.',
+          param_patch: { options: { title: 'Requested title', category_colors: { Knockout: '#2563EB' } } },
+          priority: 'high',
+          applied: false,
+          skipped: ['options.secondary_legend'],
+          unsupported: [{ request: 'add a secondary legend', reason: 'Only one legend is supported.' }],
+          created_at: '2026-08-17T00:00:00Z',
+        }]),
+      });
+    });
+    await workflow.getByRole('button', { name: 'Review change plan' }).click();
+
+    const changePlan = editor.getByRole('region', { name: 'AI interpretation and settings plan' });
+    await expect(changePlan).toContainText('Submitted request');
+    await expect(changePlan).toContainText('Change the title and make Knockout blue; add a secondary legend.');
+    await expect(changePlan).toContainText('Current assessment');
+    await expect(changePlan).toContainText('Proposed change');
+    await expect(changePlan).toContainText('Category Colors');
+    await expect(changePlan).toContainText('{"Knockout":"#2563EB"}');
+    await expect(changePlan).toContainText('1 applicable');
+    await expect(changePlan).toContainText('1 unsupported');
+    await expect(changePlan).toContainText('1 excluded by validation');
+    await expect(editor.getByRole('heading', { name: 'Request coverage' })).toBeVisible();
+    await expect(editor).toContainText('Only one legend is supported.');
+    const settingsTable = changePlan.getByRole('table', { name: 'Current and proposed setting values for Labels and color' });
+    await expect(settingsTable.getByRole('columnheader', { name: 'Before' })).toBeVisible();
+    await expect(settingsTable.getByRole('columnheader', { name: 'Proposed value' })).toBeVisible();
+    const titleRow = settingsTable.getByRole('row', { name: /Title.*Requested title/ });
+    await expect(titleRow.getByRole('cell')).toHaveCount(2);
+    await expect(titleRow.getByRole('cell').last()).toHaveText('Requested title');
+    await expect(workflow).toContainText('Apply now may retry once; reviewed-plan applies report a mismatch');
+
+    const proposedChange = changePlan.getByRole('checkbox', { name: 'Select proposed change: Labels and color' });
+    await proposedChange.click();
+    await expect(changePlan.getByRole('button', { name: 'Apply selected (1)' })).toBeEnabled();
+
+    const markingTools = editor.getByRole('toolbar', { name: 'Figure marking tools' });
+    const selectTool = markingTools.getByRole('button', { name: 'Select', exact: true });
+    const regionTool = markingTools.getByRole('button', { name: 'Region', exact: true });
+    await expect(selectTool).toHaveAttribute('aria-pressed', 'true');
+    await regionTool.focus();
+    await page.keyboard.press('Enter');
+    await expect(regionTool).toHaveAttribute('aria-pressed', 'true');
+    await expect(selectTool).toHaveAttribute('aria-pressed', 'false');
+
+    // Scan the complete AI editor card after exercising its pressed state. The
+    // keyboard assertion above covers operability that axe cannot detect.
+    await page.addScriptTag({ path: require.resolve('axe-core') });
+    const accessibilityViolations = await editor.evaluate(async (root) => {
+      // eslint-disable-next-line no-undef
+      const result = await window.axe.run(root, { runOnly: ['wcag2a', 'wcag2aa'] });
+      return result.violations
+        .map((violation) => ({
+          id: violation.id,
+          impact: violation.impact,
+          nodes: violation.nodes.map((node) => ({ target: node.target, summary: node.failureSummary })),
+        }));
+    });
+    expect(accessibilityViolations).toEqual([]);
+
+    // Apply the reviewed plan against mocked HTTP responses so we can assert
+    // provenance/concurrency payloads and the one-click restore without a
+    // model call, render quota, or production write.
+    const appliedVersionId = '33333333-3333-4333-8333-333333333333';
+    const restoredVersionId = '44444444-4444-4444-8444-444444444444';
+    const appliedOptions = {
+      ...(sourceVersion.options || {}),
+      title: 'Requested title',
+      category_colors: { Knockout: '#2563EB' },
+    };
+    const appliedVersion = {
+      ...sourceVersion,
+      id: appliedVersionId,
+      version_number: sourceVersion.version_number + 1,
+      options: appliedOptions,
+      change_note: 'Applied checked AI suggestion',
+      created_at: '2026-08-17T00:01:00Z',
+    };
+    let servedFigure = {
+      ...sourceFigure,
+      current_version_id: appliedVersionId,
+      style_preset: appliedVersion.style_preset,
+      versions: [...sourceFigure.versions, appliedVersion],
+    };
+    const exactFigureUrl = new RegExp(`/api/figures/${ENV.FIG}(?:\\?.*)?$`);
+    await page.route(exactFigureUrl, async (route) => {
+      if (route.request().method() !== 'GET') return route.fallback();
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(servedFigure) });
+    });
+
+    let applyBody = null;
+    await page.route('**/api/figures/*/improvements/apply', async (route) => {
+      applyBody = route.request().postDataJSON();
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          version: appliedVersion,
+          applied_changes: [
+            { key: 'options.title', from: sourceVersion.options?.title ?? null, to: 'Requested title' },
+            { key: 'options.category_colors', from: sourceVersion.options?.category_colors ?? null, to: { Knockout: '#2563EB' } },
+          ],
+          dropped_keys: [],
+          verification: { attempts: 1, satisfied: true, feedback: 'Selected settings match the rendered result.' },
+        }),
+      });
+    });
+    await changePlan.getByRole('button', { name: 'Apply selected (1)' }).click();
+    await expect.poll(() => applyBody).not.toBeNull();
+    expect(applyBody).toMatchObject({
+      improvement_ids: ['11111111-1111-4111-8111-111111111111'],
+      verify: true,
+      original_request: 'Change the title and make Knockout blue; add a secondary legend.',
+      verification_request: 'Update the title and use blue for the Knockout category.',
+      expected_base_version_id: sourceVersion.id,
+      retry: false,
+    });
+
+    const undoButton = editor.getByRole('button', { name: 'Undo AI edit' });
+    await expect(undoButton).toBeVisible();
+    await expect(editor.getByRole('table', { name: 'Settings changed by the most recent AI edit' })).toContainText('Requested title');
+
+    let undoBody = null;
+    const restoredVersion = {
+      ...sourceVersion,
+      id: restoredVersionId,
+      version_number: sourceVersion.version_number + 2,
+      change_note: `Restored pre-AI settings from v${sourceVersion.version_number}`,
+      created_at: '2026-08-17T00:02:00Z',
+    };
+    await page.route('**/api/figures/*/rerender', async (route) => {
+      undoBody = route.request().postDataJSON();
+      servedFigure = {
+        ...sourceFigure,
+        current_version_id: restoredVersionId,
+        style_preset: restoredVersion.style_preset,
+        versions: [...sourceFigure.versions, appliedVersion, restoredVersion],
+      };
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(restoredVersion) });
+    });
+    await undoButton.click();
+    await expect.poll(() => undoBody).not.toBeNull();
+    expect(undoBody).toMatchObject({
+      mapping: sourceVersion.mapping,
+      options: sourceVersion.options,
+      style_preset: sourceVersion.style_preset,
+      base_version_id: appliedVersionId,
+    });
+    await expect(editor.getByRole('button', { name: 'Undo AI edit' })).toHaveCount(0);
+
+    // Evidence disclosure is also model-independent: mock a completed review
+    // and prove the UI identifies every grounding input without data rows.
+    await page.route('**/api/figures/*/versions/*/review', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          id: '55555555-5555-4555-8555-555555555555',
+          figure_version_id: restoredVersionId,
+          publication_score: 88,
+          payload: {
+            publication_score: 88,
+            summary: 'Grounded review summary.',
+            accessibility_checks: {
+              schema_version: '1.0',
+              palette: {
+                status: 'evaluated',
+                source: 'Muted publication',
+                colors: ['#62B9C5', '#E4776B'],
+                series_count: 2,
+                reason: null,
+              },
+              cvd: {
+                status: 'pass',
+                method: 'deterministic_srgb_matrix_delta_e76_v1',
+                threshold_delta_e: 10,
+                simulations: [
+                  { mode: 'protanopia', status: 'pass', min_delta_e: 18.4, closest_pair: ['#62B9C5', '#E4776B'] },
+                  { mode: 'deuteranopia', status: 'pass', min_delta_e: 16.2, closest_pair: ['#62B9C5', '#E4776B'] },
+                  { mode: 'tritanopia', status: 'needs_review', min_delta_e: 8.7, closest_pair: ['#62B9C5', '#E4776B'] },
+                ],
+                reason: null,
+              },
+              grayscale: {
+                status: 'pass', method: 'cie_lab_lightness_delta_v1', threshold_delta_l: 10,
+                min_delta_l: 12.3, closest_pair: ['#62B9C5', '#E4776B'], reason: null,
+              },
+              minimum_contrast: {
+                status: 'pass', method: 'wcag_relative_luminance', threshold_ratio: 3,
+                ratio: 3.6, foreground: '#E4776B', background: '#FFFFFF', reason: null,
+              },
+            },
+            evidence: {
+              render: { version_id: restoredVersionId, version_number: restoredVersion.version_number, image_available: true },
+              plot_type: sourceFigure.plot_type,
+              style_preset: sourceVersion.style_preset,
+              mapping: { group: 'Time_h', y: 'Expression' },
+              options: { title: 'Original title' },
+              last_ai_request: 'Make Knockout blue',
+              dataset: {
+                name: 'UX Audit dataset',
+                column_count: 2,
+                columns: [
+                  { name: 'Time_h', role: 'time', dtype: 'integer' },
+                  { name: 'Expression', role: 'value', dtype: 'float' },
+                ],
+                columns_truncated: false,
+              },
+            },
+          },
+          created_at: '2026-08-17T00:03:00Z',
+        }),
+      });
+    });
+    const reviewButton = page.getByRole('button', { name: 'Review this figure' });
+    await reviewButton.click();
+    const accessibilityChecks = page.getByRole('region', { name: 'Deterministic color accessibility checks' });
+    await expect(accessibilityChecks).toBeVisible();
+    await expect(accessibilityChecks).toContainText('these results are not an AI opinion');
+    await expect(accessibilityChecks).toContainText('protanopia');
+    await expect(accessibilityChecks).toContainText('ΔE 18.4');
+    await expect(accessibilityChecks).toContainText('Minimum ΔL 12.3');
+    await expect(accessibilityChecks).toContainText('Minimum ratio 3.6:1');
+    await expect(accessibilityChecks).toContainText('Muted publication · 2 series');
+    const evidenceDetails = page.locator('details').filter({ hasText: 'Evidence used for this review' });
+    await expect(evidenceDetails).toBeVisible();
+    await evidenceDetails.locator('summary').click();
+    await expect(evidenceDetails).toContainText(`Render v${restoredVersion.version_number}`);
+    await expect(evidenceDetails).toContainText('Make Knockout blue');
+    await expect(evidenceDetails).toContainText('Time_h');
+    await expect(evidenceDetails).toContainText('time');
+    await expect(evidenceDetails).toContainText('integer');
+    await expect(evidenceDetails).toContainText('No dataset rows or sample values are included.');
+    const evidenceAccessibilityViolations = await evidenceDetails.evaluate(async (root) => {
+      // eslint-disable-next-line no-undef
+      const result = await window.axe.run(root, { runOnly: ['wcag2a', 'wcag2aa'] });
+      return result.violations
+        .map((violation) => ({
+          id: violation.id,
+          impact: violation.impact,
+          nodes: violation.nodes.map((node) => ({ target: node.target, summary: node.failureSummary })),
+        }));
+    });
+    expect(evidenceAccessibilityViolations).toEqual([]);
   });
 });

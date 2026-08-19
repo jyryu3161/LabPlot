@@ -121,6 +121,50 @@ test.describe('canvas annotations (U8)', () => {
     cleanupCanvasId = null;
   });
 
+  test('off-sheet annotation creation requires Alt and can be moved back inside', async ({ page, request }) => {
+    const c = await (await request.post(`${base}/api/canvases`, {
+      headers: auth, data: { name: 'Ann Bounds QA', width_mm: 180, height_mm: 120 },
+    })).json();
+    cleanupCanvasId = c.id;
+
+    const serverAnnotations = async () => {
+      const cv = await (await request.get(`${base}/api/canvases/${c.id}`, { headers: auth })).json();
+      return cv.annotations;
+    };
+
+    await authedPage(page, tokens);
+    await page.goto(`/canvases/${c.id}`, { waitUntil: 'networkidle' });
+    const stage = page.locator('canvas').first();
+    await expect(stage).toBeVisible();
+    const box = await stage.boundingBox();
+    const origin = sheetOrigin(box, 180, 120);
+    const outsideX = origin.x - 18;
+    const middleY = origin.y + 60 * origin.pxPerMm;
+
+    await page.getByRole('button', { name: 'Text tool (T)' }).click();
+    await page.mouse.click(outsideX, middleY);
+    await expect(page.getByText('Place annotations inside the canvas')).toBeVisible();
+    await expect(page.getByRole('textbox', { name: 'Annotation text' })).toBeHidden();
+    await expect.poll(async () => (await serverAnnotations()).length).toBe(0);
+
+    await page.keyboard.down('Alt');
+    await page.mouse.click(outsideX, middleY);
+    await page.keyboard.up('Alt');
+    const input = page.getByRole('textbox', { name: 'Annotation text' });
+    await expect(input).toBeVisible();
+    await input.fill('Intentional bleed');
+    await input.press('Enter');
+    await expect.poll(async () => (await serverAnnotations()).length).toBe(1);
+    expect((await serverAnnotations())[0].x_mm).toBeLessThan(0);
+
+    await expect(page.getByRole('alert').filter({ hasText: 'outside the export area' })).toBeVisible();
+    await page.getByRole('button', { name: 'Move all inside' }).click();
+    await expect.poll(async () => (await serverAnnotations())[0].x_mm).toBeGreaterThanOrEqual(0);
+
+    await request.delete(`${base}/api/canvases/${c.id}`, { headers: auth });
+    cleanupCanvasId = null;
+  });
+
   test('rect tool: drag-create, export ordering after panels, invalid PATCH rejected', async ({ page, request }) => {
     const c = await (await request.post(`${base}/api/canvases`, {
       headers: auth, data: { name: 'Ann Rect QA', width_mm: 180, height_mm: 120 },

@@ -1,27 +1,116 @@
 """Descriptive statistics + simple group comparisons computed at upload time.
 
 Group comparison: Welch's t-test (2 groups) or one-way ANOVA (>2 groups) per
-(group column x numeric column), using scipy. Alongside each parametric test we
-also add a nonparametric equivalent (Mann-Whitney U / Kruskal-Wallis), effect
-sizes with an approximate 95% CI (2-group), lightweight assumption checks
-(normality / equal variance), and Benjamini-Hochberg (FDR) adjusted p-values
-across all comparisons. Results are advisory summaries — not a substitute for a
-full statistical analysis.
+(group column x numeric outcome column), using scipy. Structural design columns
+(group/time/ID/replicate) are excluded as outcomes. Automatic one-factor
+comparisons are suppressed entirely when a group + time design is detected,
+because pooling time points would ignore time and group-by-time effects (and may
+also violate independence for repeated units). Alongside each eligible
+parametric test we add a nonparametric equivalent (Mann-Whitney U /
+Kruskal-Wallis), effect sizes with an approximate 95% CI (2-group), lightweight
+assumption checks (normality / equal variance), and Benjamini-Hochberg (FDR)
+adjusted p-values across all comparisons. Results are advisory summaries — not
+a substitute for a full statistical analysis.
 """
 from __future__ import annotations
 
 import math
+import re
 
 import numpy as np
 import pandas as pd
 
 
-def _f(x):
+STATISTICS_POLICY = "suppress-group-time-one-factor-comparisons-v4"
+
+_STRUCTURAL_COMPARISON_ROLES = {
+    "group", "category", "status", "time", "id", "replicate",
+}
+_LEGACY_STRUCTURAL_COMPARISON_NAME_RE = re.compile(
+    r"^(?:"
+    r"time(?:point)?(?:[_\s-]*(?:h|hr|hour|hours|d|day|days))?|"
+    r"(?:replicate|rep|repeat)(?:[_\s-]*(?:id|no|num|number))?|"
+    r"(?:sample|subject|patient|participant|animal|mouse|donor|individual)[_\s-]*id|"
+    r"id"
+    r")$",
+    re.I,
+)
+_LEGACY_TIME_DESIGN_NAME_RE = re.compile(
+    r"^(?:"
+    r"time(?:point)?(?:[_\s-]*(?:h|hr|hour|hours|d|day|days))?|"
+    r"(?:study|visit|experiment)[_\s-]*(?:h|hr|hour|hours|d|day|days)"
+    r")$",
+    re.I,
+)
+
+
+def comparison_value_columns(column_profile: list[dict]) -> list[str]:
+    """Return numeric outcome columns safe for one-factor auto comparisons.
+
+    The name check is a compatibility fallback for datasets profiled before
+    explicit ``id`` / ``replicate`` roles were introduced. Explicit user role
+    overrides are authoritative and therefore bypass the name fallback.
+    """
+    values: list[str] = []
+    for column in column_profile:
+        name = str(column.get("name", ""))
+        role = str(column.get("role", "")).lower()
+        if column.get("dtype") != "numeric":
+            continue
+        if role in _STRUCTURAL_COMPARISON_ROLES:
+            continue
+        if (
+            column.get("role_source") != "user"
+            and (
+                _LEGACY_STRUCTURAL_COMPARISON_NAME_RE.fullmatch(name.strip())
+                or _LEGACY_TIME_DESIGN_NAME_RE.search(name.strip())
+            )
+        ):
+            continue
+        values.append(name)
+    return values
+
+
+def _finite_float(x):
     try:
         v = float(x)
-        return None if (math.isnan(v) or math.isinf(v)) else round(v, 4)
+        return None if (math.isnan(v) or math.isinf(v)) else v
     except (TypeError, ValueError):
         return None
+
+
+def _f(x):
+    """Round ordinary descriptive/statistic values, never decision inputs."""
+    value = _finite_float(x)
+    return None if value is None else round(value, 4)
+
+
+def _p_value(x):
+    """Preserve finite p-values so API consumers never receive a false zero."""
+    return _finite_float(x)
+
+
+def _has_group_time_design(column_profile: list[dict]) -> bool:
+    """Detect designs where pooled one-factor comparisons would be misleading.
+
+    Explicit user role overrides remain authoritative: a user-marked numeric
+    column named ``Time_h`` is not silently reinterpreted as a time factor.
+    The conservative name fallback keeps older, automatically profiled datasets
+    safe until their profiles are refreshed.
+    """
+    has_group = any(
+        str(column.get("role", "")).lower() in ("group", "category", "status")
+        for column in column_profile
+    )
+    has_time = any(
+        str(column.get("role", "")).lower() == "time"
+        or (
+            column.get("role_source") != "user"
+            and _LEGACY_TIME_DESIGN_NAME_RE.search(str(column.get("name", "")).strip())
+        )
+        for column in column_profile
+    )
+    return has_group and has_time
 
 
 def _describe(series: pd.Series) -> dict:
@@ -64,12 +153,13 @@ def _cohens_d(m1, s1, n1, m2, s2, n2) -> dict | None:
 
 
 def _bh_adjust(pvals: list) -> list:
-    """Benjamini-Hochberg FDR adjustment; preserves order, keeps None entries."""
+    """Return raw Benjamini-Hochberg values; formatting happens at the API edge."""
     try:
-        idx = [i for i, p in enumerate(pvals) if p is not None]
+        finite = [_finite_float(p) for p in pvals]
+        idx = [i for i, p in enumerate(finite) if p is not None]
         if not idx:
-            return list(pvals)
-        vals = [float(pvals[i]) for i in idx]
+            return finite
+        vals = [finite[i] for i in idx]
         adj = None
         try:
             from scipy import stats as _sp
@@ -86,19 +176,21 @@ def _bh_adjust(pvals: list) -> list:
                 k = order[rank - 1]
                 prev = min(prev, vals[k] * m / rank)
                 adj[k] = min(prev, 1.0)
-        out = list(pvals)
+        out = list(finite)
         for pos, i in enumerate(idx):
-            out[i] = _f(adj[pos])
+            out[i] = _finite_float(adj[pos])
         return out
     except Exception:
-        return list(pvals)
+        return [_finite_float(p) for p in pvals]
 
 
 def compute_statistics(df: pd.DataFrame, column_profile: list[dict]) -> dict:
     # descriptive: every numeric-dtype column (includes time, log2fc, pvalue, numeric status)
     numerics = [c["name"] for c in column_profile if c["dtype"] == "numeric"]
+    comparison_values = comparison_value_columns(column_profile)
     groups = [c["name"] for c in column_profile if c["role"] in ("group", "category", "status")
               and 2 <= c["n_unique"] <= 8]
+    suppress_one_factor_comparisons = _has_group_time_design(column_profile)
 
     descriptive = [{"column": n, **_describe(df[n])} for n in numerics]
 
@@ -108,14 +200,15 @@ def compute_statistics(df: pd.DataFrame, column_profile: list[dict]) -> dict:
     except ImportError:
         sp = None
 
-    if sp is not None:
+    raw_parametric_p_values: list[float | None] = []
+    raw_nonparametric_p_values: list[float | None] = []
+
+    if sp is not None and not suppress_one_factor_comparisons:
         for gcol in groups[:2]:
             levels = [lv for lv in df[gcol].dropna().unique()]
             if not (2 <= len(levels) <= 8):
                 continue
-            for ncol in numerics[:6]:
-                if ncol == gcol:
-                    continue
+            for ncol in comparison_values[:6]:
                 arrays, per_group = [], []
                 for lv in levels:
                     vals = pd.to_numeric(df.loc[df[gcol] == lv, ncol], errors="coerce").dropna().values
@@ -134,15 +227,16 @@ def compute_statistics(df: pd.DataFrame, column_profile: list[dict]) -> dict:
                         test = "One-way ANOVA"
                 except Exception:
                     continue
-                pv = _f(p)
+                raw_p = _finite_float(p)
                 comp = {
                     "group_column": gcol, "value_column": ncol, "test": test,
-                    "statistic": _f(st), "p_value": pv,
-                    "significant": bool(pv is not None and pv < 0.05),
+                    "statistic": _f(st), "p_value": _p_value(raw_p),
+                    "significant": bool(raw_p is not None and raw_p < 0.05),
                     "groups": per_group,
                 }
 
                 # nonparametric equivalent (Mann-Whitney U / Kruskal-Wallis)
+                raw_nonparametric_p = None
                 try:
                     if len(arrays) == 2:
                         nst, np_p = sp.mannwhitneyu(arrays[0], arrays[1], alternative="two-sided")
@@ -150,10 +244,12 @@ def compute_statistics(df: pd.DataFrame, column_profile: list[dict]) -> dict:
                     else:
                         nst, np_p = sp.kruskal(*arrays)
                         ntest = "Kruskal-Wallis"
-                    npv = _f(np_p)
+                    raw_nonparametric_p = _finite_float(np_p)
                     comp["nonparametric"] = {
-                        "test": ntest, "statistic": _f(nst), "p_value": npv,
-                        "significant": bool(npv is not None and npv < 0.05),
+                        "test": ntest, "statistic": _f(nst), "p_value": _p_value(raw_nonparametric_p),
+                        "significant": bool(
+                            raw_nonparametric_p is not None and raw_nonparametric_p < 0.05
+                        ),
                     }
                 except Exception:
                     pass
@@ -188,10 +284,10 @@ def compute_statistics(df: pd.DataFrame, column_profile: list[dict]) -> dict:
                         assumptions["normal"] = bool(min_p > 0.05)
                     try:
                         _, lev_p = sp.levene(*arrays)
-                        lp = _f(lev_p)
-                        if lp is not None:
-                            assumptions["levene_p"] = lp
-                            assumptions["equal_variance"] = bool(lp > 0.05)
+                        raw_levene_p = _finite_float(lev_p)
+                        if raw_levene_p is not None:
+                            assumptions["levene_p"] = _f(raw_levene_p)
+                            assumptions["equal_variance"] = bool(raw_levene_p > 0.05)
                     except Exception:
                         pass
                     if assumptions:
@@ -200,25 +296,31 @@ def compute_statistics(df: pd.DataFrame, column_profile: list[dict]) -> dict:
                     pass
 
                 comparisons.append(comp)
+                raw_parametric_p_values.append(raw_p)
+                raw_nonparametric_p_values.append(raw_nonparametric_p)
 
     # multiple-testing correction (Benjamini-Hochberg FDR) across all comparisons
     fdr_applied = False
     try:
         if len(comparisons) > 1:
-            adj_ps = _bh_adjust([c.get("p_value") for c in comparisons])
+            adj_ps = _bh_adjust(raw_parametric_p_values)
             for c, ap in zip(comparisons, adj_ps):
-                c["p_value_adjusted"] = ap
+                c["p_value_adjusted"] = _p_value(ap)
                 c["significant_fdr"] = bool(ap is not None and ap < 0.05)
-            np_ps = [c.get("nonparametric", {}).get("p_value") for c in comparisons]
-            if any(p is not None for p in np_ps):
-                for c, ap in zip(comparisons, _bh_adjust(np_ps)):
+            if any(p is not None for p in raw_nonparametric_p_values):
+                for c, ap in zip(comparisons, _bh_adjust(raw_nonparametric_p_values)):
                     if isinstance(c.get("nonparametric"), dict) and ap is not None:
-                        c["nonparametric"]["p_value_adjusted"] = ap
+                        c["nonparametric"]["p_value_adjusted"] = _p_value(ap)
             fdr_applied = True
     except Exception:
         fdr_applied = False
 
-    result = {"descriptive": descriptive, "comparisons": comparisons}
+    result = {
+        "descriptive": descriptive,
+        "comparisons": comparisons,
+        "comparison_policy": STATISTICS_POLICY,
+        "one_factor_comparisons_suppressed": suppress_one_factor_comparisons,
+    }
     if fdr_applied:
         result["fdr_method"] = "benjamini-hochberg"
     return result

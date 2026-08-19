@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -12,6 +12,10 @@ class FigureCreate(BaseModel):
     mapping: dict[str, Any] = Field(default_factory=dict)
     options: dict[str, Any] = Field(default_factory=dict)
     style_preset: str = "nature"
+    # Fresh figures receive the current explicit publication defaults. Figure
+    # templates/format copies opt into preserve so their saved visual contract
+    # is not silently restyled while being reused.
+    defaults_profile: Literal["publication_v2", "preserve"] = "publication_v2"
 
 
 class RerenderRequest(BaseModel):
@@ -70,6 +74,8 @@ class TemplateFavoriteRequest(BaseModel):
 
 class LegendResponse(BaseModel):
     legend: str
+    grounding: dict[str, Any] = Field(default_factory=dict)
+    prompt_version: str | None = None
 
 
 class LegendRequest(BaseModel):
@@ -79,6 +85,9 @@ class LegendRequest(BaseModel):
 
 class MethodsTextResponse(BaseModel):
     methods_text: str
+    grounding: dict[str, Any] = Field(default_factory=dict)
+    runtime_versions: dict[str, str] = Field(default_factory=dict)
+    generator_version: str | None = None
 
 
 class FigureCommentCreate(BaseModel):
@@ -109,6 +118,8 @@ class AltTextRequest(BaseModel):
 
 class AltTextResponse(BaseModel):
     alt_text: str
+    grounding: dict[str, Any] = Field(default_factory=dict)
+    prompt_version: str | None = None
 
 
 class EnhancePromptRequest(BaseModel):
@@ -126,20 +137,96 @@ class RecommendationRequest(BaseModel):
     prompt: str | None = Field(default=None, max_length=1500)
 
 
+class ImprovementNormalizedPoint(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    x: float = Field(..., ge=0, le=1)
+    y: float = Field(..., ge=0, le=1)
+
+
+class ImprovementNormalizedBBox(ImprovementNormalizedPoint):
+    width: float = Field(..., ge=0, le=1)
+    height: float = Field(..., ge=0, le=1)
+
+
+class ImprovementResolvedTarget(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: str = Field(..., min_length=1, max_length=80)
+    label: str | None = Field(default=None, max_length=160)
+    # Accepts simple dotted paths AND per-element override roots
+    # ("options.element_overrides.<renderer mark id>"): mark ids contain
+    # ':', '=', '&' and %-escapes, and rejecting them here made the WHOLE
+    # /improve request 422 whenever a mark resolved to a bar/point/cell —
+    # which then dropped the AI-busy state and let a leftover draft render as
+    # a stray "Live preview" version. The value stays untrusted either way:
+    # the service re-derives targets from the persisted layout.
+    setting_path: str | None = Field(
+        default=None,
+        max_length=700,
+        pattern=r"^(?:style_preset|mapping(?:\.[A-Za-z0-9_]+)?|options(?:\.[A-Za-z0-9_]+)?|options\.element_overrides\.[^\s]{1,600})$",
+    )
+    element_id: str | None = Field(default=None, max_length=160)
+    role: str | None = Field(default=None, max_length=80)
+    category: str | None = Field(default=None, max_length=160)
+    series: str | None = Field(default=None, max_length=160)
+    editable: bool | None = None
+    unsupported_reason: str | None = Field(default=None, max_length=500)
+    bbox_source: str | None = Field(default=None, max_length=80)
+    # Client echo of the sidecar's degenerate "add here" band flag. Untrusted
+    # like every other field here: the service re-derives placeholder status
+    # from the persisted layout when it matters.
+    placeholder: bool | None = None
+
+
+class ImprovementMark(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # `id` is the stable client identity; label/display_number are presentation
+    # aliases. The service persists all three and never substitutes a provider
+    # invented identifier.
+    id: str = Field(..., min_length=1, max_length=100)
+    label: str = Field(..., min_length=1, max_length=100)
+    display_number: int | None = Field(default=None, ge=1, le=9999)
+    type: str = Field(..., pattern=r"^(?:region|arrow|note)$")
+    # A general prompt may carry the instruction for a geometric mark, so an
+    # empty per-mark memo is valid and must not turn an otherwise actionable
+    # request into a 422 response.
+    memo: str = Field(default="", max_length=1000)
+    bbox_normalized: ImprovementNormalizedBBox | None = None
+    point_normalized: ImprovementNormalizedPoint | None = None
+    resolved_target: ImprovementResolvedTarget | None = None
+    # Explicit target chosen by the user after reviewing the inferred target.
+    # This remains untrusted input: the service must resolve it back to a
+    # nearby editable element in the persisted FigureVersion.layout.
+    target_override: ImprovementResolvedTarget | None = None
+
+
 class ImprovementRequest(BaseModel):
     prompt: str | None = Field(default=None, max_length=4000)
+    # Exact user-authored text, without generated coordinate summaries or
+    # provider prose.  The service binds this provenance to the durable plan
+    # so a later apply request cannot substitute a different verification
+    # target.  `prompt` remains the model-facing, annotated request.
+    original_request: str | None = Field(default=None, max_length=20_000)
     annotated_image: str | None = Field(default=None, max_length=12_000_000)
+    marks: list[ImprovementMark] = Field(default_factory=list, max_length=20)
 
 
 class ImprovementApplyRequest(BaseModel):
     improvement_ids: list[uuid.UUID] = Field(..., min_length=1, max_length=20)
-    # U10c self-verify loop, opt-in per apply call. Both must be set (verify
-    # true AND a non-empty original_request) for verification to run.
+    # U10c self-verify loop, opt-in per apply call. For current plans the
+    # server-owned request captured during /improve is authoritative.
     verify: bool = False
-    # Advisory (verification-only): verify_edit truncates to 4000 chars itself,
-    # so the cap here is a generous abuse backstop rather than a hard 422 on a
-    # long combined prompt (the client also truncates to 4000).
+    # Legacy/advisory echo retained for backwards compatibility and mismatch
+    # diagnostics; it must never replace a request already bound to the plan.
     original_request: str | None = Field(default=None, max_length=20_000)
+    # Optional selected-plan summary retained as audit context. Verification
+    # remains grounded in the server-bound original request and edit scopes.
+    verification_request: str | None = Field(default=None, max_length=20_000)
+    # Optimistic-concurrency guard for a reviewed plan. Applying a suggestion
+    # generated for an older figure version must never overwrite a newer edit.
+    expected_base_version_id: uuid.UUID | None = None
     # When False (the suggestion-apply UI paths), an unsatisfied verdict is
     # reported as-is - the auto-retry never creates a version the user did not
     # explicitly select. Defaults True for the direct "Apply edit" path.
@@ -149,6 +236,8 @@ class ImprovementApplyRequest(BaseModel):
 class ImprovementApplyOneRequest(BaseModel):
     verify: bool = False
     original_request: str | None = Field(default=None, max_length=20_000)
+    verification_request: str | None = Field(default=None, max_length=20_000)
+    expected_base_version_id: uuid.UUID | None = None
     retry: bool = True
 
 
@@ -183,6 +272,10 @@ class AppliedChangeItem(BaseModel):
     key: str
     from_value: Any = Field(default=None, alias="from")
     to: Any = None
+    # True when `from` is the renderer-effective default of a previously
+    # UNSET option (e.g. heatmap's implicit 45deg tick angle), so the UI can
+    # label it "(default)" instead of showing a misleading "(unset)".
+    from_is_default: bool = False
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -196,6 +289,8 @@ class VerificationResult(BaseModel):
     # Machine-readable reason verification could not run (e.g.
     # AI_QUOTA_EXCEEDED, AI_API_ERROR, NO_IMAGE). None when it ran normally.
     skipped: str | None = None
+    allowed_patch_keys: list[str] = Field(default_factory=list)
+    unrequested_changes: list[AppliedChangeItem] = Field(default_factory=list)
 
 
 class ImprovementApplyResponse(BaseModel):
@@ -324,6 +419,8 @@ class ReviewResponse(BaseModel):
 class UnsupportedRequestItem(BaseModel):
     request: str
     reason: str
+    mark_id: str | None = None
+    resolved_target: str | None = None
 
 
 class ImprovementResponse(BaseModel):
@@ -335,6 +432,10 @@ class ImprovementResponse(BaseModel):
     current_state: str | None = None
     recommended: str | None = None
     param_patch: dict[str, Any]
+    # Stable, server-derived provenance for a general request or Mark #n. The
+    # allowed_patch_keys list is the request whitelist intersected with this
+    # suggestion's sanitized patch, and is enforced again during apply/verify.
+    edit_scope: dict[str, Any] | None = None
     priority: str | None = None
     applied: bool
     created_at: datetime
@@ -353,11 +454,16 @@ class RecommendationItem(BaseModel):
     plot_type: str
     title: str | None = None
     score: float | str | None = None
+    scores: dict[str, float] = Field(default_factory=dict)
     rank: int | None = None
     fit: str | None = None
     rationale: str | None = None
     required_vars: dict[str, Any] | None = None
     suggested_mapping: dict[str, Any] | None = None
+    suggested_options: dict[str, Any] = Field(default_factory=dict)
+    intent: dict[str, Any] = Field(default_factory=dict)
+    mapping_complete: bool = True
+    missing_required_mappings: list[dict[str, str]] = Field(default_factory=list)
     example_usage: str | None = None
     source: str = "rule"
 

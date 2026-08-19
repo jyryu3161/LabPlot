@@ -16,6 +16,7 @@ from app.auth import models as _auth_models  # noqa: F401
 from app.auth.models import User
 from app.auth.service import _hash_password
 from app.organizations import models as _organization_models  # noqa: F401
+from app.palettes import models as _palette_models  # noqa: F401
 from app.common import storage
 from app.config import settings
 from app.database import SessionLocal

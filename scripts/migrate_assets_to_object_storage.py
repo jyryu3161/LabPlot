@@ -20,6 +20,7 @@ from app.audit import models as _audit_models  # noqa: F401
 from app.auth import models as _auth_models  # noqa: F401
 from app.auth.models import User
 from app.organizations import models as _organization_models  # noqa: F401
+from app.palettes import models as _palette_models  # noqa: F401
 from app.common import storage
 from app.database import SessionLocal
 from app.datasets.models import Dataset

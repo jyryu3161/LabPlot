@@ -20,17 +20,35 @@ backend_py() {
 cleanup_admin() {
   docker exec -e SMOKE_ADMIN_EMAIL="$SMOKE_ADMIN_EMAIL" "$BACKEND_CONTAINER" sh -lc 'cd /app/backend && /app/.pixi/envs/default/bin/python - <<'"'"'PY'"'"'
 import os
+from app.admin import service as admin_service
 from app.ai import models as _ai_models  # noqa
 from app.audit import models as _audit_models  # noqa
 from app.client_errors import models as _client_error_models  # noqa
+from app.client_errors.models import ClientErrorEvent
 from app.datasets import models as _dataset_models  # noqa
 from app.figures import models as _figure_models  # noqa
 from app.organizations import models as _organization_models  # noqa
+from app.organizations.models import Organization
+from app.palettes import models as _palette_models  # noqa
 from app.projects import models as _project_models  # noqa
 from app.database import SessionLocal
 from app.auth.models import User
 with SessionLocal() as db:
-    db.query(User).filter(User.email == os.environ["SMOKE_ADMIN_EMAIL"]).delete(synchronize_session=False)
+    admin = db.query(User).filter(User.email == os.environ["SMOKE_ADMIN_EMAIL"]).first()
+    if admin:
+        stale_users = db.query(User).filter(
+            User.email.like("smoke-%@example.com"),
+            User.id != admin.id,
+        ).all()
+        for user in stale_users:
+            admin_service.delete_user(db, user.id, acting_user=admin)
+        db.query(ClientErrorEvent).filter(
+            ClientErrorEvent.message.like("Smoke client error %")
+        ).delete(synchronize_session=False)
+        db.query(Organization).filter(
+            Organization.name.like("Smoke Org %")
+        ).delete(synchronize_session=False)
+        db.query(User).filter(User.id == admin.id).delete(synchronize_session=False)
     db.commit()
 PY' >/dev/null 2>&1 || true
 }
@@ -69,6 +87,7 @@ from app.client_errors import models as _client_error_models  # noqa
 from app.datasets import models as _dataset_models  # noqa
 from app.figures import models as _figure_models  # noqa
 from app.organizations import models as _organization_models  # noqa
+from app.palettes import models as _palette_models  # noqa
 from app.projects import models as _project_models  # noqa
 from app.database import SessionLocal
 from app.auth.models import User

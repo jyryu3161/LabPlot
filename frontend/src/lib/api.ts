@@ -1,10 +1,11 @@
 import type {
   User, TokenResponse, LoginRequest, RegisterRequest,
   DatasetIngestOptions, DatasetListItem, DatasetDetail, DatasetPreview, ChartSuggestion, PlotTypeDef, StyleDef, ColumnValues,
-  FigureListItem, FigureDetail, FigureVersion, Review, Improvement, ImprovementApplyResult, MethodsTextResponse, AltTextResponse, AdminUser, AIConfig, GalleryFigureItem, AuditLogItem,
+  FigureListItem, FigureDetail, FigureVersion, Review, Improvement, ImprovementApplyResult, LegendResponse, MethodsTextResponse, AltTextResponse, AdminUser, AIConfig, GalleryFigureItem, AuditLogItem,
   ClientErrorItem, Project, ProjectListItem, EmailDeliveryStatus, FigureTemplateFavoriteItem,
   MembershipItem, MyOrganizationItem, OrganizationAIConfig, OrganizationItem, OrganizationSearchItem, OrganizationUsageSummary, OrganizationUserSearchItem,
   ProjectCollaborator, ProjectInvitation, ProjectUserSearchItem, GalleryTemplate, RecommendationCache,
+  AiEditMark,
 } from './types';
 
 // Same-origin by default; Caddy proxies /api and /static to the backend.
@@ -356,6 +357,7 @@ export async function deleteCustomPalette(id: string): Promise<void> {
 export interface FigureCreatePayload {
   dataset_id: string; name: string; plot_type: string;
   mapping: Record<string, unknown>; options: Record<string, unknown>; style_preset: string;
+  defaults_profile?: 'publication_v2' | 'preserve';
 }
 export async function createFigure(p: FigureCreatePayload): Promise<FigureDetail> {
   return fetcher('/api/figures', { method: 'POST', body: JSON.stringify(p) });
@@ -424,7 +426,7 @@ export async function generateLegend(
   figureId: string,
   versionId: string,
   data?: { prompt?: string; current_legend?: string },
-): Promise<{ legend: string }> {
+): Promise<LegendResponse> {
   const body = data && (data.prompt?.trim() || data.current_legend?.trim()) ? JSON.stringify({
     prompt: data.prompt?.trim() || undefined,
     current_legend: data.current_legend?.trim() || undefined,
@@ -440,12 +442,22 @@ export async function reviewVersion(figureId: string, versionId: string): Promis
 export interface ImproveVersionRequest {
   prompt?: string;
   annotated_image?: string;
+  // Exact user-authored request/memos used to bind the generated plan to the
+  // user's scope without the localization protocol added to `prompt`.
+  original_request?: string;
+  // Optional structured companion to the human-readable localized prompt.
+  // Older servers ignore this additive field; current clients retain it for
+  // deterministic mark-to-plan traceability.
+  marks?: AiEditMark[];
 }
 export async function improveVersion(figureId: string, versionId: string, request?: string | ImproveVersionRequest): Promise<Improvement[]> {
   const payload = typeof request === 'string' ? { prompt: request } : (request ?? {});
-  const body = payload.prompt?.trim() || payload.annotated_image ? JSON.stringify({
-    prompt: payload.prompt?.trim() || undefined,
+  const normalizedPrompt = payload.prompt?.trim().slice(0, 4000) || undefined;
+  const body = normalizedPrompt || payload.annotated_image || payload.original_request?.trim() || payload.marks?.length ? JSON.stringify({
+    prompt: normalizedPrompt,
     annotated_image: payload.annotated_image,
+    original_request: trimOriginalRequest(payload.original_request),
+    marks: payload.marks?.length ? payload.marks : undefined,
   }) : undefined;
   return fetcher(`/api/figures/${figureId}/versions/${versionId}/improve`, { method: 'POST', body });
 }
@@ -458,19 +470,28 @@ export async function listImprovements(figureId: string, versionId: string): Pro
 // auto-retry, so no version the user did not select is ever created.
 export interface ApplyImprovementOptions {
   verify?: boolean;
+  // Exact user-authored request, retained as edit provenance.
   original_request?: string;
+  // Compatibility field carrying selected-plan audit context. The server
+  // always treats original_request as authoritative for safety/provenance;
+  // this narrower text must not redefine or broaden the user's request.
+  verification_request?: string;
+  // Optimistic-concurrency guard: the version this plan was created from.
+  expected_base_version_id?: string;
   retry?: boolean;
 }
-// original_request is advisory (verification-only) and the backend truncates
-// it to 4000 chars inside verify_edit - truncate here too so a long combined
-// prompt can never 422 the whole apply.
+// Keep the exact plan-bound provenance identical between /improve and /apply.
+// The API contract accepts 20k characters; the verifier independently bounds
+// the model-facing excerpt without changing the durable request identity.
 function trimOriginalRequest(value?: string): string | undefined {
-  return value?.trim().slice(0, 4000) || undefined;
+  return value?.trim().slice(0, 20_000) || undefined;
 }
 export async function applyImprovement(figureId: string, improvementId: string, options?: ApplyImprovementOptions): Promise<ImprovementApplyResult> {
-  const body = options?.verify || options?.original_request ? JSON.stringify({
+  const body = options?.verify || options?.original_request || options?.verification_request || options?.expected_base_version_id ? JSON.stringify({
     verify: options?.verify ?? false,
     original_request: trimOriginalRequest(options?.original_request),
+    verification_request: trimOriginalRequest(options?.verification_request),
+    expected_base_version_id: options?.expected_base_version_id,
     retry: options?.retry ?? true,
   }) : undefined;
   return fetcher(`/api/figures/${figureId}/improvements/${improvementId}/apply`, { method: 'POST', body });
@@ -482,6 +503,8 @@ export async function applyImprovements(figureId: string, improvementIds: string
       improvement_ids: improvementIds,
       verify: options?.verify ?? false,
       original_request: trimOriginalRequest(options?.original_request),
+      verification_request: trimOriginalRequest(options?.verification_request),
+      expected_base_version_id: options?.expected_base_version_id,
       retry: options?.retry ?? true,
     }),
   });

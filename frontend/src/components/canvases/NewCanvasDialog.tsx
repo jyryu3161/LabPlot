@@ -19,9 +19,21 @@ const MM_MIN = 20;
 const MM_MAX = 500;
 const CUSTOM = 'custom';
 
-function clampMm(value: number): number {
-  if (Number.isNaN(value)) return MM_MIN;
-  return Math.min(MM_MAX, Math.max(MM_MIN, Math.round(value)));
+function parseMm(value: string): number | null {
+  const trimmed = value.trim();
+  if (!/^\d+(?:\.\d{1,2})?$/.test(trimmed)) return null;
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function sizeValidationError(width: number | null, height: number | null): string | null {
+  if (width === null || height === null) {
+    return 'Enter width and height as numbers with up to two decimal places.';
+  }
+  if (width < MM_MIN || width > MM_MAX || height < MM_MIN || height > MM_MAX) {
+    return `Each side must be between ${MM_MIN} and ${MM_MAX} mm.`;
+  }
+  return null;
 }
 
 /**
@@ -46,8 +58,8 @@ export function NewCanvasDialog({
   const [presetKey, setPresetKey] = useState<string>(CUSTOM);
   // A4 portrait — matches the first backend preset, so the form shows A4 even
   // before the presets query resolves (or if it fails).
-  const [widthMm, setWidthMm] = useState<number>(210);
-  const [heightMm, setHeightMm] = useState<number>(297);
+  const [widthMm, setWidthMm] = useState('210');
+  const [heightMm, setHeightMm] = useState('297');
 
   const { data: presets } = useQuery({
     queryKey: ['canvas-presets'],
@@ -65,27 +77,36 @@ export function NewCanvasDialog({
     setName('');
     setDesc('');
     setPresetKey(CUSTOM);
-    setWidthMm(210);
-    setHeightMm(297);
+    setWidthMm('210');
+    setHeightMm('297');
   }, [open]);
   useEffect(() => {
     if (!open || seededRef.current || !presets?.length) return;
     seededRef.current = true;
     const first = presets[0];
     setPresetKey(first.key);
-    setWidthMm(first.width_mm);
-    setHeightMm(first.height_mm);
+    setWidthMm(String(first.width_mm));
+    setHeightMm(String(first.height_mm));
   }, [open, presets]);
 
+  const parsedWidthMm = parseMm(widthMm);
+  const parsedHeightMm = parseMm(heightMm);
+  const sizeError = sizeValidationError(parsedWidthMm, parsedHeightMm);
+
   const create = useMutation({
-    mutationFn: () => createCanvas({
-      name: name.trim(),
-      description: desc.trim() || undefined,
-      preset: presetKey === CUSTOM ? undefined : presetKey,
-      width_mm: clampMm(widthMm),
-      height_mm: clampMm(heightMm),
-      ...(projectId ? { project_id: projectId } : {}),
-    }),
+    mutationFn: () => {
+      if (parsedWidthMm === null || parsedHeightMm === null || sizeError) {
+        return Promise.reject(new Error(sizeError ?? 'Invalid canvas size'));
+      }
+      return createCanvas({
+        name: name.trim(),
+        description: desc.trim() || undefined,
+        preset: presetKey === CUSTOM ? undefined : presetKey,
+        width_mm: parsedWidthMm,
+        height_mm: parsedHeightMm,
+        ...(projectId ? { project_id: projectId } : {}),
+      });
+    },
     onSuccess: (canvas) => {
       toast.success('Canvas created');
       // Prefix invalidation covers both the global list ['canvases'] and any
@@ -97,7 +118,7 @@ export function NewCanvasDialog({
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Create failed'),
   });
 
-  const canSubmit = name.trim().length > 0 && !create.isPending;
+  const canSubmit = name.trim().length > 0 && !sizeError && !create.isPending;
 
   function onPresetChange(key: string | null) {
     const next = key ?? CUSTOM;
@@ -105,8 +126,8 @@ export function NewCanvasDialog({
     if (next !== CUSTOM) {
       const preset = presets?.find((p) => p.key === next);
       if (preset) {
-        setWidthMm(preset.width_mm);
-        setHeightMm(preset.height_mm);
+        setWidthMm(String(preset.width_mm));
+        setHeightMm(String(preset.height_mm));
       }
     }
   }
@@ -167,12 +188,14 @@ export function NewCanvasDialog({
               <Input
                 id="canvas-width"
                 type="number"
-                inputMode="numeric"
+                inputMode="decimal"
                 min={MM_MIN}
                 max={MM_MAX}
+                step="0.01"
                 value={widthMm}
-                onChange={(e) => { setWidthMm(Number(e.target.value)); setPresetKey(CUSTOM); }}
-                onBlur={() => setWidthMm((v) => clampMm(v))}
+                aria-invalid={Boolean(sizeError)}
+                aria-describedby={`canvas-size-help${sizeError ? ' canvas-size-error' : ''}`}
+                onChange={(e) => { setWidthMm(e.target.value); setPresetKey(CUSTOM); }}
               />
             </div>
             <div className="space-y-1.5">
@@ -180,16 +203,21 @@ export function NewCanvasDialog({
               <Input
                 id="canvas-height"
                 type="number"
-                inputMode="numeric"
+                inputMode="decimal"
                 min={MM_MIN}
                 max={MM_MAX}
+                step="0.01"
                 value={heightMm}
-                onChange={(e) => { setHeightMm(Number(e.target.value)); setPresetKey(CUSTOM); }}
-                onBlur={() => setHeightMm((v) => clampMm(v))}
+                aria-invalid={Boolean(sizeError)}
+                aria-describedby={`canvas-size-help${sizeError ? ' canvas-size-error' : ''}`}
+                onChange={(e) => { setHeightMm(e.target.value); setPresetKey(CUSTOM); }}
               />
             </div>
           </div>
-          <p className="text-xs text-muted-foreground">Each side is clamped to {MM_MIN}–{MM_MAX} mm.</p>
+          <p id="canvas-size-help" className="text-xs text-muted-foreground">
+            Each side must be {MM_MIN}–{MM_MAX} mm; decimal presets are kept to two places.
+          </p>
+          {sizeError && <p id="canvas-size-error" role="alert" className="text-xs text-destructive">{sizeError}</p>}
 
           <div className="space-y-1.5">
             <Label htmlFor="canvas-desc">Description</Label>

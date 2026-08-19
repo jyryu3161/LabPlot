@@ -19,9 +19,12 @@ _UNIVERSAL_OPTION_KEYS = {
     "palette_name", "size", "width_in", "height_in", "color_mode", "font_scale", "base_size", "dpi",
     # Global line-thickness multiplier (×default). Universal: scales every
     # geom's linewidth in the renderer post-pass; ignored by device types.
-    "linewidth_scale",
+    "linewidth_scale", "axis_line_width_pt", "data_line_width_pt",
     "title", "subtitle", "x_label", "y_label", "legend_title",
     "hide_legend", "log_x", "log_y", "flip_coords", "x_text_angle", "legend_position",
+    # Guide layout direction ("vertical"/"horizontal"); applies to both
+    # discrete legends and continuous colorbars via theme(legend.direction).
+    "legend_direction",
     "x_min", "x_max", "y_min", "y_max",
     "custom_palette_values", "custom_palette_label", "category_colors",
     # New visual/layout options (contract with the R-engine agent). Universal so
@@ -29,6 +32,7 @@ _UNIVERSAL_OPTION_KEYS = {
     # are simply ignored by templates that do not consume them.
     "fill_alpha", "point_alpha", "error_type", "color_midpoint", "level_order",
     "facet_by", "facet_scales", "hline_at", "vline_at", "font_family", "transparent_background",
+    "redundant_series_encoding",
     # Gates the self-contained interactive plotly HTML export (bool).
     "interactive_html",
     # Statistical-annotation / model-fit options (contract with the plot-types
@@ -49,7 +53,7 @@ _UNIVERSAL_OPTION_KEYS = {
     "legend_key_size", "legend_ncol",
     # Structured overlays (custom-sanitized to shape-safe dicts/lists below):
     # free-form annotations and per-series style overrides.
-    "annotations", "series_styles",
+    "annotations", "series_styles", "element_overrides",
     # Axis-type / date-formatting / axis-break options (contract with the
     # templates.py agent + frontend). x_axis_type/date_format are choice-shaped;
     # axis_break_x/axis_break_y are 2-element [from,to] float lists validated in
@@ -57,21 +61,25 @@ _UNIVERSAL_OPTION_KEYS = {
     "x_axis_type", "date_format", "axis_break_x", "axis_break_y",
 }
 _OPTION_CHOICES = {
-    "palette_name": {"preset", "journal_muted", "okabe_ito", "tol_bright", "set2", "npg", "tableau10"},
+    "palette_name": {
+        "preset", "publication_muted_v2", "journal_muted", "okabe_ito",
+        "tol_bright", "set2", "npg", "tableau10",
+    },
     "size": {"single_column", "wide", "double_column", "square", "custom"},
     "color_mode": {"color", "grayscale"},
     "stat": {"mean", "sum", "count"},
     "palette": {"blue_red", "viridis", "magma", "inferno", "plasma", "cividis"},
     "corr_method": {"pearson", "spearman"},
     "layout": {"fr", "kk", "circle", "stress"},
-    "legend_position": {"right", "bottom", "none"},
+    "legend_position": {"right", "bottom", "top", "left", "none"},
+    "legend_direction": {"vertical", "horizontal"},
     "line_type": {"solid", "dashed", "dotted", "dotdash", "longdash"},
     "point_shape": {"circle", "square", "triangle", "diamond", "none"},
     "error_type": {"sd", "se", "ci95"},
     "facet_scales": {"fixed", "free", "free_x", "free_y"},
     # Superset of the base families plus the extra families the presets agent
     # adds; unknown values are dropped by the membership check.
-    "font_family": {"sans", "serif", "mono", "helvetica", "arial", "times", "noto_sans", "noto_serif"},
+    "font_family": {"sans", "serif", "mono", "helvetica", "arial", "dejavu_sans", "times", "noto_sans", "noto_serif"},
     # Number formatting for on-plot data labels and axis ticks.
     "data_label_format": {"number", "percent", "comma"},
     "x_tick_format": {"number", "comma", "percent", "scientific"},
@@ -103,6 +111,8 @@ _BOOL_OPTIONS = {
     "show_violin", "show_line", "sort_by_estimate", "sort_desc", "show_cluster_labels",
     # Data-label toggle and axis reversal.
     "show_data_labels", "reverse_x", "reverse_y",
+    # Color is paired with line type/marker for new grouped line figures.
+    "redundant_series_encoding",
     # Gates the self-contained interactive plotly HTML export.
     "interactive_html",
 }
@@ -115,7 +125,7 @@ _NUMBER_OPTIONS = {
     # Axis tick-count hints and legend layout sizing (clamped in _sanitize_option).
     "x_breaks", "y_breaks", "legend_key_size", "legend_ncol",
     # Global line-thickness multiplier (float, clamped in _sanitize_option).
-    "linewidth_scale",
+    "linewidth_scale", "axis_line_width_pt", "data_line_width_pt",
 }
 # Of _NUMBER_OPTIONS, the subset _sanitize_option casts to int(...) rather than
 # a clamped float. Used by ai/options_schema.py to pick "integer" vs "number".

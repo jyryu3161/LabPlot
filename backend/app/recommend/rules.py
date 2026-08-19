@@ -82,10 +82,20 @@ def suggest_charts(columns: list[dict[str, Any]], limit: int = MAX_RULE_SUGGESTI
 
     def add(plot_type: str, title: str, score: float, rationale: str,
             mapping: dict[str, Any], required: dict[str, Any], fit: str) -> None:
+        bounded_score = max(0.0, min(1.0, float(score)))
         suggestions.append({
             "plot_type": plot_type,
             "title": title,
-            "score": score,
+            "score": bounded_score,
+            # Rule suggestions have no free-text objective to distinguish from
+            # their structural heuristic, so the component scores intentionally
+            # begin equal. AI recommendations refine user intent independently.
+            "scores": {
+                "data_structure_fit": bounded_score,
+                "user_intent_match": bounded_score,
+                "statistical_suitability": bounded_score,
+                "overall": bounded_score,
+            },
             "rationale": rationale,
             "suggested_mapping": _mapping(mapping),
             "required_vars": required,
@@ -326,10 +336,14 @@ def suggest_charts(columns: list[dict[str, Any]], limit: int = MAX_RULE_SUGGESTI
     best_by_type: dict[str, dict[str, Any]] = {}
     for suggestion in suggestions:
         current = best_by_type.get(suggestion["plot_type"])
-        if current is None or suggestion["score"] > current["score"]:
+        if current is None or suggestion["scores"]["overall"] > current["scores"]["overall"]:
             best_by_type[suggestion["plot_type"]] = suggestion
 
-    out = sorted(best_by_type.values(), key=lambda s: s["score"], reverse=True)[:limit]
+    out = sorted(
+        best_by_type.values(),
+        key=lambda s: s["scores"]["overall"],
+        reverse=True,
+    )[:limit]
     for rank, suggestion in enumerate(out, start=1):
         suggestion["rank"] = rank
     return out

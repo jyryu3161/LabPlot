@@ -119,6 +119,11 @@ test.describe('figure page conveniences (U11)', () => {
     await page.goto(`/figures/${ENV.FIG}`, { waitUntil: 'networkidle' });
     await page.waitForTimeout(2500);
 
+    const editorMode = page.getByRole('group', { name: 'Editor mode' });
+    const advancedMode = editorMode.getByRole('button', { name: 'Advanced', exact: true });
+    await advancedMode.click();
+    await expect(advancedMode).toHaveAttribute('aria-pressed', 'true');
+
     const search = page.getByRole('searchbox', { name: 'Search options' });
     await search.scrollIntoViewIfNeeded();
     await expect(search).toBeVisible();
@@ -157,5 +162,33 @@ test.describe('figure page conveniences (U11)', () => {
     await expect(search).toHaveValue('');
     expect(await visibleCount(), 'original option-row count restored after clearing').toBe(originalCount);
     await expect(page.getByText(/No plot-specific options match/i)).toHaveCount(0);
+  });
+});
+
+// Regression for the stale-address-bar duplicate report (2026-08-19 feedback):
+// hard-load the source figure page, click Duplicate with no other interaction,
+// and require the URL to move off the source id. Covers both the router.push
+// path and the full-navigation fallback added after the live report. Creates
+// one copy and deletes it again; the QA_FIG source is never mutated.
+test.describe('figure duplicate keeps the address bar in sync', () => {
+  test.skip(!ENV.FIG, 'set QA_FIG to a figure id');
+
+  test('duplicate from a hard-loaded figure page navigates to the copy URL', async ({ page, request }) => {
+    const tokens = await apiLogin(request);
+    const auth = { Authorization: `Bearer ${tokens.access_token}` };
+    await authedPage(page, tokens);
+    await page.goto(`/figures/${ENV.FIG}`, { waitUntil: 'domcontentloaded' });
+
+    const duplicateButton = page.getByRole('button', { name: /duplicate/i }).first();
+    await duplicateButton.waitFor({ timeout: 30_000 });
+    await duplicateButton.click();
+    await expect(page.getByText('Figure duplicated')).toBeVisible({ timeout: 60_000 });
+
+    await expect(page).toHaveURL(new RegExp(`/figures/(?!${ENV.FIG})[0-9a-f-]+`), { timeout: 15_000 });
+    const copyId = page.url().split('/figures/')[1].split(/[/?#]/)[0];
+    expect(copyId).not.toBe(ENV.FIG);
+
+    const del = await request.delete(`${ENV.BASE}/api/figures/${copyId}`, { headers: auth });
+    expect([200, 204]).toContain(del.status());
   });
 });

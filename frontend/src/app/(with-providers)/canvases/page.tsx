@@ -4,7 +4,7 @@ import { useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { deleteCanvas, duplicateCanvas, listCanvases, listProjects } from '@/lib/api';
+import { deleteCanvas, duplicateCanvas, listCanvases, listProjects, updateCanvas } from '@/lib/api';
 import { AppHeader } from '@/components/layout/AppHeader';
 import { NewCanvasDialog } from '@/components/canvases/NewCanvasDialog';
 import { Card, CardContent } from '@/components/ui/card';
@@ -12,7 +12,16 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { AlertTriangle, Copy, FlaskConical, LayoutGrid, Layers, Loader2, Plus, RotateCcw, Search, SearchX, Trash2 } from 'lucide-react';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import { AlertTriangle, Check, Copy, FlaskConical, LayoutGrid, Layers, Loader2, MoreHorizontal, Pencil, Plus, RotateCcw, Search, SearchX, Trash2, X } from 'lucide-react';
+
+const CANVASES_PER_PAGE = 18;
 
 function formatUpdated(iso: string): string {
   const d = new Date(iso);
@@ -24,7 +33,11 @@ export default function CanvasesPage() {
   const qc = useQueryClient();
   const router = useRouter();
   const [search, setSearch] = useState('');
+  const [projectFilter, setProjectFilter] = useState('all');
+  const [page, setPage] = useState(1);
   const [open, setOpen] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingName, setEditingName] = useState('');
 
   const { data: canvases, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['canvases'],
@@ -41,8 +54,20 @@ export default function CanvasesPage() {
   const visibleCanvases = useMemo(() => {
     if (!canvases) return [];
     const q = search.trim().toLowerCase();
-    return q ? canvases.filter((c) => c.name.toLowerCase().includes(q)) : canvases;
-  }, [canvases, search]);
+    return canvases.filter((canvas) => (
+      (!q || canvas.name.toLowerCase().includes(q))
+      && (
+        projectFilter === 'all'
+        || (projectFilter === 'personal' ? !canvas.project_id : canvas.project_id === projectFilter)
+      )
+    ));
+  }, [canvases, projectFilter, search]);
+  const pageCount = Math.max(1, Math.ceil(visibleCanvases.length / CANVASES_PER_PAGE));
+  const currentPage = Math.min(page, pageCount);
+  const pagedCanvases = visibleCanvases.slice(
+    (currentPage - 1) * CANVASES_PER_PAGE,
+    currentPage * CANVASES_PER_PAGE,
+  );
 
   const del = useMutation({
     mutationFn: deleteCanvas,
@@ -54,6 +79,43 @@ export default function CanvasesPage() {
     onSuccess: () => { toast.success('Canvas duplicated'); qc.invalidateQueries({ queryKey: ['canvases'] }); },
     onError: (e) => toast.error(e instanceof Error ? e.message : 'Duplicate failed'),
   });
+  const rename = useMutation({
+    mutationFn: ({ id, name }: { id: string; name: string }) => updateCanvas(id, { name }),
+    onSuccess: (_, { id }) => {
+      toast.success('Canvas renamed');
+      setEditingId(null);
+      setEditingName('');
+      qc.invalidateQueries({ queryKey: ['canvases'] });
+      focusCanvasActions(id);
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : 'Rename failed'),
+  });
+
+  function focusCanvasActions(id: string) {
+    requestAnimationFrame(() => {
+      document.querySelector<HTMLButtonElement>(`[data-canvas-actions-id="${id}"]`)?.focus();
+    });
+  }
+
+  function beginRename(id: string, name: string) {
+    setEditingId(id);
+    setEditingName(name);
+  }
+
+  function cancelRename(id: string) {
+    setEditingId(null);
+    setEditingName('');
+    focusCanvasActions(id);
+  }
+
+  function submitRename(id: string, currentName: string) {
+    const name = editingName.trim();
+    if (!name || name === currentName) {
+      cancelRename(id);
+      return;
+    }
+    rename.mutate({ id, name });
+  }
 
   return (
     <div className="min-h-screen bg-muted/20">
@@ -81,12 +143,23 @@ export default function CanvasesPage() {
           </div>
         ) : (
           <>
-            <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center">
               <div className="relative w-full sm:max-w-xs">
                 <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                 <Label htmlFor="canvases-search" className="sr-only">Search canvases</Label>
-                <Input id="canvases-search" type="search" placeholder="Search canvases…" className="pl-8" value={search} onChange={(e) => setSearch(e.target.value)} />
+                <Input id="canvases-search" type="search" placeholder="Search canvases…" className="pl-8" value={search} onChange={(e) => { setSearch(e.target.value); setPage(1); }} />
               </div>
+              <Label htmlFor="canvases-project" className="sr-only">Filter canvases by project</Label>
+              <select
+                id="canvases-project"
+                className="h-9 w-full rounded-md border bg-background px-3 text-sm sm:w-56"
+                value={projectFilter}
+                onChange={(event) => { setProjectFilter(event.target.value); setPage(1); }}
+              >
+                <option value="all">All projects</option>
+                <option value="personal">No project</option>
+                {(projects ?? []).map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+              </select>
             </div>
             {visibleCanvases.length === 0 ? (
               <div className="rounded-lg border border-dashed p-12 text-center text-muted-foreground">
@@ -94,46 +167,85 @@ export default function CanvasesPage() {
               </div>
             ) : (
               <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                {visibleCanvases.map((c) => (
+                {pagedCanvases.map((c) => (
                   <Card key={c.id} className="group h-full transition hover:shadow-md">
                     <CardContent className="p-4">
                       <div className="flex items-start justify-between gap-2">
-                        <button
-                          type="button"
-                          onClick={() => router.push(`/canvases/${c.id}`)}
-                          className="min-w-0 flex-1 text-left"
-                        >
-                          <p className="flex items-center gap-2 truncate font-medium">
-                            <LayoutGrid className="h-4 w-4 shrink-0 text-primary" />
-                            <span className="truncate">{c.name}</span>
-                          </p>
-                          <p className="mt-1 text-xs text-muted-foreground">
-                            {c.width_mm} × {c.height_mm} mm
-                          </p>
-                        </button>
-                        <div className="flex items-center gap-0.5">
-                          <Button
+                        {editingId === c.id ? (
+                          <div className="min-w-0 flex-1 space-y-1">
+                            <Input
+                              value={editingName}
+                              maxLength={255}
+                              autoFocus
+                              aria-label={`New name for ${c.name}`}
+                              onChange={(event) => setEditingName(event.target.value)}
+                              onKeyDown={(event) => {
+                                if (event.key === 'Enter') submitRename(c.id, c.name);
+                                if (event.key === 'Escape') cancelRename(c.id);
+                              }}
+                            />
+                            <div className="flex gap-1">
+                              <Button type="button" size="icon-xs" variant="secondary" aria-label={`Save renamed canvas ${c.name}`} disabled={rename.isPending} onClick={() => submitRename(c.id, c.name)}>
+                                {rename.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}
+                              </Button>
+                              <Button type="button" size="icon-xs" variant="ghost" aria-label={`Cancel renaming ${c.name}`} onClick={() => cancelRename(c.id)}>
+                                <X className="h-3 w-3" />
+                              </Button>
+                            </div>
+                          </div>
+                        ) : (
+                          <button
                             type="button"
-                            variant="ghost"
-                            size="sm"
-                            aria-label={`Duplicate canvas ${c.name}`}
-                            title="Duplicate this canvas (panels, annotations included)"
-                            onClick={() => duplicate.mutate(c.id)}
-                            disabled={duplicate.isPending}
+                            onClick={() => router.push(`/canvases/${c.id}`)}
+                            className="min-w-0 flex-1 text-left"
                           >
-                            <Copy className="h-4 w-4 text-muted-foreground" />
-                          </Button>
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="sm"
-                            aria-label={`Delete canvas ${c.name}`}
-                            onClick={() => { if (confirm(`Delete canvas "${c.name}"?`)) del.mutate(c.id); }}
-                            disabled={del.isPending}
+                            <p className="flex items-center gap-2 truncate font-medium">
+                              <LayoutGrid className="h-4 w-4 shrink-0 text-primary" />
+                              <span className="truncate">{c.name}</span>
+                            </p>
+                            <p className="mt-1 text-xs text-muted-foreground">
+                              {c.width_mm} × {c.height_mm} mm
+                            </p>
+                          </button>
+                        )}
+                        <DropdownMenu>
+                          <DropdownMenuTrigger
+                            render={(
+                              <Button
+                                data-canvas-actions-id={c.id}
+                                type="button"
+                                variant="ghost"
+                                size="icon-sm"
+                                aria-label={`Canvas actions for ${c.name}`}
+                              />
+                            )}
                           >
-                            <Trash2 className="h-4 w-4 text-muted-foreground" />
-                          </Button>
-                        </div>
+                            <MoreHorizontal className="h-4 w-4 text-muted-foreground" />
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end" className="w-48" aria-label={`Canvas actions for ${c.name}`}>
+                            <DropdownMenuItem
+                              disabled={rename.isPending && editingId === c.id}
+                              onClick={() => beginRename(c.id, c.name)}
+                            >
+                              <Pencil /> Rename
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              disabled={duplicate.isPending}
+                              title="Duplicate this canvas (panels, annotations included)"
+                              onClick={() => duplicate.mutate(c.id)}
+                            >
+                              <Copy /> Duplicate
+                            </DropdownMenuItem>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem
+                              variant="destructive"
+                              disabled={del.isPending}
+                              onClick={() => { if (confirm(`Delete canvas "${c.name}"?`)) del.mutate(c.id); }}
+                            >
+                              <Trash2 /> Delete
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
                       </div>
                       <button
                         type="button"
@@ -158,6 +270,13 @@ export default function CanvasesPage() {
                   </Card>
                 ))}
               </div>
+            )}
+            {visibleCanvases.length > CANVASES_PER_PAGE && (
+              <nav className="mt-6 flex items-center justify-center gap-3" aria-label="Canvases pagination">
+                <Button type="button" variant="outline" size="sm" disabled={currentPage <= 1} onClick={() => setPage(currentPage - 1)}>Previous</Button>
+                <span className="text-sm text-muted-foreground" aria-live="polite">Page {currentPage} of {pageCount} · {visibleCanvases.length} canvases</span>
+                <Button type="button" variant="outline" size="sm" disabled={currentPage >= pageCount} onClick={() => setPage(currentPage + 1)}>Next</Button>
+              </nav>
             )}
           </>
         )}

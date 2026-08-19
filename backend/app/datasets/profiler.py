@@ -12,10 +12,18 @@ import pandas as pd
 
 _LOG2FC_RE = re.compile(r"(log2?\s*fold|log2fc|logfc|fold[_\s]*change|l2fc|\blfc\b)", re.I)
 _PVAL_RE = re.compile(r"(p[\._\s-]*val|p[\._\s-]*adj|adj[\._\s-]*p|padj|\bpval\b|\bfdr\b|q[\._\s-]*val|\bqvalue\b|\bp\b)", re.I)
-_GENE_RE = re.compile(r"(gene|symbol|^id$|ensembl|transcript|probe|feature)", re.I)
+_GENE_RE = re.compile(r"(gene|symbol|ensembl|transcript|probe|feature)", re.I)
 _TIME_RE = re.compile(r"(time|day|days|month|week|hour|hr|os[_\.]?time|surv|duration|followup|follow[_\s]*up|date|timepoint)", re.I)
 _STATUS_RE = re.compile(r"(status|event|vital|death|dead|os[_\.]?event|censor|deceased|relapse|recur)", re.I)
 _GROUP_RE = re.compile(r"(group|treatment|condition|cohort|arm|genotype|cell[_\s]*line|sample[_\s]*type|class|label|category|type|sex|gender|stage|grade)", re.I)
+_REPLICATE_RE = re.compile(
+    r"(^|[_\s-])(replicate|rep|repeat)([_\s-]*(id|no|num|number))?($|[_\s-])",
+    re.I,
+)
+_ID_RE = re.compile(
+    r"(^id$|^(sample|subject|patient|participant|animal|mouse|donor|individual)[_\s-]*(id|identifier|no|num|number)$)",
+    re.I,
+)
 
 
 def _clean(value):
@@ -72,6 +80,13 @@ def _detect_role(name: str, series: pd.Series, dtype_kind: str, n_unique: int, n
         return "status"
     if _TIME_RE.search(lname):
         return "time"
+    # Experimental-unit identifiers are structural columns, not outcomes for
+    # automatic group comparisons. Keep gene/feature identifiers on the gene
+    # path below (for example, ``gene_id`` and ``ensembl_id``).
+    if _REPLICATE_RE.search(lname):
+        return "replicate"
+    if _ID_RE.search(lname):
+        return "id"
     if _GENE_RE.search(lname) and n_unique > max(10, 0.5 * n_rows):
         return "gene"
     if not is_numeric and _GROUP_RE.search(lname):

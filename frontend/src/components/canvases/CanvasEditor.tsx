@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { createPortal } from 'react-dom';
@@ -10,11 +10,12 @@ import Konva from 'konva';
 import { Stage, Layer, Rect, Group, Image as KonvaImage, Text, Transformer, Line, Circle, Shape } from 'react-konva';
 import {
   getCanvas, updateCanvas, addCanvasPanel, addCanvasImagePanel, updateCanvasPanel, deleteCanvasPanel,
-  renderCanvasPreview, downloadCanvasExport, duplicateFigure, duplicateCanvas, listProjects, ApiError,
+  renderCanvasPreview, downloadCanvasExport, duplicateFigure, duplicateCanvas, listProjects, getFigure, ApiError,
   type CanvasExportFormat,
 } from '@/lib/api';
 import type { CanvasDetail, CanvasPanel, CanvasAnnotation, FigureListItem } from '@/lib/types';
 import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
@@ -25,7 +26,7 @@ import {
 import {
   Loader2, Plus, Trash2, ArrowUp, ArrowDown, Maximize2, ZoomIn, ZoomOut, Lock, Unlock, Tag, Pencil, Check,
   Download, Undo2, Redo2, ExternalLink, FlaskConical, CopyPlus, Grid3x3, Magnet, Ruler, ClipboardPaste, Crop,
-  ImagePlus,
+  ImagePlus, RefreshCw,
   AlignStartVertical, AlignCenterVertical, AlignEndVertical,
   AlignStartHorizontal, AlignCenterHorizontal, AlignEndHorizontal,
   AlignHorizontalDistributeCenter, AlignVerticalDistributeCenter,
@@ -35,7 +36,11 @@ import {
 } from './mm';
 import { CanvasHistory, type PanelFields, type PanelSnapshot, type CanvasSize } from './canvasHistory';
 import { FigurePickerDialog } from './FigurePickerDialog';
-import { CanvasColorEditor } from './CanvasColorEditor';
+import {
+  CanvasColorEditor,
+  type CanvasImageApplyAck,
+  type WaitForCanvasImageApply,
+} from './CanvasColorEditor';
 import { CanvasApplyStyle } from './CanvasApplyStyle';
 import { CanvasHelpPopover, CanvasHintsBar } from './CanvasHints';
 import { CanvasRulers } from './CanvasRulers';
@@ -43,10 +48,15 @@ import { useAuthContext } from '@/components/auth/AuthProvider';
 import { CanvasAnnotationNode } from './CanvasAnnotationNode';
 import { CanvasAnnotationInspector } from './CanvasAnnotationInspector';
 import { CanvasAnnotationToolbar, TOOL_KEY_MAP, type ToolId } from './CanvasAnnotationToolbar';
+import { CanvasLayersPanel } from './CanvasLayersPanel';
 import {
   originMm, sizeMm, translateAnnotation, createAnnotation, nextAnnotationZ, clampNum, annotationBoxPx,
   MIN_CREATE_DRAG_MM, sanitizeText, ptToMm as annPtToMm, FONT_PT_DEFAULT as ANN_FONT_PT_DEFAULT,
 } from './annotations';
+import {
+  subscribeToFigureVersions,
+  type FigureVersionCreatedEvent,
+} from '@/lib/figure-version-events';
 
 // U9: grid + grid-snap toggle persistence keys (localStorage) and the grid's
 // fixed pitch (mm) — 5mm minor lines, every 2nd (10mm) drawn as an accent.
@@ -55,6 +65,7 @@ const GRID_SNAP_KEY = 'labplot.canvas.grid-snap';
 const GRID_MINOR_MM = 5;
 const GRID_MAJOR_EVERY = 2; // 2 * 5mm = 10mm accent lines
 const GRID_MAX_LINES_PER_AXIS = 400; // defensive cap, never hit in practice (canvas <= 500mm / 5mm = 100)
+const PANEL_IMAGE_APPLY_TIMEOUT_MS = 60_000;
 
 function readBoolPref(key: string): boolean {
   try {
@@ -126,7 +137,33 @@ function gridSnapTargetsPx(sizeMm: number, pxPerMm: number): number[] {
 const imageCache = new Map<string, HTMLImageElement>();
 function panelKey(panel: Pick<CanvasPanel, 'figure_id' | 'image_key' | 'effective_version_id' | 'width_mm' | 'height_mm'>): string {
   if (panel.image_key) return `image|${panel.image_key}`;
-  return `${panel.figure_id}|${panel.effective_version_id ?? 'latest'}|${Math.round(panel.width_mm)}|${Math.round(panel.height_mm)}`;
+  // This must match the exact (two-decimal) dimensions sent to the preview
+  // API. Integer rounding let a 100.1→100.2mm resize reuse the wrong image.
+  return `${panel.figure_id}|${panel.effective_version_id ?? 'latest'}|${roundMm(panel.width_mm)}|${roundMm(panel.height_mm)}`;
+}
+
+type PanelImageStatus = 'loading' | 'ready' | 'error';
+type PanelImageLoadState = {
+  key: string;
+  status: PanelImageStatus;
+  img: HTMLImageElement | null;
+  error: string | null;
+};
+type PanelImageReport = Omit<PanelImageLoadState, 'img'> & { retry: () => void };
+type PanelImageWaiter = {
+  resolve: () => void;
+  reject: (error: Error) => void;
+  timeoutId: ReturnType<typeof setTimeout>;
+};
+
+function initialPanelImageState(key: string): PanelImageLoadState {
+  const cached = imageCache.get(key) ?? null;
+  return {
+    key,
+    status: cached ? 'ready' : 'loading',
+    img: cached,
+    error: null,
+  };
 }
 
 /**
@@ -135,27 +172,40 @@ function panelKey(panel: Pick<CanvasPanel, 'figure_id' | 'image_key' | 'effectiv
  * hook calls `renderCanvasPreview` at the NEW mm size and swaps the image — this
  * is the M2 re-layout (the backend preserves absolute-pt fonts at the new size).
  */
-function usePanelImage(panel: CanvasPanel): { img: HTMLImageElement | null; loading: boolean } {
+function usePanelImage(panel: CanvasPanel): PanelImageLoadState & { retry: () => void } {
   const key = panelKey(panel);
-  const [img, setImg] = useState<HTMLImageElement | null>(() => imageCache.get(key) ?? null);
-  const [loading, setLoading] = useState<boolean>(() => !imageCache.has(key));
+  const [state, setState] = useState<PanelImageLoadState>(() => initialPanelImageState(key));
+  const [attempt, setAttempt] = useState(0);
+
+  // React preserves hook state when a panel's version/size key changes. Never
+  // return the state belonging to the previous key, even for the single render
+  // before the effect below starts. This is the stale-image bug's critical
+  // guard: a new version is either its own cached image or a blank loading box.
+  const current = state.key === key ? state : initialPanelImageState(key);
 
   useEffect(() => {
     let cancelled = false;
     const cached = imageCache.get(key);
     if (cached) {
-      setImg(cached);
-      setLoading(false);
+      // Another panel with the same figure/version/size can finish between a
+      // retry render and this effect. Promote that shared cached identity into
+      // this hook too; otherwise its explicit loading state would never end.
+      setState((currentState) => (
+        currentState.key === key && currentState.status === 'ready' && currentState.img === cached
+          ? currentState
+          : { key, status: 'ready', img: cached, error: null }
+      ));
       return;
     }
-    setLoading(true);
+    let pendingImage: HTMLImageElement | null = null;
+    let cancelPendingLoad: (() => void) | null = null;
     (async () => {
       try {
         let src: string;
         if (panel.image_key) {
           // Imported image: the stored (sanitized) blob is served directly —
           // no re-render on resize, ever.
-          if (!panel.render_url) { setLoading(false); return; }
+          if (!panel.render_url) throw new Error('The imported image URL is unavailable.');
           src = panel.render_url;
         } else {
           // Re-layout render at the panel's CURRENT physical size (mm).
@@ -168,22 +218,44 @@ function usePanelImage(panel: CanvasPanel): { img: HTMLImageElement | null; load
           src = svg_url;
         }
         const image = new window.Image();
-        image.onload = () => {
-          if (cancelled) return;
-          imageCache.set(key, image);
-          setImg(image);
-          setLoading(false);
-        };
-        image.onerror = () => { if (!cancelled) setLoading(false); };
-        image.src = src; // SVG loads fine as an <img> src
-      } catch {
-        if (!cancelled) setLoading(false);
+        pendingImage = image;
+        await new Promise<void>((resolve, reject) => {
+          cancelPendingLoad = resolve;
+          image.onload = () => resolve();
+          image.onerror = () => reject(new Error('The rendered image could not be loaded.'));
+          image.src = src; // SVG loads fine as an <img> src
+        });
+        if (cancelled) return;
+        imageCache.set(key, image);
+        setState({ key, status: 'ready', img: image, error: null });
+      } catch (error) {
+        if (!cancelled) {
+          const message = error instanceof Error && error.message
+            ? error.message
+            : 'The panel preview could not be rendered.';
+          setState({ key, status: 'error', img: null, error: message });
+        }
       }
     })();
-    return () => { cancelled = true; };
-  }, [key, panel.figure_id, panel.image_key, panel.render_url, panel.effective_version_id, panel.width_mm, panel.height_mm]);
+    return () => {
+      cancelled = true;
+      if (pendingImage) {
+        pendingImage.onload = null;
+        pendingImage.onerror = null;
+      }
+      // Settle the promise if a version/size change cancels an in-flight
+      // image. Leaving it pending forever retains the old panel closure.
+      cancelPendingLoad?.();
+    };
+  }, [attempt, key, panel.figure_id, panel.image_key, panel.render_url, panel.effective_version_id, panel.width_mm, panel.height_mm]);
 
-  return { img, loading };
+  const retry = useCallback(() => {
+    imageCache.delete(key);
+    setState({ key, status: 'loading', img: null, error: null });
+    setAttempt((value) => value + 1);
+  }, [key]);
+
+  return { ...current, retry };
 }
 
 // ── one panel node ──────────────────────────────────────────────────────────
@@ -201,6 +273,7 @@ function CanvasPanelNode({
   onDragMove,
   onDragEnd,
   onTransformEnd,
+  onImageStatus,
 }: {
   panel: CanvasPanel;
   pxPerMm: number;
@@ -219,10 +292,24 @@ function CanvasPanelNode({
   onDragMove: (panel: CanvasPanel, e: Konva.KonvaEventObject<DragEvent>) => void;
   onDragEnd: (panel: CanvasPanel, e: Konva.KonvaEventObject<DragEvent>) => void;
   onTransformEnd: (panel: CanvasPanel, e: Konva.KonvaEventObject<Event>) => void;
+  onImageStatus: (panelId: string, report: PanelImageReport | null) => void;
 }) {
   const groupRef = useRef<Konva.Group>(null);
-  const { img, loading } = usePanelImage(panel);
+  const { key: imageKey, img, status: imageStatus, error: imageError, retry } = usePanelImage(panel);
+  const loading = imageStatus === 'loading';
+  const failed = imageStatus === 'error';
   const [hovered, setHovered] = useState(false);
+
+  useEffect(() => {
+    onImageStatus(panel.id, {
+      key: imageKey,
+      status: imageStatus,
+      error: imageError,
+      retry,
+    });
+  }, [imageError, imageKey, imageStatus, onImageStatus, panel.id, retry]);
+
+  useEffect(() => () => onImageStatus(panel.id, null), [onImageStatus, panel.id]);
 
   useEffect(() => {
     registerNode(panel.id, groupRef.current);
@@ -282,13 +369,13 @@ function CanvasPanelNode({
         // Border only on hover; selection is indicated by the Transformer.
         // Exception: a failed render (no image, not loading) keeps a dashed
         // border so the panel stays discoverable instead of invisible.
-        strokeEnabled={(hovered && !selected) || (!img && !loading)}
-        dash={!img && !loading ? [4, 4] : undefined}
+        strokeEnabled={(hovered && !selected) || failed}
+        dash={failed ? [4, 4] : undefined}
       />
       {img && <KonvaImage image={img} x={imgX} y={imgY} width={imgW} height={imgH} listening={false} />}
-      {!img && !loading && (
+      {failed && (
         <Text
-          text={panel.image_key ? 'image unavailable' : 'render failed'}
+          text={panel.image_key ? 'image unavailable — select to retry' : 'update failed — select to retry'}
           x={0}
           y={h / 2 - 6}
           width={w}
@@ -418,6 +505,101 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   // selectedId (single-panel toolbar / color+text editors); 2+ ids switch the
   // toolbar to the align/distribute controls (see `selectedPanel` below).
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  // CanvasPanelNode owns the actual HTMLImageElement load. Mirror its key-
+  // scoped status here so the version badge cannot claim "Latest" until the
+  // matching image fired onload, and can expose a retry after onerror.
+  const [panelImageReports, setPanelImageReports] = useState<Record<string, PanelImageReport>>({});
+  const panelImageReportsRef = useRef<Record<string, PanelImageReport>>({});
+  const panelImageWaitersRef = useRef<Map<string, Map<string, Set<PanelImageWaiter>>>>(new Map());
+
+  const rejectPanelImageWaiters = useCallback((panelId: string, message: string) => {
+    const waitsByKey = panelImageWaitersRef.current.get(panelId);
+    if (!waitsByKey) return;
+    for (const waiters of waitsByKey.values()) {
+      for (const waiter of waiters) {
+        clearTimeout(waiter.timeoutId);
+        waiter.reject(new Error(message));
+      }
+    }
+    panelImageWaitersRef.current.delete(panelId);
+  }, []);
+
+  const handlePanelImageStatus = useCallback((panelId: string, report: PanelImageReport | null) => {
+    if (!report) {
+      const nextReports = { ...panelImageReportsRef.current };
+      delete nextReports[panelId];
+      panelImageReportsRef.current = nextReports;
+      rejectPanelImageWaiters(panelId, 'The panel was removed before its updated image could be applied.');
+    } else {
+      panelImageReportsRef.current = { ...panelImageReportsRef.current, [panelId]: report };
+      const waitsByKey = panelImageWaitersRef.current.get(panelId);
+      const waiters = waitsByKey?.get(report.key);
+      if (waiters && report.status !== 'loading') {
+        for (const waiter of waiters) {
+          clearTimeout(waiter.timeoutId);
+          if (report.status === 'ready') waiter.resolve();
+          else waiter.reject(new Error(report.error ?? 'The updated canvas image could not be loaded.'));
+        }
+        waitsByKey!.delete(report.key);
+        if (waitsByKey!.size === 0) panelImageWaitersRef.current.delete(panelId);
+      }
+    }
+    setPanelImageReports((current) => {
+      if (!report) {
+        if (!(panelId in current)) return current;
+        const next = { ...current };
+        delete next[panelId];
+        return next;
+      }
+      const previous = current[panelId];
+      if (previous
+        && previous.key === report.key
+        && previous.status === report.status
+        && previous.error === report.error
+        && previous.retry === report.retry) return current;
+      return { ...current, [panelId]: report };
+    });
+  }, [rejectPanelImageWaiters]);
+
+  const waitForCanvasImageApply = useCallback<WaitForCanvasImageApply>((expected: CanvasImageApplyAck) => {
+    const current = panelImageReportsRef.current[expected.panelId];
+    if (current?.key === expected.imageKey) {
+      if (current.status === 'ready') return Promise.resolve();
+      if (current.status === 'error') {
+        return Promise.reject(new Error(current.error ?? 'The updated canvas image could not be loaded.'));
+      }
+    }
+
+    return new Promise<void>((resolve, reject) => {
+      let waitsByKey = panelImageWaitersRef.current.get(expected.panelId);
+      if (!waitsByKey) {
+        waitsByKey = new Map();
+        panelImageWaitersRef.current.set(expected.panelId, waitsByKey);
+      }
+      let waiters = waitsByKey.get(expected.imageKey);
+      if (!waiters) {
+        waiters = new Set();
+        waitsByKey.set(expected.imageKey, waiters);
+      }
+      const waiter: PanelImageWaiter = {
+        resolve,
+        reject,
+        timeoutId: setTimeout(() => {
+          waiters!.delete(waiter);
+          if (waiters!.size === 0) waitsByKey!.delete(expected.imageKey);
+          if (waitsByKey!.size === 0) panelImageWaitersRef.current.delete(expected.panelId);
+          reject(new Error('Timed out while applying the updated image to the canvas.'));
+        }, PANEL_IMAGE_APPLY_TIMEOUT_MS),
+      };
+      waiters.add(waiter);
+    });
+  }, []);
+
+  useEffect(() => () => {
+    for (const panelId of panelImageWaitersRef.current.keys()) {
+      rejectPanelImageWaiters(panelId, 'The canvas was closed before its updated image could be applied.');
+    }
+  }, [rejectPanelImageWaiters]);
   // U7: rubber-band marquee, in CANVAS ("fit px", un-zoomed) coordinates — same
   // space as panel x/y so hit-testing is a plain AABB overlap check.
   const [marquee, setMarquee] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
@@ -538,7 +720,7 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   // Same indirection for the arrow-key nudge handler (defined later, after the
   // mutations it batches through) — the keydown effect only re-subscribes on
   // selectedIds changes, so it can't close over a fresh nudgeSelected directly.
-  const nudgeSelectedRef = useRef<(key: string, shift: boolean) => void>(() => {});
+  const nudgeSelectedRef = useRef<(key: string, shift: boolean, allowBleed: boolean) => void>(() => {});
   // U9: same indirection for the '1' / Shift+1 / Shift+2 zoom shortcuts —
   // all three close over view/viewport/selection state that changes far more
   // often than the keydown effect (deps: [selectedIds]) re-subscribes.
@@ -599,7 +781,14 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   const [activeTool, setActiveTool] = useState<ToolId>('select');
   // In-progress shape/line/arrow creation drag, in CANVAS ("fit px") coords —
   // same space + window-mouseup-fallback convention as the U7 marquee.
-  const [drawing, setDrawing] = useState<{ type: Exclude<ToolId, 'select' | 'text'>; x0: number; y0: number; x1: number; y1: number } | null>(null);
+  const [drawing, setDrawing] = useState<{
+    type: Exclude<ToolId, 'select' | 'text'>;
+    x0: number;
+    y0: number;
+    x1: number;
+    y1: number;
+    allowBleed: boolean;
+  } | null>(null);
   const drawingRef = useRef<typeof drawing>(null);
   const finalizeDrawingRef = useRef<() => void>(() => {});
   // Inline text editor overlay (opened immediately on text-tool creation and
@@ -645,6 +834,51 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   // color/text editors, overlay). 2+ selected panels switch to the
   // align/distribute toolbar instead (rendered where selectedPanel is null).
   const selectedPanel = selectedIds.length === 1 ? panels.find((p) => p.id === selectedIds[0]) ?? null : null;
+  const selectedFigureId = selectedPanel?.figure_id ?? null;
+  const { data: selectedFigure } = useQuery({
+    queryKey: ['figure', selectedFigureId],
+    queryFn: () => getFigure(selectedFigureId!),
+    enabled: Boolean(selectedFigureId),
+  });
+  const [figureVersionNotices, setFigureVersionNotices] = useState<Record<string, FigureVersionCreatedEvent>>({});
+
+  // A figure editor can create a new version in another tab while this canvas
+  // remains visible. Visibility/focus refetches are not reliable for that
+  // workflow (a separate window may never hide this document), so consume the
+  // explicit version event and rotate every follow-latest panel immediately.
+  useEffect(() => subscribeToFigureVersions((event) => {
+    const current = qc.getQueryData<CanvasDetail>(queryKey);
+    const followsThisFigure = current?.panels.some(
+      (p) => p.figure_id === event.figureId && !p.pinned_version_id,
+    );
+    const containsThisFigure = current?.panels.some((p) => p.figure_id === event.figureId);
+    if (!containsThisFigure) return;
+
+    setFigureVersionNotices((old) => ({ ...old, [event.figureId]: event }));
+    void qc.invalidateQueries({ queryKey: ['figure', event.figureId] });
+
+    if (followsThisFigure) {
+      // Optimistically rotate the render key now; the subsequent GET remains
+      // the source of truth and fills the rest of the panel metadata.
+      qc.setQueryData<CanvasDetail>(queryKey, (old) => old ? {
+        ...old,
+        panels: old.panels.map((p) => (
+          p.figure_id === event.figureId && !p.pinned_version_id
+            ? { ...p, effective_version_id: event.versionId }
+            : p
+        )),
+      } : old);
+    }
+
+    // Do not wipe a local-only text annotation while its inline editor is
+    // open. The optimistic version-id rotation above still refreshes panels;
+    // the next annotation commit returns fresh server canvas data.
+    if (freshTextIdRef.current) {
+      void qc.invalidateQueries({ queryKey, refetchType: 'none' });
+    } else {
+      void qc.invalidateQueries({ queryKey });
+    }
+  }), [qc, queryKey]);
   // U8: selection composition drives which sidebar/toolbar shows (see render).
   const selectedPanelIds = useMemo(() => selectedIds.filter((id) => panels.some((p) => p.id === id)), [selectedIds, panels]);
   const selectedAnnotationIds = useMemo(() => selectedIds.filter((id) => annotations.some((a) => a.id === id)), [selectedIds, annotations]);
@@ -657,8 +891,33 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   // multiplies this via the Stage scale (uniform).
   const pxPerMm = useMemo(
     () => (canvas ? fitPxPerMm(canvas.width_mm, canvas.height_mm, viewport.w, viewport.h) : 1),
-    [canvas?.width_mm, canvas?.height_mm, viewport.w, viewport.h, canvas],
+    [canvas?.width_mm, canvas?.height_mm, viewport.w, viewport.h],
   );
+  // Panels normally cannot be placed outside the sheet, but Alt-modified
+  // move/resize/nudge gestures intentionally allow a bleed area. Existing
+  // canvases can also contain legacy off-sheet panels, so derive this from
+  // persisted geometry rather than from the current gesture state.
+  const outsidePanelIds = (() => {
+    if (!canvas) return new Set<string>();
+    return new Set(panels.filter((panel) => (
+      panel.x_mm < -0.001
+      || panel.y_mm < -0.001
+      || panel.x_mm + panel.width_mm > canvas.width_mm + 0.001
+      || panel.y_mm + panel.height_mm > canvas.height_mm + 0.001
+    )).map((panel) => panel.id));
+  })();
+  // Recomputed on every render so a post-paint text measurement (which calls
+  // bumpMeasure) can immediately flag a long label crossing the export edge.
+  const outsideAnnotationIds = (() => {
+    if (!canvas) return new Set<string>();
+    const canvasWpx = mmToPx(canvas.width_mm, pxPerMm);
+    const canvasHpx = mmToPx(canvas.height_mm, pxPerMm);
+    return new Set(annotations.filter((annotation) => {
+      const box = annotationBoxPx(annotation, pxPerMm, measuredTextRef.current.get(annotation.id));
+      return box.x0 < -0.01 || box.y0 < -0.01
+        || box.x1 > canvasWpx + 0.01 || box.y1 > canvasHpx + 0.01;
+    }).map((annotation) => annotation.id));
+  })();
 
   // U9: grid line positions (visible-range only — see computeGridLines) for
   // the grid overlay. Recomputed only while the grid is actually shown.
@@ -792,7 +1051,7 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
         deleteSelected();
       } else if (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
         e.preventDefault();
-        nudgeSelectedRef.current(e.key, e.shiftKey);
+        nudgeSelectedRef.current(e.key, e.shiftKey, e.altKey);
       }
     }
     window.addEventListener('keydown', onKey);
@@ -1330,7 +1589,6 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
       const next = cur.filter((id) => panels.some((p) => p.id === id) || annotations.some((a) => a.id === id));
       return next.length === cur.length ? cur : next;
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [panels, annotations]);
 
   // ── export: compose the canvas into a file (vector SVG/PDF, or raster
@@ -1361,19 +1619,48 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   // (groupMoveRef is only set on that one item's dragstart). U8: genericized
   // to an id (was `panel: CanvasPanel`) so it works for annotation leaders too
   // — it's pure node-translation and never needed panel fields.
-  function applyGroupDragDelta(leaderId: string, node: Konva.Group) {
+  function applyGroupDragDelta(leaderId: string, node: Konva.Group, allowPanelBleed: boolean) {
     const group = groupMoveRef.current;
     if (!group || group.leaderId !== leaderId) return;
     const start = group.startPx.get(leaderId);
     if (!start) return;
-    const dx = node.x() - start.x;
-    const dy = node.y() - start.y;
+    let dx = node.x() - start.x;
+    let dy = node.y() - start.y;
+
+    // A mixed or all-panel group must move as one rigid unit. When bleed is
+    // not explicitly enabled, intersect every selected panel's legal delta
+    // range so the first panel to reach an edge stops the whole group. Pure
+    // annotation groups keep their existing unrestricted movement semantics.
+    if (!allowPanelBleed && canvas) {
+      const canvasWpx = mmToPx(canvas.width_mm, pxPerMm);
+      const canvasHpx = mmToPx(canvas.height_mm, pxPerMm);
+      let minDx = Number.NEGATIVE_INFINITY;
+      let maxDx = Number.POSITIVE_INFINITY;
+      let minDy = Number.NEGATIVE_INFINITY;
+      let maxDy = Number.POSITIVE_INFINITY;
+      let hasPanel = false;
+      for (const [id, s] of group.startPx) {
+        const panel = panels.find((candidate) => candidate.id === id);
+        if (!panel) continue;
+        hasPanel = true;
+        minDx = Math.max(minDx, -s.x);
+        maxDx = Math.min(maxDx, canvasWpx - mmToPx(panel.width_mm, pxPerMm) - s.x);
+        minDy = Math.max(minDy, -s.y);
+        maxDy = Math.min(maxDy, canvasHpx - mmToPx(panel.height_mm, pxPerMm) - s.y);
+      }
+      if (hasPanel) {
+        // A legacy group wider/taller than the sheet has no shared legal
+        // delta. Keep that axis fixed until “Move all inside” repairs it.
+        dx = minDx <= maxDx ? clampNum(dx, minDx, maxDx) : 0;
+        dy = minDy <= maxDy ? clampNum(dy, minDy, maxDy) : 0;
+      }
+    }
+
     for (const [id, s] of group.startPx) {
-      if (id === leaderId) continue;
-      const sibling = nodeRefs.current.get(id);
-      if (!sibling) continue;
-      sibling.x(s.x + dx);
-      sibling.y(s.y + dy);
+      const movedNode = id === leaderId ? node : nodeRefs.current.get(id);
+      if (!movedNode) continue;
+      movedNode.x(s.x + dx);
+      movedNode.y(s.y + dy);
     }
   }
 
@@ -1406,7 +1693,7 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   // per canvasHistory.ts's typed ops) rather than a single combined one —
   // undo needs two Ctrl+Z presses to fully revert a mixed drag. Documented
   // tradeoff, not a bug: keeps each op type's history shape simple.
-  function commitGroupMove(group: NonNullable<typeof groupMoveRef.current>) {
+  function commitGroupMove(group: NonNullable<typeof groupMoveRef.current>, allowPanelBleed: boolean) {
     if (!canvas) return;
     const panelItems: { panelId: string; before: PanelFields; after: PanelFields }[] = [];
     const annoUpdates = new Map<string, CanvasAnnotation>();
@@ -1415,8 +1702,8 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
       if (!n) continue;
       const p = panels.find((pp) => pp.id === id);
       if (p) {
-        const x_mm = clampPosMm(pxToMm(n.x(), pxPerMm), p.width_mm, canvas.width_mm);
-        const y_mm = clampPosMm(pxToMm(n.y(), pxPerMm), p.height_mm, canvas.height_mm);
+        const x_mm = clampPanelPositionMm(pxToMm(n.x(), pxPerMm), p.width_mm, canvas.width_mm, allowPanelBleed);
+        const y_mm = clampPanelPositionMm(pxToMm(n.y(), pxPerMm), p.height_mm, canvas.height_mm, allowPanelBleed);
         n.x(mmToPx(x_mm, pxPerMm));
         n.y(mmToPx(y_mm, pxPerMm));
         if (Math.abs(x_mm - before.x_mm) < EPS_MM && Math.abs(y_mm - before.y_mm) < EPS_MM) continue;
@@ -1440,10 +1727,10 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   function handleDragMove(panel: CanvasPanel, e: Konva.KonvaEventObject<DragEvent>) {
     if (!canvas) return;
     const node = e.target as Konva.Group;
-    // Alt/Option temporarily disables snapping for pixel-precise placement.
+    // Alt/Option disables snapping and explicitly enables intentional bleed.
     if (e.evt.altKey) {
       setGuides({ x: null, y: null });
-      applyGroupDragDelta(panel.id, node);
+      applyGroupDragDelta(panel.id, node, true);
       return;
     }
     const thr = SNAP_PX / view.zoom;
@@ -1499,12 +1786,16 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     }
     if (bestX) { x += bestX.delta; guideX = bestX.t; }
     if (bestY) { y += bestY.delta; guideY = bestY.t; }
+    // Default placement is fully on-sheet. Alt is the explicit escape hatch
+    // above for intentional bleed.
+    x = mmToPx(clampOnSheetMm(pxToMm(x, pxPerMm), panel.width_mm, canvas.width_mm), pxPerMm);
+    y = mmToPx(clampOnSheetMm(pxToMm(y, pxPerMm), panel.height_mm, canvas.height_mm), pxPerMm);
     node.x(x);
     node.y(y);
     setGuides({ x: guideX, y: guideY });
     // Group siblings follow the LEADER's post-snap position (snap only ever
     // applies to the dragged node, per U7 5a).
-    applyGroupDragDelta(panel.id, node);
+    applyGroupDragDelta(panel.id, node, false);
   }
 
   function handleDragEnd(panel: CanvasPanel, e: Konva.KonvaEventObject<DragEvent>) {
@@ -1514,13 +1805,13 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     const group = groupMoveRef.current;
     if (group && group.leaderId === panel.id) {
       groupMoveRef.current = null;
-      commitGroupMove(group);
+      commitGroupMove(group, e.evt.altKey);
       return;
     }
     // Position clamp is [0, canvas − panel] (clampCanvasMm is a SIZE clamp
     // whose 20mm floor forbade placing panels near the top/left edges).
-    const x_mm = clampPosMm(pxToMm(node.x(), pxPerMm), panel.width_mm, canvas.width_mm);
-    const y_mm = clampPosMm(pxToMm(node.y(), pxPerMm), panel.height_mm, canvas.height_mm);
+    const x_mm = clampPanelPositionMm(pxToMm(node.x(), pxPerMm), panel.width_mm, canvas.width_mm, e.evt.altKey);
+    const y_mm = clampPanelPositionMm(pxToMm(node.y(), pxPerMm), panel.height_mm, canvas.height_mm, e.evt.altKey);
     // Re-sync the node to the clamped position (same stranded-node hazard as
     // the group branch when the clamp lands back on the pre-drag mm).
     node.x(mmToPx(x_mm, pxPerMm));
@@ -1546,7 +1837,7 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     const node = e.target as Konva.Group;
     if (e.evt.altKey) {
       setGuides({ x: null, y: null });
-      applyGroupDragDelta(ann.id, node);
+      applyGroupDragDelta(ann.id, node, true);
       return;
     }
     const thr = SNAP_PX / view.zoom;
@@ -1601,7 +1892,7 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     node.x(x);
     node.y(y);
     setGuides({ x: guideX, y: guideY });
-    applyGroupDragDelta(ann.id, node);
+    applyGroupDragDelta(ann.id, node, false);
   }
 
   function handleAnnotationDragEnd(ann: CanvasAnnotation, e: Konva.KonvaEventObject<DragEvent>) {
@@ -1610,7 +1901,7 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     const group = groupMoveRef.current;
     if (group && group.leaderId === ann.id) {
       groupMoveRef.current = null;
-      commitGroupMove(group);
+      commitGroupMove(group, e.evt.altKey);
       return;
     }
     const origin = originMm(ann);
@@ -1668,6 +1959,8 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   function handleTransformEnd(panel: CanvasPanel, e: Konva.KonvaEventObject<Event>) {
     setGuides({ x: null, y: null }); // clear any resize-snap guide (item 6)
     const node = e.target as Konva.Group;
+    const nativeEvent = e.evt as Event & { altKey?: boolean };
+    const allowBleed = altHeldRef.current || nativeEvent.altKey === true;
     const scaleX = node.scaleX();
     const scaleY = node.scaleY();
     // New size in fit-px, then drop the transient scale used during the gesture.
@@ -1675,12 +1968,25 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     const newHpx = Math.max(mmToPx(PANEL_MM_MIN, pxPerMm), node.height() * scaleY);
     node.scaleX(1);
     node.scaleY(1);
-    const width_mm = roundMm(clampPanelMm(pxToMm(newWpx, pxPerMm)));
-    const height_mm = roundMm(clampPanelMm(pxToMm(newHpx, pxPerMm)));
+    let width_mm = roundMm(clampPanelMm(pxToMm(newWpx, pxPerMm)));
+    let height_mm = roundMm(clampPanelMm(pxToMm(newHpx, pxPerMm)));
+    // boundBoxFunc is the live guard; this is a persistence backstop for
+    // synthetic/direct transform events and legacy oversized panels.
+    if (canvas && !allowBleed) {
+      width_mm = roundMm(Math.min(width_mm, canvas.width_mm));
+      height_mm = roundMm(Math.min(height_mm, canvas.height_mm));
+    }
     // The transform may also shift the top-left (resizing from a non-BR handle).
-    // Same [0, canvas − panel] position rule as drag (NOT the 20mm size clamp).
-    const x_mm = canvas ? clampPosMm(pxToMm(node.x(), pxPerMm), width_mm, canvas.width_mm) : roundMm(pxToMm(node.x(), pxPerMm));
-    const y_mm = canvas ? clampPosMm(pxToMm(node.y(), pxPerMm), height_mm, canvas.height_mm) : roundMm(pxToMm(node.y(), pxPerMm));
+    const x_mm = canvas
+      ? clampPanelPositionMm(pxToMm(node.x(), pxPerMm), width_mm, canvas.width_mm, allowBleed)
+      : roundMm(pxToMm(node.x(), pxPerMm));
+    const y_mm = canvas
+      ? clampPanelPositionMm(pxToMm(node.y(), pxPerMm), height_mm, canvas.height_mm, allowBleed)
+      : roundMm(pxToMm(node.y(), pxPerMm));
+    // A rejected/no-op edge resize must not leave the imperative Konva node
+    // stranded past the persisted geometry while React has nothing to patch.
+    node.x(mmToPx(x_mm, pxPerMm));
+    node.y(mmToPx(y_mm, pxPerMm));
     const noChange = Math.abs(width_mm - panel.width_mm) < EPS_MM &&
       Math.abs(height_mm - panel.height_mm) < EPS_MM &&
       Math.abs(x_mm - panel.x_mm) < EPS_MM &&
@@ -1863,7 +2169,7 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
         if (mode === 'left') x_mm = minX;
         else if (mode === 'right') x_mm = maxX - p.width_mm;
         else x_mm = (minX + maxX) / 2 - p.width_mm / 2;
-        x_mm = clampPosMm(x_mm, p.width_mm, canvas.width_mm);
+        x_mm = clampOnSheetMm(x_mm, p.width_mm, canvas.width_mm);
         if (Math.abs(x_mm - p.x_mm) < EPS_MM) continue;
         items.push({ panelId: p.id, before: { x_mm: p.x_mm }, after: { x_mm } });
       }
@@ -1875,7 +2181,7 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
         if (mode === 'top') y_mm = minY;
         else if (mode === 'bottom') y_mm = maxY - p.height_mm;
         else y_mm = (minY + maxY) / 2 - p.height_mm / 2;
-        y_mm = clampPosMm(y_mm, p.height_mm, canvas.height_mm);
+        y_mm = clampOnSheetMm(y_mm, p.height_mm, canvas.height_mm);
         if (Math.abs(y_mm - p.y_mm) < EPS_MM) continue;
         items.push({ panelId: p.id, before: { y_mm: p.y_mm }, after: { y_mm } });
       }
@@ -1898,7 +2204,7 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
       const gap = (maxX - minX - totalW) / (sorted.length - 1);
       let cursor = minX;
       for (const p of sorted) {
-        const x_mm = clampPosMm(cursor, p.width_mm, canvas.width_mm);
+        const x_mm = clampOnSheetMm(cursor, p.width_mm, canvas.width_mm);
         if (Math.abs(x_mm - p.x_mm) >= EPS_MM) items.push({ panelId: p.id, before: { x_mm: p.x_mm }, after: { x_mm } });
         cursor += p.width_mm + gap;
       }
@@ -1910,7 +2216,7 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
       const gap = (maxY - minY - totalH) / (sorted.length - 1);
       let cursor = minY;
       for (const p of sorted) {
-        const y_mm = clampPosMm(cursor, p.height_mm, canvas.height_mm);
+        const y_mm = clampOnSheetMm(cursor, p.height_mm, canvas.height_mm);
         if (Math.abs(y_mm - p.y_mm) >= EPS_MM) items.push({ panelId: p.id, before: { y_mm: p.y_mm }, after: { y_mm } });
         cursor += p.height_mm + gap;
       }
@@ -1919,7 +2225,7 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   }
 
   // ── U7 5d: keyboard nudge — optimistic local move, debounced batched commit ──
-  function nudgeSelected(key: string, shift: boolean) {
+  function nudgeSelected(key: string, shift: boolean, allowBleed: boolean) {
     // Read the live cache (not the `panels`/`canvas` closures) so rapid
     // key-repeat bursts each start from the latest optimistic position, even
     // if React hasn't re-rendered between two keydown events yet.
@@ -1932,11 +2238,28 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     else if (key === 'ArrowLeft') dx = -step;
     else if (key === 'ArrowRight') dx = step;
     if (dx === 0 && dy === 0) return;
+
+    // Like pointer group movement, keyboard movement is rigid: without Alt,
+    // the first selected panel to meet a sheet edge constrains the delta for
+    // every selected item. Annotation-only selections remain unrestricted.
+    if (!allowBleed) {
+      const selectedPanels = selectedIds
+        .map((id) => cv.panels.find((panel) => panel.id === id))
+        .filter((panel): panel is CanvasPanel => Boolean(panel));
+      if (selectedPanels.length) {
+        const minDx = Math.max(...selectedPanels.map((panel) => -panel.x_mm));
+        const maxDx = Math.min(...selectedPanels.map((panel) => cv.width_mm - panel.width_mm - panel.x_mm));
+        const minDy = Math.max(...selectedPanels.map((panel) => -panel.y_mm));
+        const maxDy = Math.min(...selectedPanels.map((panel) => cv.height_mm - panel.height_mm - panel.y_mm));
+        dx = minDx <= maxDx ? clampNum(dx, minDx, maxDx) : 0;
+        dy = minDy <= maxDy ? clampNum(dy, minDy, maxDy) : 0;
+      }
+    }
     for (const id of selectedIds) {
       const p = cv.panels.find((pp) => pp.id === id);
       if (p) {
-        const x_mm = clampPosMm(p.x_mm + dx, p.width_mm, cv.width_mm);
-        const y_mm = clampPosMm(p.y_mm + dy, p.height_mm, cv.height_mm);
+        const x_mm = clampPanelPositionMm(p.x_mm + dx, p.width_mm, cv.width_mm, allowBleed);
+        const y_mm = clampPanelPositionMm(p.y_mm + dy, p.height_mm, cv.height_mm, allowBleed);
         if (Math.abs(x_mm - p.x_mm) < EPS_MM && Math.abs(y_mm - p.y_mm) < EPS_MM) continue;
         patchLocalPanel(id, { x_mm, y_mm });
         const existing = nudgeAccumRef.current.get(id);
@@ -2008,23 +2331,19 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     s = Math.max(s, PANEL_MM_MIN / nw, PANEL_MM_MIN / nh);
     return { width_mm: roundMm(nw * s), height_mm: roundMm(nh * s) };
   }
-  // Deliberate placement (drag / resize / group-move / align / distribute /
-  // nudge) may leave a panel OFF the A4 sheet: users park a figure beside the
-  // sheet and pull it back later. The clamp is now a generous FIXED envelope
-  // [-500, 1000]mm that the backend mirrors EXACTLY (service.py add/update
-  // panel), so a dragged position never snaps differently on the server. It
-  // still bounds the position so a panel can't be flung unrecoverably far — an
-  // off-sheet panel stays reachable by zooming out / panning. (panelMm/canvasMm
-  // are unused now but kept so the many call sites need no signature churn.)
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  function clampPosMm(pos: number, _panelMm: number, _canvasMm: number): number {
+  // Explicit Alt-modified placement may use a generous fixed bleed envelope.
+  // It mirrors the backend's add/update-panel clamp exactly, so intentional
+  // off-sheet positions do not snap differently after persistence.
+  function clampBleedPosMm(pos: number): number {
     return roundMm(clampNum(pos, OFF_SHEET_MIN_MM, OFF_SHEET_MAX_MM));
   }
-  // The on-sheet clamp (old clampPosMm behaviour) — used only where we WANT to
-  // keep a panel fully on the sheet: initial auto-placement of a new panel and
-  // the "Original size" pull-back convenience button.
+  // Default panel placement is fully on the export sheet. A panel wider than
+  // the sheet is anchored at zero until “Move all inside” resizes it to fit.
   function clampOnSheetMm(pos: number, panelMm: number, canvasMm: number): number {
     return roundMm(Math.max(0, Math.min(pos, canvasMm - panelMm)));
+  }
+  function clampPanelPositionMm(pos: number, panelMm: number, canvasMm: number, allowBleed: boolean): number {
+    return allowBleed ? clampBleedPosMm(pos) : clampOnSheetMm(pos, panelMm, canvasMm);
   }
   async function handlePick(fig: FigureListItem, opts: { copy: boolean }) {
     setPickerOpen(false);
@@ -2262,6 +2581,19 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     }
     setSelectedIds([panel.id]);
   }
+
+  // Layers-panel selection mirrors stage click selection, with keyboard- and
+  // mouse-friendly modifier support. This is the reliable way to reach a
+  // panel or annotation that is completely covered by another object.
+  function selectLayer(id: string, additive: boolean) {
+    setActiveTool('select');
+    setSelectedIds((current) => {
+      if (!additive) return [id];
+      return current.includes(id)
+        ? current.filter((selectedId) => selectedId !== id)
+        : [...current, id];
+    });
+  }
   function handlePanelDragStart(panel: CanvasPanel) {
     dragMovedRef.current = true;
     shiftDeferredRef.current = null; // a drag keeps shift-clicked membership
@@ -2401,7 +2733,17 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     drawingRef.current = d;
     setDrawing(d);
   }
-  function createTextAt(xFit: number, yFit: number) {
+  function isInsideSheetFit(xFit: number, yFit: number): boolean {
+    if (!canvas) return false;
+    return xFit >= 0 && yFit >= 0
+      && xFit <= mmToPx(canvas.width_mm, pxPerMm)
+      && yFit <= mmToPx(canvas.height_mm, pxPerMm);
+  }
+  function createTextAt(xFit: number, yFit: number, allowBleed = false) {
+    if (!allowBleed && !isInsideSheetFit(xFit, yFit)) {
+      toast.error('Place annotations inside the canvas. Hold Alt while clicking to allow bleed.');
+      return;
+    }
     const x_mm = roundMm(pxToMm(xFit, pxPerMm));
     const y_mm = roundMm(pxToMm(yFit, pxPerMm));
     const ann = createAnnotation('text', { x_mm, y_mm }, nextAnnotationZ(annotations));
@@ -2429,11 +2771,17 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     const d = drawingRef.current;
     updateDrawing(null);
     if (!d || !canvas) return;
+    const canvasWpx = mmToPx(canvas.width_mm, pxPerMm);
+    const canvasHpx = mmToPx(canvas.height_mm, pxPerMm);
+    const x0Fit = d.allowBleed ? d.x0 : clampNum(d.x0, 0, canvasWpx);
+    const y0Fit = d.allowBleed ? d.y0 : clampNum(d.y0, 0, canvasHpx);
+    const x1Fit = d.allowBleed ? d.x1 : clampNum(d.x1, 0, canvasWpx);
+    const y1Fit = d.allowBleed ? d.y1 : clampNum(d.y1, 0, canvasHpx);
     if (d.type === 'line' || d.type === 'arrow') {
-      const x1mm = pxToMm(d.x0, pxPerMm);
-      const y1mm = pxToMm(d.y0, pxPerMm);
-      const x2mm = pxToMm(d.x1, pxPerMm);
-      const y2mm = pxToMm(d.y1, pxPerMm);
+      const x1mm = pxToMm(x0Fit, pxPerMm);
+      const y1mm = pxToMm(y0Fit, pxPerMm);
+      const x2mm = pxToMm(x1Fit, pxPerMm);
+      const y2mm = pxToMm(y1Fit, pxPerMm);
       // Straight-line distance, not the AABB box — a purely horizontal/
       // vertical drag has a zero-height/width bbox and would always fail a
       // box-based minimum check.
@@ -2447,10 +2795,10 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
       setSelectedIds([ann.id]);
       return;
     }
-    const x0mm = pxToMm(Math.min(d.x0, d.x1), pxPerMm);
-    const y0mm = pxToMm(Math.min(d.y0, d.y1), pxPerMm);
-    const wmm = pxToMm(Math.abs(d.x1 - d.x0), pxPerMm);
-    const hmm = pxToMm(Math.abs(d.y1 - d.y0), pxPerMm);
+    const x0mm = pxToMm(Math.min(x0Fit, x1Fit), pxPerMm);
+    const y0mm = pxToMm(Math.min(y0Fit, y1Fit), pxPerMm);
+    const wmm = pxToMm(Math.abs(x1Fit - x0Fit), pxPerMm);
+    const hmm = pxToMm(Math.abs(y1Fit - y0Fit), pxPerMm);
     if (wmm < MIN_CREATE_DRAG_MM || hmm < MIN_CREATE_DRAG_MM) return;
     const ann = createAnnotation(d.type, {
       x_mm: roundMm(x0mm), y_mm: roundMm(y0mm), w_mm: roundMm(wmm), h_mm: roundMm(hmm),
@@ -2476,11 +2824,15 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
       // blurs the input — the empty-value blur commit then removes the fresh
       // annotation before the user ever sees it.
       e.evt.preventDefault();
-      createTextAt(xFit, yFit);
+      createTextAt(xFit, yFit, e.evt.altKey);
       return;
     }
     if (activeTool !== 'select') {
-      updateDrawing({ type: activeTool, x0: xFit, y0: yFit, x1: xFit, y1: yFit });
+      if (!e.evt.altKey && !isInsideSheetFit(xFit, yFit)) {
+        toast.error('Start annotations inside the canvas. Hold Alt while dragging to allow bleed.');
+        return;
+      }
+      updateDrawing({ type: activeTool, x0: xFit, y0: yFit, x1: xFit, y1: yFit, allowBleed: e.evt.altKey });
       return;
     }
     marqueeShiftRef.current = e.evt.shiftKey;
@@ -2494,8 +2846,12 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
       if (!stage) return;
       const pointer = stage.getPointerPosition();
       if (!pointer) return;
-      const xFit = (pointer.x - view.x) / view.zoom;
-      const yFit = (pointer.y - view.y) / view.zoom;
+      const canvasWpx = canvas ? mmToPx(canvas.width_mm, pxPerMm) : Number.POSITIVE_INFINITY;
+      const canvasHpx = canvas ? mmToPx(canvas.height_mm, pxPerMm) : Number.POSITIVE_INFINITY;
+      const xRaw = (pointer.x - view.x) / view.zoom;
+      const yRaw = (pointer.y - view.y) / view.zoom;
+      const xFit = drawingRef.current.allowBleed ? xRaw : clampNum(xRaw, 0, canvasWpx);
+      const yFit = drawingRef.current.allowBleed ? yRaw : clampNum(yRaw, 0, canvasHpx);
       updateDrawing(drawingRef.current ? { ...drawingRef.current, x1: xFit, y1: yFit } : null);
       return;
     }
@@ -2606,6 +2962,77 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     return newBox;
   }
 
+  // Keep an all-panel Transformer box inside the physical export sheet. This
+  // runs after normal min-size and snap calculations. Ratio-locked corner
+  // drags are reduced uniformly around the fixed opposite corner; unlocked
+  // edges are clipped independently. Alt bypasses this helper in the caller.
+  function clampPanelResizeBox(
+    oldBox: { x: number; y: number; width: number; height: number; rotation: number },
+    candidate: { x: number; y: number; width: number; height: number; rotation: number },
+    minW: number,
+    minH: number,
+  ): { x: number; y: number; width: number; height: number; rotation: number } {
+    if (!canvas) return candidate;
+    const sheetLeft = view.x;
+    const sheetTop = view.y;
+    const sheetRight = view.x + mmToPx(canvas.width_mm, pxPerMm) * view.zoom;
+    const sheetBottom = view.y + mmToPx(canvas.height_mm, pxPerMm) * view.zoom;
+    const oldRight = oldBox.x + oldBox.width;
+    const oldBottom = oldBox.y + oldBox.height;
+    const candidateRight = candidate.x + candidate.width;
+    const candidateBottom = candidate.y + candidate.height;
+    const leftMoved = Math.abs(candidate.x - oldBox.x) > 1e-4;
+    const rightMoved = Math.abs(candidateRight - oldRight) > 1e-4;
+    const topMoved = Math.abs(candidate.y - oldBox.y) > 1e-4;
+    const bottomMoved = Math.abs(candidateBottom - oldBottom) > 1e-4;
+    const imageRatioLocked = selectedIds.some((id) => panels.some((panel) => panel.id === id && panel.image_key));
+    const ratioCorner = (lockAspect || imageRatioLocked)
+      && (leftMoved || rightMoved)
+      && (topMoved || bottomMoved);
+
+    const next = { ...candidate };
+    if (ratioCorner) {
+      const maxW = leftMoved
+        ? candidateRight - sheetLeft
+        : sheetRight - candidate.x;
+      const maxH = topMoved
+        ? candidateBottom - sheetTop
+        : sheetBottom - candidate.y;
+      const factor = Math.min(1, maxW / candidate.width, maxH / candidate.height);
+      if (!Number.isFinite(factor) || factor <= 0) return oldBox;
+      next.width = candidate.width * factor;
+      next.height = candidate.height * factor;
+      if (leftMoved) next.x = candidateRight - next.width;
+      if (topMoved) next.y = candidateBottom - next.height;
+    } else {
+      if (next.x < sheetLeft) {
+        if (leftMoved) next.width -= sheetLeft - next.x;
+        next.x = sheetLeft;
+      }
+      if (next.y < sheetTop) {
+        if (topMoved) next.height -= sheetTop - next.y;
+        next.y = sheetTop;
+      }
+      if (next.x + next.width > sheetRight) {
+        if (rightMoved) next.width = sheetRight - next.x;
+        else next.x = sheetRight - next.width;
+      }
+      if (next.y + next.height > sheetBottom) {
+        if (bottomMoved) next.height = sheetBottom - next.y;
+        else next.y = sheetBottom - next.height;
+      }
+    }
+
+    const tolerance = 0.01;
+    if (
+      next.width < minW || next.height < minH
+      || next.x < sheetLeft - tolerance || next.y < sheetTop - tolerance
+      || next.x + next.width > sheetRight + tolerance
+      || next.y + next.height > sheetBottom + tolerance
+    ) return oldBox;
+    return next;
+  }
+
   // ── U7 6: resize snap guides — same target set + threshold as drag-move,
   // applied to the MOVING edge(s) inside the Transformer's boundBoxFunc. Box
   // coordinates there are stage/screen space (already zoom+pan applied); the
@@ -2625,11 +3052,16 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     const minW = (groupMinBoxRef.current ? mmToPx(groupMinBoxRef.current.w, pxPerMm) : mmToPx(PANEL_MM_MIN, pxPerMm)) * view.zoom;
     const minH = (groupMinBoxRef.current ? mmToPx(groupMinBoxRef.current.h, pxPerMm) : mmToPx(PANEL_MM_MIN, pxPerMm)) * view.zoom;
     if (newBox.width < minW || newBox.height < minH) return oldBox;
-    // Never snap a multi-node (group) transform, and nothing to snap against
+    // Alt explicitly enables bleed, and there is nothing to constrain/snap
     // without a canvas.
-    if (!canvas || selectedIds.length !== 1 || altHeldRef.current) {
+    if (!canvas || altHeldRef.current) {
       if (guides.x !== null || guides.y !== null) setGuides({ x: null, y: null });
       return newBox;
+    }
+    // Never snap a multi-node transform, but do keep its union box on-sheet.
+    if (selectedIds.length !== 1) {
+      if (guides.x !== null || guides.y !== null) setGuides({ x: null, y: null });
+      return clampPanelResizeBox(oldBox, newBox, minW, minH);
     }
     const thr = SNAP_PX / view.zoom;
     const cw = mmToPx(canvas.width_mm, pxPerMm);
@@ -2671,7 +3103,7 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     const imageRatioLocked = selectedIds.some((id) => panels.some((p) => p.id === id && p.image_key));
     if ((lockAspect || imageRatioLocked) && (leftMoved || rightMoved) && (topMoved || bottomMoved)) {
       if (guides.x !== null || guides.y !== null) setGuides({ x: null, y: null });
-      return newBox;
+      return clampPanelResizeBox(oldBox, newBox, minW, minH);
     }
 
     let guideX: number | null = null;
@@ -2722,8 +3154,8 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
     };
     // A snap that would push below the min-size floor is dropped in favor of
     // the un-snapped (but still legal) box, rather than freezing the gesture.
-    if (snapped.width < minW || snapped.height < minH) return newBox;
-    return snapped;
+    const legalSize = snapped.width < minW || snapped.height < minH ? newBox : snapped;
+    return clampPanelResizeBox(oldBox, legalSize, minW, minH);
   }
   // U7 8: (re)arm the group-resize batch counter at the start of every
   // transform gesture — see the accumulation logic in handleTransformEnd.
@@ -2789,6 +3221,69 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
       history: { before: { width_mm: canvas.width_mm, height_mm: canvas.height_mm }, after },
     });
   }
+  async function moveAllObjectsInside() {
+    if (!canvas || (outsidePanelIds.size === 0 && outsideAnnotationIds.size === 0)) return;
+    // An Alt+nudge can make the warning appear before its 400ms persistence
+    // debounce fires. Flush it first so that trailing PATCH cannot restore the
+    // outside position after this repair action completes.
+    await flushNudge();
+    flushAnnotationEdit();
+
+    if (outsidePanelIds.size > 0) {
+      const items = panels.flatMap((panel) => {
+        if (!outsidePanelIds.has(panel.id)) return [];
+        // Preserve aspect whenever the panel can fit while respecting the
+        // backend's 10mm floor. Pathological legacy aspect ratios may require
+        // an independent per-axis floor so the command can fulfil its promise
+        // that the complete box is brought into the export area.
+        const uniformScale = Math.min(1, canvas.width_mm / panel.width_mm, canvas.height_mm / panel.height_mm);
+        let width_mm = roundMm(panel.width_mm * uniformScale);
+        let height_mm = roundMm(panel.height_mm * uniformScale);
+        width_mm = roundMm(Math.min(canvas.width_mm, Math.max(PANEL_MM_MIN, width_mm)));
+        height_mm = roundMm(Math.min(canvas.height_mm, Math.max(PANEL_MM_MIN, height_mm)));
+        const x_mm = clampOnSheetMm(panel.x_mm, width_mm, canvas.width_mm);
+        const y_mm = clampOnSheetMm(panel.y_mm, height_mm, canvas.height_mm);
+        if (
+          Math.abs(x_mm - panel.x_mm) < EPS_MM
+          && Math.abs(y_mm - panel.y_mm) < EPS_MM
+          && Math.abs(width_mm - panel.width_mm) < EPS_MM
+          && Math.abs(height_mm - panel.height_mm) < EPS_MM
+        ) return [];
+        return [{
+          panelId: panel.id,
+          before: {
+            x_mm: panel.x_mm,
+            y_mm: panel.y_mm,
+            width_mm: panel.width_mm,
+            height_mm: panel.height_mm,
+          },
+          after: { x_mm, y_mm, width_mm, height_mm },
+        }];
+      });
+      void commitPanelsBatch(items, 'move panels inside canvas');
+    }
+
+    if (outsideAnnotationIds.size === 0) return;
+    const canvasWpx = mmToPx(canvas.width_mm, pxPerMm);
+    const canvasHpx = mmToPx(canvas.height_mm, pxPerMm);
+    commitAnnotations((current) => current.map((annotation) => {
+      if (!outsideAnnotationIds.has(annotation.id)) return annotation;
+      const box = annotationBoxPx(annotation, pxPerMm, measuredTextRef.current.get(annotation.id));
+      let dxPx = 0;
+      let dyPx = 0;
+      if (box.x1 - box.x0 >= canvasWpx) dxPx = -box.x0;
+      else if (box.x0 < 0) dxPx = -box.x0;
+      else if (box.x1 > canvasWpx) dxPx = canvasWpx - box.x1;
+      if (box.y1 - box.y0 >= canvasHpx) dyPx = -box.y0;
+      else if (box.y0 < 0) dyPx = -box.y0;
+      else if (box.y1 > canvasHpx) dyPx = canvasHpx - box.y1;
+      return translateAnnotation(
+        annotation,
+        roundMm(pxToMm(dxPx, pxPerMm)),
+        roundMm(pxToMm(dyPx, pxPerMm)),
+      );
+    }), 'move annotations inside canvas');
+  }
   useEffect(() => {
     if (canvas) setSizeDraft({ w: String(roundMm(canvas.width_mm)), h: String(roundMm(canvas.height_mm)) });
   }, [canvas?.width_mm, canvas?.height_mm, canvas]);
@@ -2826,6 +3321,46 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   const selectedFigurePanel = selectedPanel && selectedPanel.figure_id
     ? (selectedPanel as CanvasPanel & { figure_id: string })
     : null;
+  const selectedCurrentVersion = selectedFigure?.versions.find((v) => v.id === selectedFigure.current_version_id);
+  const selectedEffectiveVersion = selectedFigure?.versions.find((v) => v.id === selectedPanel?.effective_version_id);
+  const selectedVersionNotice = selectedFigureId ? figureVersionNotices[selectedFigureId] : undefined;
+  // A version number is only valid for the panel key that actually names that
+  // version. Figure and channel queries can resolve in either order; taking a
+  // numeric max allowed a v2 badge to describe a still-v1 image for one frame.
+  const selectedNoticeVersionNumber = selectedVersionNotice
+    && selectedPanel?.effective_version_id
+    && selectedVersionNotice.versionId === selectedPanel.effective_version_id
+    ? selectedVersionNotice.versionNumber
+    : undefined;
+  const selectedVersionNumber = selectedNoticeVersionNumber
+    ?? selectedEffectiveVersion?.version_number
+    ?? (selectedPanel?.effective_version_id === selectedFigure?.current_version_id
+      ? selectedCurrentVersion?.version_number
+      : undefined);
+  const selectedPanelExpectedImageKey = selectedPanel ? panelKey(selectedPanel) : null;
+  const reportedSelectedImage = selectedPanel ? panelImageReports[selectedPanel.id] : undefined;
+  const selectedPanelImageReport = reportedSelectedImage?.key === selectedPanelExpectedImageKey
+    ? reportedSelectedImage
+    : undefined;
+  // The child reports after paint. During the first render of a new key, use
+  // the same key-scoped cache rule as usePanelImage so an old report can never
+  // briefly turn the badge back to Latest.
+  const selectedPanelImageStatus: PanelImageStatus | null = selectedPanelExpectedImageKey
+    ? selectedPanelImageReport?.status
+      ?? (imageCache.has(selectedPanelExpectedImageKey) ? 'ready' : 'loading')
+    : null;
+  const selectedVersionStatusLabel = selectedPanelImageStatus === 'error'
+    ? `${selectedPanel?.pinned_version_id ? 'Pinned render failed' : 'Update failed'}${selectedVersionNumber ? ` v${selectedVersionNumber}` : ''}`
+    : selectedPanelImageStatus === 'loading'
+      ? `${selectedPanel?.pinned_version_id ? 'Loading pinned version' : 'Updating to'}${selectedVersionNumber ? ` v${selectedVersionNumber}` : ''}`
+      : selectedPanel?.pinned_version_id
+        ? `Pinned${selectedVersionNumber ? ` v${selectedVersionNumber}` : ''}`
+        : `Latest${selectedVersionNumber ? ` v${selectedVersionNumber}` : ''}`;
+  const selectedHasNewerVersion = Boolean(
+    selectedPanel?.pinned_version_id
+    && selectedFigure?.current_version_id
+    && selectedPanel.pinned_version_id !== selectedFigure.current_version_id,
+  );
 
   // U8: selection composition drives the toolbar/sidebar below.
   const isAnnotationOnlySelection = selectedAnnotationIds.length > 0 && selectedPanelIds.length === 0;
@@ -2910,7 +3445,7 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
             <Label htmlFor="canvas-w" className="text-xs text-muted-foreground">W</Label>
             <Input
               id="canvas-w"
-              className="h-7 w-16"
+              className="h-7 w-24 tabular-nums"
               type="number"
               value={sizeDraft.w}
               onChange={(e) => setSizeDraft((s) => ({ ...s, w: e.target.value }))}
@@ -2921,7 +3456,7 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
             <Label htmlFor="canvas-h" className="text-xs text-muted-foreground">H</Label>
             <Input
               id="canvas-h"
-              className="h-7 w-16"
+              className="h-7 w-24 tabular-nums"
               type="number"
               value={sizeDraft.h}
               onChange={(e) => setSizeDraft((s) => ({ ...s, h: e.target.value }))}
@@ -2957,7 +3492,14 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
           </div>
           <div className="flex items-center gap-0.5">
             <Button type="button" size="icon-sm" variant="outline" onClick={() => zoomBy(1 / 1.2)} aria-label="Zoom out" title="Zoom out"><ZoomOut className="h-4 w-4" /></Button>
-            <span className="w-12 text-center text-xs tabular-nums text-muted-foreground">{Math.round(view.zoom * 100)}%</span>
+            <span
+              role="status"
+              aria-label="Canvas zoom"
+              aria-live="polite"
+              className="w-12 text-center text-xs tabular-nums text-muted-foreground"
+            >
+              {Math.round(view.zoom * 100)}%
+            </span>
             <Button type="button" size="icon-sm" variant="outline" onClick={() => zoomBy(1.2)} aria-label="Zoom in" title="Zoom in"><ZoomIn className="h-4 w-4" /></Button>
             <Button type="button" size="icon-sm" variant="outline" onClick={fitView} aria-label="Fit to view" title="Fit the whole canvas in the viewport"><Maximize2 className="h-4 w-4" /></Button>
           </div>
@@ -3095,6 +3637,27 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
         </div>
       </div>
 
+      {(outsidePanelIds.size > 0 || outsideAnnotationIds.size > 0) && (
+        <div role="alert" className="flex flex-wrap items-center gap-2 border-b border-red-300 bg-red-50 px-4 py-1.5 text-xs text-red-800 dark:border-red-900 dark:bg-red-950/30 dark:text-red-200">
+          <span>
+            {[
+              outsidePanelIds.size > 0 ? `${outsidePanelIds.size} panel${outsidePanelIds.size === 1 ? '' : 's'}` : '',
+              outsideAnnotationIds.size > 0 ? `${outsideAnnotationIds.size} annotation${outsideAnnotationIds.size === 1 ? '' : 's'}` : '',
+            ].filter(Boolean).join(' and ')} outside the export area.
+          </span>
+          <Button
+            type="button"
+            size="xs"
+            variant="outline"
+            onClick={moveAllObjectsInside}
+            disabled={patchPanel.isPending || patchAnnotations.isPending}
+          >
+            Move all inside
+          </Button>
+          <span className="text-red-700/80 dark:text-red-300/80">Hold Alt while moving, resizing, or nudging a panel—or creating an annotation—only when bleed is intentional.</span>
+        </div>
+      )}
+
       {/* selected-panel toolbar (mount deferred while a pointer gesture
           is active — see pointerGestureActive) */}
       {selectedPanel && !pointerGestureActive && (
@@ -3145,13 +3708,86 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
             <ArrowDown className="h-3.5 w-3.5" /> Back
           </Button>
           {selectedPanel.image_key ? (
-            <Button type="button" size="xs" variant="default" disabled title="Imported images always keep their aspect ratio">
+            <Button type="button" size="xs" variant="default" disabled aria-pressed="true" title="Imported images always keep their aspect ratio">
               <Lock className="h-3.5 w-3.5" /> Aspect
             </Button>
           ) : (
-            <Button type="button" size="xs" variant={lockAspect ? 'default' : 'outline'} onClick={() => setLockAspect((v) => !v)} title="Keep the aspect ratio while resizing from a corner">
+            <Button type="button" size="xs" variant={lockAspect ? 'default' : 'outline'} aria-pressed={lockAspect} onClick={() => setLockAspect((v) => !v)} title="Keep the aspect ratio while resizing from a corner">
               {lockAspect ? <Lock className="h-3.5 w-3.5" /> : <Unlock className="h-3.5 w-3.5" />} Aspect
             </Button>
+          )}
+          {selectedFigurePanel && (
+            <span className="flex items-center gap-1 rounded-md border bg-background px-1.5 py-0.5">
+              <Badge
+                variant={selectedPanelImageStatus === 'error'
+                  ? 'destructive'
+                  : selectedPanel.pinned_version_id ? 'outline' : 'secondary'}
+                className="text-[10px]"
+                role={selectedPanelImageStatus === 'error' ? 'alert' : 'status'}
+                aria-live="polite"
+              >
+                {selectedVersionStatusLabel}
+              </Badge>
+              {selectedPanelImageStatus === 'error' && selectedPanelImageReport && (
+                <Button
+                  type="button"
+                  size="xs"
+                  variant="outline"
+                  aria-label="Retry panel render"
+                  title={selectedPanelImageReport.error ?? 'Retry loading this figure version'}
+                  onClick={selectedPanelImageReport.retry}
+                >
+                  <RefreshCw className="h-3.5 w-3.5" /> Retry
+                </Button>
+              )}
+              {selectedHasNewerVersion && selectedCurrentVersion && (
+                <Button
+                  type="button"
+                  size="xs"
+                  variant="default"
+                  disabled={patchPanel.isPending}
+                  title={`Follow the latest figure version (v${selectedCurrentVersion.version_number})`}
+                  onClick={() => patchPanel.mutate({
+                    panelId: selectedPanel.id,
+                    data: { pinned_version_id: null },
+                    history: { before: { pinned_version_id: selectedPanel.pinned_version_id ?? null }, label: 'follow latest version' },
+                  })}
+                >
+                  Update to v{selectedCurrentVersion.version_number}
+                </Button>
+              )}
+              {!selectedPanel.pinned_version_id && selectedPanel.effective_version_id && (
+                <Button
+                  type="button"
+                  size="xs"
+                  variant="ghost"
+                  disabled={patchPanel.isPending}
+                  title="Keep this exact figure version even when a newer one is created"
+                  onClick={() => patchPanel.mutate({
+                    panelId: selectedPanel.id,
+                    data: { pinned_version_id: selectedPanel.effective_version_id },
+                    history: { before: { pinned_version_id: null }, label: 'pin figure version' },
+                  })}
+                >
+                  Pin this version
+                </Button>
+              )}
+            </span>
+          )}
+          {selectedPanel.image_key && selectedPanelImageStatus === 'error' && selectedPanelImageReport && (
+            <span className="flex items-center gap-1 rounded-md border border-destructive/40 bg-background px-1.5 py-0.5">
+              <Badge variant="destructive" className="text-[10px]" role="alert">Image load failed</Badge>
+              <Button
+                type="button"
+                size="xs"
+                variant="outline"
+                aria-label="Retry panel render"
+                title={selectedPanelImageReport.error ?? 'Retry loading this image'}
+                onClick={selectedPanelImageReport.retry}
+              >
+                <RefreshCw className="h-3.5 w-3.5" /> Retry
+              </Button>
+            </span>
           )}
           <Button type="button" size="xs" variant="outline" title="Copy this panel's exact size (width × height) so you can paste it onto other panels" onClick={() => copyPanelSize(selectedPanel)}>
             <Ruler className="h-3.5 w-3.5" /> Copy size
@@ -3203,7 +3839,11 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
               size="xs"
               variant="outline"
               title="Open this figure in the figure editor (new tab)"
-              onClick={() => window.open(`/figures/${selectedPanel.figure_id}`, '_blank', 'noopener')}
+              onClick={() => window.open(
+                `/figures/${selectedPanel.figure_id}?returnCanvas=${encodeURIComponent(canvasId)}&panel=${encodeURIComponent(selectedPanel.id)}`,
+                '_blank',
+                'noopener',
+              )}
             >
               <ExternalLink className="h-3.5 w-3.5" /> Edit figure
             </Button>
@@ -3315,6 +3955,12 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
 
       {/* stage + color editor sidebar */}
       <div className="flex flex-1 overflow-hidden" style={{ minHeight: 480 }}>
+        <CanvasLayersPanel
+          panels={panels}
+          annotations={annotations}
+          selectedIds={selectedIds}
+          onSelect={selectLayer}
+        />
       <div
         ref={setContainerRef}
         className="relative flex-1 overflow-hidden bg-muted/30"
@@ -3391,50 +4037,80 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
                 </>
               )}
               {panels.map((panel) => (
-                <CanvasPanelNode
-                  key={panel.id}
-                  panel={panel}
-                  pxPerMm={pxPerMm}
-                  draggableEnabled={!spaceHeld}
-                  // U8: unlistenable while a creation tool is active, so a
-                  // shape/text drag can start ON TOP of an existing panel
-                  // instead of the panel intercepting the mousedown.
-                  listening={activeTool === 'select'}
-                  selected={selectedIds.includes(panel.id)}
-                  transparent={transparent}
-                  registerNode={registerNode}
-                  onPanelMouseDown={handlePanelMouseDown}
-                  onPanelClick={handlePanelClick}
-                  onDragStart={handlePanelDragStart}
-                  onDragMove={handleDragMove}
-                  onDragEnd={handleDragEnd}
-                  onTransformEnd={handleTransformEnd}
-                />
+                <Fragment key={panel.id}>
+                  <CanvasPanelNode
+                    panel={panel}
+                    pxPerMm={pxPerMm}
+                    draggableEnabled={!spaceHeld}
+                    // U8: unlistenable while a creation tool is active, so a
+                    // shape/text drag can start ON TOP of an existing panel
+                    // instead of the panel intercepting the mousedown.
+                    listening={activeTool === 'select'}
+                    selected={selectedIds.includes(panel.id)}
+                    transparent={transparent}
+                    registerNode={registerNode}
+                    onPanelMouseDown={handlePanelMouseDown}
+                    onPanelClick={handlePanelClick}
+                    onDragStart={handlePanelDragStart}
+                    onDragMove={handleDragMove}
+                    onDragEnd={handleDragEnd}
+                    onTransformEnd={handleTransformEnd}
+                    onImageStatus={handlePanelImageStatus}
+                  />
+                  {outsidePanelIds.has(panel.id) && (
+                    <Rect
+                      x={mmToPx(panel.x_mm, pxPerMm)}
+                      y={mmToPx(panel.y_mm, pxPerMm)}
+                      width={mmToPx(panel.width_mm, pxPerMm)}
+                      height={mmToPx(panel.height_mm, pxPerMm)}
+                      stroke="#dc2626"
+                      strokeWidth={1.5 / view.zoom}
+                      dash={[5 / view.zoom, 3 / view.zoom]}
+                      listening={false}
+                    />
+                  )}
+                </Fragment>
               ))}
               {/* U8: annotations paint ABOVE panels, sorted by z (the `annotations`
                   memo is already z-sorted). A sole-selected line/arrow gets
                   draggable endpoint handles instead of the shared Transformer. */}
               {annotations.map((ann) => {
                 const effective = endpointDraft?.id === ann.id ? { ...ann, points_mm: endpointDraft.points_mm } : ann;
+                const outsideBox = outsideAnnotationIds.has(ann.id)
+                  ? annotationBoxPx(effective, pxPerMm, measuredTextRef.current.get(ann.id))
+                  : null;
                 return (
-                  <CanvasAnnotationNode
-                    key={ann.id}
-                    annotation={effective}
-                    pxPerMm={pxPerMm}
-                    draggableEnabled={!spaceHeld}
-                    listening={activeTool === 'select'}
-                    selected={selectedIds.includes(ann.id)}
-                    measuredTextMm={getMeasuredTextMm(ann.id)}
-                    registerNode={registerNode}
-                    onMeasured={(id, size) => { measuredTextRef.current.set(id, size); bumpMeasure((v) => v + 1); }}
-                    onMouseDown={handleAnnotationMouseDown}
-                    onClick={handleAnnotationClick}
-                    onDblClick={handleAnnotationDblClick}
-                    onDragStart={handleAnnotationDragStart}
-                    onDragMove={handleAnnotationDragMove}
-                    onDragEnd={handleAnnotationDragEnd}
-                    onTransformEnd={handleAnnotationTransformEnd}
-                  />
+                  <Fragment key={ann.id}>
+                    <CanvasAnnotationNode
+                      annotation={effective}
+                      pxPerMm={pxPerMm}
+                      draggableEnabled={!spaceHeld}
+                      listening={activeTool === 'select'}
+                      selected={selectedIds.includes(ann.id)}
+                      measuredTextMm={getMeasuredTextMm(ann.id)}
+                      registerNode={registerNode}
+                      onMeasured={(id, size) => { measuredTextRef.current.set(id, size); bumpMeasure((v) => v + 1); }}
+                      onMouseDown={handleAnnotationMouseDown}
+                      onClick={handleAnnotationClick}
+                      onDblClick={handleAnnotationDblClick}
+                      onDragStart={handleAnnotationDragStart}
+                      onDragMove={handleAnnotationDragMove}
+                      onDragEnd={handleAnnotationDragEnd}
+                      onTransformEnd={handleAnnotationTransformEnd}
+                    />
+                    {outsideBox && (
+                      <Rect
+                        x={outsideBox.x0}
+                        y={outsideBox.y0}
+                        width={Math.max(1, outsideBox.x1 - outsideBox.x0)}
+                        height={Math.max(1, outsideBox.y1 - outsideBox.y0)}
+                        stroke="#dc2626"
+                        strokeWidth={1.5 / view.zoom}
+                        dash={[5 / view.zoom, 3 / view.zoom]}
+                        listening={false}
+                      />
+                    )}
+                  </Fragment>
                 );
               })}
               {/* U8: in-progress shape/line/arrow creation drag preview */}
@@ -3586,6 +4262,7 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
             canvasName={canvas.name}
             containerEl={containerEl}
             overlayRect={overlayRect}
+            waitForCanvasImageApply={waitForCanvasImageApply}
             // Ghost fix: the overlay is positioned from the panel's COMMITTED
             // x/y (overlayRect), which only advances on drag/resize-END — so
             // during a gesture it froze the figure's white SVG box at the

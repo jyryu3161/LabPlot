@@ -16,7 +16,7 @@ from app.common.encryption import decrypt_private_bytes, encrypt_private_bytes
 from app.common.exceptions import BadRequestError, FileTooLargeError, NotFoundError
 from app.datasets.models import Dataset
 from app.datasets.profiler import profile_dataframe
-from app.datasets.stats import compute_statistics
+from app.datasets.stats import STATISTICS_POLICY, compute_statistics
 
 _FORMATS = {
     "csv": ".csv",
@@ -28,9 +28,9 @@ _FORMATS = {
 
 _EXCEL_FORMATS = {"xlsx", "xls"}
 
-_ALLOWED_COLUMN_ROLES = {"numeric", "category", "group", "time", "status", "gene", "log2fc", "pvalue", "text"}
+_ALLOWED_COLUMN_ROLES = {"numeric", "category", "group", "time", "status", "id", "replicate", "gene", "log2fc", "pvalue", "text"}
 _NUMERIC_OVERRIDE_ROLES = {"numeric", "time", "log2fc", "pvalue"}
-_CATEGORICAL_OVERRIDE_ROLES = {"category", "group", "gene"}
+_CATEGORICAL_OVERRIDE_ROLES = {"category", "group", "id", "replicate", "gene"}
 
 # Hard caps on the parsed dataframe to bound memory/CPU for downstream rendering
 # and statistics. Enforced at ingest for both preview and create paths.
@@ -310,6 +310,11 @@ def _apply_column_role_overrides(
             updated.append(item)
             continue
         item["role"] = role
+        # Preserve user intent separately from the role value. Automatic
+        # statistics may use cautious legacy-name fallbacks for old profiles,
+        # but an explicit Numeric override must remain authoritative even for
+        # outcome names such as ``recovery_time``.
+        item["role_source"] = "user"
         numeric_like = item.get("dtype") == "numeric" or _sample_values_numeric_like(item.get("sample_values"))
         if role in _NUMERIC_OVERRIDE_ROLES and numeric_like:
             item["dtype"] = "numeric"
@@ -327,7 +332,12 @@ def normalized_column_profile(column_profile: list[dict[str, Any]] | None) -> li
     normalized: list[dict[str, Any]] = []
     for column in column_profile or []:
         item = dict(column)
-        if item.get("dtype") == "text" and item.get("role") == "text" and _sample_values_numeric_like(item.get("sample_values")):
+        if (
+            item.get("role_source") != "user"
+            and item.get("dtype") == "text"
+            and item.get("role") == "text"
+            and _sample_values_numeric_like(item.get("sample_values"))
+        ):
             item["dtype"] = "numeric"
             item["role"] = "numeric"
         normalized.append(item)
@@ -335,6 +345,10 @@ def normalized_column_profile(column_profile: list[dict[str, Any]] | None) -> li
 
 
 def _statistics_match_profile(statistics: dict[str, Any] | None, column_profile: list[dict[str, Any]]) -> bool:
+    if (statistics or {}).get("comparison_policy") != STATISTICS_POLICY:
+        return False
+    if not isinstance((statistics or {}).get("one_factor_comparisons_suppressed"), bool):
+        return False
     numeric_names = {c.get("name") for c in column_profile if c.get("dtype") == "numeric"}
     if not numeric_names:
         return True
@@ -347,7 +361,12 @@ def _recompute_statistics(dataset: Dataset, column_profile: list[dict[str, Any]]
     try:
         return compute_statistics(load_dataframe(dataset), column_profile)
     except Exception:
-        return {"descriptive": [], "comparisons": []}
+        return {
+            "descriptive": [],
+            "comparisons": [],
+            "comparison_policy": STATISTICS_POLICY,
+            "one_factor_comparisons_suppressed": False,
+        }
 
 
 def _apply_normalized_column_profile(db: Session, dataset: Dataset) -> Dataset:

@@ -8,7 +8,8 @@ from pydantic import BaseModel, ConfigDict, Field
 class ColumnProfile(BaseModel):
     name: str
     dtype: str          # numeric | categorical | datetime | text
-    role: str           # numeric | category | group | time | status | gene | log2fc | pvalue | expression | text
+    role: str           # numeric | category | group | time | status | id | replicate | gene | log2fc | pvalue | expression | text
+    role_source: str | None = None  # "user" when an explicit override is authoritative
     n_unique: int
     n_missing: int
     sample_values: list[Any] = Field(default_factory=list)

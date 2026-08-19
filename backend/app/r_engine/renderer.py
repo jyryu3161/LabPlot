@@ -13,7 +13,14 @@ import pandas as pd
 
 from app.config import settings
 from app.r_engine.presets import PRESETS, resolve_base_size, theme_r
-from app.r_engine.templates import build_plot_r, rq, DEVICE_TYPES, NO_THEME_TYPES
+from app.r_engine.templates import (
+    DEFAULT_X_TEXT_ANGLE,
+    DEVICE_TYPES,
+    NO_THEME_TYPES,
+    POST_THEME_R,
+    build_plot_r,
+    rq,
+)
 
 _SIZES = {
     "single_column": (3.6, 3.2),
@@ -28,6 +35,30 @@ _HEADER = (
     "})\n"
 )
 _HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+_SOURCE_ROW_ID_COLUMN = ".labplot_source_row_id"
+
+
+def _source_row_identity(value: object) -> str:
+    """Canonical, reorder-stable identity for a pandas source-row index.
+
+    The type tag prevents an object index containing both ``1`` and ``"1"``
+    from collapsing to one semantic point. Values are later URL-encoded by R;
+    no part of this string is interpolated into executable code.
+    """
+    type_name = type(value).__name__
+    text = str(value)
+    return f"{type_name}:{text if text else '(empty)'}"
+
+
+def _unused_source_row_id_column(columns: object) -> str:
+    """Choose a renderer-private column without overwriting user data."""
+    existing = {str(column) for column in columns}
+    candidate = _SOURCE_ROW_ID_COLUMN
+    suffix = 0
+    while candidate in existing:
+        suffix += 1
+        candidate = f"{_SOURCE_ROW_ID_COLUMN}_{suffix}"
+    return candidate
 
 
 def _rscript_bin() -> str:
@@ -160,10 +191,12 @@ labplot_apply_category_colors <- function(plot) {{
     if (!length(limits)) return(current_plot)
     hits <- intersect(names(.override), limits)
     if (!length(hits)) return(current_plot)
-    values <- labplot_palette(length(limits))
+    values <- if (identical(aesthetic, "colour")) labplot_stroke_palette(length(limits)) else labplot_palette(length(limits))
     names(values) <- limits
     values[hits] <- .override[hits]
-    suppressMessages(current_plot + scale_fun(values = values))
+    # Keep the original scale name so colour continues to merge with any
+    # redundant linetype/shape guide created for the same grouping variable.
+    suppressMessages(current_plot + scale_fun(name = sc$name, values = values))
   }}
   plot <- .apply(plot, "fill", ggplot2::scale_fill_manual)
   plot <- .apply(plot, "colour", ggplot2::scale_colour_manual)
@@ -174,10 +207,13 @@ p <- labplot_apply_category_colors(p)
 
 
 def build_script(plot_type: str, mapping: dict, options: dict, preset: str,
-                 data_filename: str = "data.csv") -> str:
+                 data_filename: str = "data.csv", *,
+                 source_row_id_column: str = _SOURCE_ROW_ID_COLUMN) -> str:
     if preset not in PRESETS:
         preset = "nature"
-    opts = options or {}
+    if not re.fullmatch(r"\.labplot_source_row_id(?:_[0-9]+)?", source_row_id_column):
+        source_row_id_column = _SOURCE_ROW_ID_COLUMN
+    opts = {**(options or {}), "_source_row_id_column": source_row_id_column}
     color_mode = opts.get("color_mode", "color")
     # Sanitize before interpolating into the R comment so a stray newline/quote
     # cannot break out of the comment line. theme_r() only compares this value
@@ -199,7 +235,10 @@ def build_script(plot_type: str, mapping: dict, options: dict, preset: str,
             "# generated with LabPlot academic figure rules: 7 pt text, restrained palettes, white background, no gridlines\n"
             + _HEADER
             + f'\ndf <- readr::read_csv("{data_filename}", show_col_types = FALSE)\n'
-            + "df <- as.data.frame(df)\n")
+            + "df <- as.data.frame(df)\n"
+            + f"if (!{rq(source_row_id_column)} %in% names(df)) "
+              f"df[[{rq(source_row_id_column)}]] <- paste0('row:', seq_len(nrow(df)))\n"
+            + f"df[[{rq(source_row_id_column)}]] <- as.character(df[[{rq(source_row_id_column)}]])\n")
 
     # ---- device-rendered plots (ComplexHeatmap etc.): template defines draw_plot() ----
     if plot_type in DEVICE_TYPES:
@@ -220,6 +259,10 @@ if (isTRUE(capabilities("cairo"))) {{
 
     # ---- ggplot-based plots ----
     theme_append = "" if plot_type in NO_THEME_TYPES else "\np <- p + labplot_theme()\n"
+    # Template-intent theme tweaks (grid removal, blank axes, ...) that must
+    # survive the complete labplot_theme(); user option-driven `post` lines are
+    # appended after this so explicit settings always take precedence.
+    theme_append += "" if plot_type in NO_THEME_TYPES else POST_THEME_R.get(plot_type, "")
     post = ""
     if plot_type not in NO_THEME_TYPES:
         lt = opts.get("legend_title")
@@ -227,18 +270,45 @@ if (isTRUE(capabilities("cairo"))) {{
             post += f"p <- p + labs(fill = {rq(lt)}, colour = {rq(lt)})\n"
         post += _category_color_override_r(opts)
         legend_position = opts.get("legend_position")
-        if opts.get("hide_legend") or legend_position == "none":
+        legend_hidden = bool(opts.get("hide_legend")) or legend_position == "none"
+        if legend_hidden:
             post += 'p <- p + theme(legend.position = "none")\n'
-        elif legend_position in {"right", "bottom"}:
+        elif legend_position in {"right", "bottom", "top", "left"}:
             post += f'p <- p + theme(legend.position = "{legend_position}")\n'
+        legend_direction = opts.get("legend_direction")
+        if not legend_hidden and legend_direction in {"vertical", "horizontal"}:
+            # theme(legend.direction) covers discrete legends AND continuous
+            # colourbars (guide_colourbar inherits it in ggplot2 >= 3.5).
+            post += f'p <- p + theme(legend.direction = "{legend_direction}")\n'
         x_angle = opts.get("x_text_angle")
+        if x_angle in (None, ""):
+            # Template-default rotation (e.g. heatmap 45deg) rides the same
+            # post-theme block so labplot_theme() can never reset it; an
+            # explicit user option above always wins over the default.
+            x_angle = DEFAULT_X_TEXT_ANGLE.get(plot_type)
         if x_angle not in (None, ""):
             try:
                 angle = max(0, min(90, float(x_angle)))
-                hjust = 1 if angle >= 30 else 0.5
-                vjust = 0.5 if angle >= 30 else 1
-                title_margin = ", axis.title.x = element_text(margin = margin(t = 8))" if angle >= 30 else ""
-                post += f"p <- p + theme(axis.text.x = element_text(angle = {angle:g}, hjust = {hjust}, vjust = {vjust}){title_margin})\n"
+                if angle < 30:
+                    hjust, vjust = 0.5, 1.0
+                elif angle >= 80:
+                    # Near-vertical labels read top-to-bottom: end-anchor at
+                    # the tick, centred on it horizontally.
+                    hjust, vjust = 1.0, 0.5
+                else:
+                    # Diagonal labels: anchor the text END at the tick and its
+                    # TOP edge against the axis. vjust=0.5 centred every label
+                    # inside the tall rotated text band, which opened a ~20pt
+                    # visual gap between the axis and the first glyph.
+                    hjust, vjust = 1.0, 1.0
+                # Tight explicit gap (~1.5pt) between the ticks and the labels;
+                # a rendered x title keeps a modest 4pt offset below the band.
+                title_margin = ", axis.title.x = element_text(margin = margin(t = 4))" if angle >= 30 else ""
+                post += (
+                    f"p <- p + theme(axis.text.x = element_text(angle = {angle:g}, "
+                    f"hjust = {hjust:g}, vjust = {vjust:g}, "
+                    f"margin = margin(t = 1.5)){title_margin})\n"
+                )
             except (TypeError, ValueError):
                 pass
         if opts.get("log_y"):
@@ -280,12 +350,32 @@ if (isTRUE(capabilities("cairo"))) {{
     # explicitly on line/bar/box/etc geoms), so no template needs to change.
     # Guarded so a non-ggplot or layer without linewidth is left untouched.
     lw_scale = opts.get("linewidth_scale")
-    if lw_scale is not None:
+    data_line_width_pt = _finite_float_option(opts, "data_line_width_pt")
+    if lw_scale is not None or data_line_width_pt is not None:
         try:
-            _mult = max(0.25, min(4.0, float(lw_scale)))
+            _mult = max(0.25, min(4.0, float(lw_scale if lw_scale is not None else 1.0)))
         except (TypeError, ValueError):
             _mult = 1.0
-        if abs(_mult - 1.0) > 1e-6:
+        if data_line_width_pt is not None:
+            _data_pt = max(0.1, min(3.0, data_line_width_pt))
+            post += (
+                f".labplot_data_linewidth_mm <- labplot_pt_to_mm({_data_pt:g})\n"
+                "p <- (function(.p) {\n"
+                '  if (!inherits(.p, "ggplot") || is.null(.p$layers)) return(.p)\n'
+                '  .data_line_geoms <- c("GeomLine", "GeomPath", "GeomStep", "GeomSmooth", "GeomDensity", "GeomFreqpoly")\n'
+                "  for (.i in seq_along(.p$layers)) {\n"
+                "    .is_data_line <- class(.p$layers[[.i]]$geom)[[1]] %in% .data_line_geoms\n"
+                '    for (.slot in c("aes_params", "geom_params")) {\n'
+                "      .pl <- .p$layers[[.i]][[.slot]]\n"
+                "      if (!is.null(.pl) && is.numeric(.pl$linewidth)) {\n"
+                f"        .p$layers[[.i]][[.slot]]$linewidth <- if (.is_data_line) .labplot_data_linewidth_mm * {_mult:g} else .pl$linewidth * {_mult:g}\n"
+                "      }\n"
+                "    }\n"
+                "  }\n"
+                "  .p\n"
+                "})(p)\n"
+            )
+        elif abs(_mult - 1.0) > 1e-6:
             # Scale a numeric `linewidth` fixed-param wherever a geom keeps it —
             # aes_params (geom_line/path/step/smooth/violin/bar/col/tile/
             # histogram and geom_boxplot's overall stroke) or geom_params (some
@@ -331,6 +421,16 @@ tryCatch({
     # Computed against a scratch png device at the SAME width/height/dpi as
     # figure.png. Entirely wrapped in tryCatch so a layout failure never breaks
     # the render (figure_layout.json is simply absent).
+    # Gtable label cells are positional. coord_flip swaps which semantic axis
+    # label occupies the bottom/left cell, so scene IDs and setting paths must
+    # follow the rendered label rather than the cell name.
+    if opts.get("flip_coords"):
+        xlab_scene = ("element:axis:y:label", "y_label", "options.y_label")
+        ylab_scene = ("element:axis:x:label", "x_label", "options.x_label")
+    else:
+        xlab_scene = ("element:axis:x:label", "x_label", "options.x_label")
+        ylab_scene = ("element:axis:y:label", "y_label", "options.y_label")
+
     layout_export = f"""
 tryCatch({{
   .w <- {w}; .h <- {h}; .dpi <- {dpi}
@@ -362,6 +462,10 @@ tryCatch({{
   .disc_y <- !is.null(.bp$y$is_discrete) && isTRUE(.bp$y$is_discrete())
   .obj <- list(panel_px = .panel, img_px = list(w = .imgw, h = .imgh),
                x_range = .xr, y_range = .yr, x_discrete = .disc_x, y_discrete = .disc_y)
+  # Internal PANEL lookup used to convert built geom coordinates into the same
+  # device-pixel space as panel_px. It is not serialized separately.
+  .scene_panel_px <- list("1" = .panel)
+  .scene_panel_params <- list("1" = .bp)
   # ---- NEW: all facet panels (additive; first entry == legacy panel_px) ----
   tryCatch({{
     .panels <- list()
@@ -370,6 +474,10 @@ tryCatch({{
       if (is.null(.pp)) next
       grid::seekViewport(.panel_names[.i])
       .pb <- .vp_box()
+      .pid <- tryCatch(as.character(.gb$layout$layout$PANEL[.i]), error = function(e) as.character(.i))
+      if (!length(.pid) || is.na(.pid) || !nzchar(.pid)) .pid <- as.character(.i)
+      .scene_panel_px[[.pid]] <- .pb
+      .scene_panel_params[[.pid]] <- .pp
       .pdx <- !is.null(.pp$x$is_discrete) && isTRUE(.pp$x$is_discrete())
       .pdy <- !is.null(.pp$y$is_discrete) && isTRUE(.pp$y$is_discrete())
       .panels[[length(.panels) + 1]] <- list(
@@ -456,6 +564,80 @@ tryCatch({{
     .bx <- .cell_box("^axis-b");    if (!is.null(.bx)) .obj$x_axis_px <- .bx
     .bx <- .cell_box("^axis-l");    if (!is.null(.bx)) .obj$y_axis_px <- .bx
   }}, error = function(e) {{}})
+  # ---- NEW: scene_elements — stable semantic hit targets (additive contract) ----
+  # Text nodes reuse the gtable cell boxes above. Bar nodes are appended from
+  # ggplot_build layers below after coordinate transformation.
+  .scene <- list()
+  .add_text_scene <- function(.id, .role, .box, .path) {{
+    if (is.null(.box)) return(invisible(NULL))
+    # A degenerate cell means the element is NOT rendered (e.g. labs(x = NULL)):
+    # keep it as the "add here" band for explicit corrections, but flag it so
+    # hit-testing never resolves a drawn mark onto invisible text.
+    .placeholder <- ((.box$x1 - .box$x0) <= 1) || ((.box$y1 - .box$y0) <= 1)
+    .scene[[length(.scene) + 1]] <<- list(
+      id = .id, kind = "text", role = .role, bbox_px = .box,
+      bbox_source = "gtable_cell", editable = TRUE, setting_path = .path,
+      placeholder = .placeholder)
+  }}
+  .add_text_scene("element:title", "title", .obj$title_px, "options.title")
+  .add_text_scene({rq(xlab_scene[0])}, {rq(xlab_scene[1])}, .obj$xlab_px, {rq(xlab_scene[2])})
+  .add_text_scene({rq(ylab_scene[0])}, {rq(ylab_scene[1])}, .obj$ylab_px, {rq(ylab_scene[2])})
+  # ---- NEW: axis tick-label strips as first-class semantic targets ----
+  # theme(axis.text.x/y) is positional, so the BOTTOM strip always maps to the
+  # x_text_angle option even under coord_flip. Only real (non-degenerate)
+  # strips are emitted - there is nothing to click on an axis without labels.
+  .add_axis_text_scene <- function(.id, .role, .box, .path) {{
+    if (is.null(.box)) return(invisible(NULL))
+    if (((.box$x1 - .box$x0) <= 1) || ((.box$y1 - .box$y0) <= 1)) return(invisible(NULL))
+    .scene[[length(.scene) + 1]] <<- list(
+      id = .id, kind = "text", role = .role, bbox_px = .box,
+      bbox_source = "gtable_cell", editable = TRUE, setting_path = .path,
+      placeholder = FALSE)
+  }}
+  .add_axis_text_scene("element:axis:x:tick_labels", "x_tick_labels", .obj$x_axis_px, "options.x_text_angle")
+  .add_axis_text_scene("element:axis:y:tick_labels", "y_tick_labels", .obj$y_axis_px, "options.y_tick_format")
+  # ---- NEW: legend / continuous colorbar box (gtable guide-box-* cells) ----
+  # ggplot2 keeps one guide-box cell per side; only the rendered side is
+  # non-degenerate, so .cell_box's non-degenerate union is exactly the visible
+  # guide area. A continuous colour/fill scale without any discrete scale
+  # renders a colorbar; everything else is a discrete legend box.
+  tryCatch({{
+    if (exists(".cell_box", inherits = FALSE)) {{
+      # ggplot2 >= 3.5 keeps one guide-box cell per side plus a panel-sized
+      # guide-box-inside cell; empty side cells are zero-size while the inside
+      # cell is panel-sized even when unused, so measure each rendered side
+      # separately and never union across guide-box cells.
+      .gbx <- NULL
+      for (.side in c("right", "left", "bottom", "top")) {{
+        .bb <- .cell_box(paste0("^guide-box-", .side, "$"))
+        if (!is.null(.bb) && (.bb$x1 - .bb$x0) > 4 && (.bb$y1 - .bb$y0) > 4) {{
+          .gbx <- .bb
+          break
+        }}
+      }}
+      if (is.null(.gbx)) {{
+        .bb <- .cell_box("^guide-box$")  # single-cell layout of older ggplot2
+        if (!is.null(.bb) && (.bb$x1 - .bb$x0) > 4 && (.bb$y1 - .bb$y0) > 4) .gbx <- .bb
+      }}
+      if (!is.null(.gbx)) {{
+        .cont_scale <- NULL
+        for (.aes in c("fill", "colour")) {{
+          .scc <- tryCatch(.gb$plot$scales$get_scales(.aes), error = function(e) NULL)
+          if (!is.null(.scc) && !isTRUE(tryCatch(.scc$is_discrete(), error = function(e) TRUE))) {{
+            .cont_scale <- .scc
+            break
+          }}
+        }}
+        .guide_role <- if (is.null(.disc_scale) && !is.null(.cont_scale)) "colorbar" else "legend"
+        .scene[[length(.scene) + 1]] <- list(
+          id = if (identical(.guide_role, "colorbar")) "element:legend:colorbar" else "element:legend:box",
+          kind = "guide", role = .guide_role, bbox_px = .gbx,
+          bbox_source = "gtable_cell", editable = TRUE,
+          setting_path = "options.legend_position",
+          placeholder = FALSE)
+      }}
+    }}
+  }}, error = function(e) {{}})
   grDevices::dev.off()
   # ---- NEW: layer_geom — bounded per-layer data-space geometry for hit-testing ----
   tryCatch({{
@@ -481,9 +663,196 @@ tryCatch({{
                      box = list(xmin = .xr2[1], xmax = .xr2[2], ymin = .yr2[1], ymax = .yr2[2]))
       if (!is.null(.samp)) .entry$pts <- .samp
       .lg[[length(.lg) + 1]] <- .entry
+
+      # grouped_bar's geom_col carries inert semantic aesthetics through the
+      # build. Transform its rectangle edges through the active coord (handles
+      # dodge, scale transforms, coord_flip and coord_cartesian limits), then
+      # map panel-normalized coordinates into device pixels with top-origin y.
+      .mark_cols <- c("labplot_mark_id", "labplot_category", "labplot_series",
+                      "PANEL", "xmin", "xmax", "ymin", "ymax")
+      if (identical(.geom, "col") && all(.mark_cols %in% names(.d))) {{
+        for (.pid in unique(as.character(.d$PANEL))) {{
+          .pbx <- .scene_panel_px[[.pid]]
+          .ppx <- .scene_panel_params[[.pid]]
+          if (is.null(.pbx) || is.null(.ppx)) next
+          .rows <- which(as.character(.d$PANEL) == .pid)
+          .pd <- .d[.rows, , drop = FALSE]
+          .tr <- tryCatch(.gb$plot$coordinates$transform(.pd, .ppx), error = function(e) NULL)
+          if (is.null(.tr) || !all(c("xmin", "xmax", "ymin", "ymax") %in% names(.tr))) next
+          .pw <- .pbx$x1 - .pbx$x0; .ph <- .pbx$y1 - .pbx$y0
+          for (.ri in seq_len(nrow(.tr))) {{
+            .xv <- suppressWarnings(as.numeric(c(.tr$xmin[.ri], .tr$xmax[.ri])))
+            .yv <- suppressWarnings(as.numeric(c(.tr$ymin[.ri], .tr$ymax[.ri])))
+            if (length(.xv) != 2 || length(.yv) != 2 || any(!is.finite(c(.xv, .yv)))) next
+            .xlo <- max(0, min(1, min(.xv))); .xhi <- max(0, min(1, max(.xv)))
+            .ylo <- max(0, min(1, min(.yv))); .yhi <- max(0, min(1, max(.yv)))
+            if (.xhi <= .xlo || .yhi <= .ylo) next
+            .src <- .rows[.ri]
+            .mark_id <- as.character(.d$labplot_mark_id[.src])
+            .element_editable <- nchar(.mark_id, type = "bytes") <= 512 &&
+              sum(as.character(.d$labplot_mark_id) == .mark_id, na.rm = TRUE) == 1
+            .fill <- if ("fill" %in% names(.d)) as.character(.d$fill[.src]) else NA_character_
+            .stroke <- if ("colour" %in% names(.d)) as.character(.d$colour[.src]) else NA_character_
+            if (.element_editable && exists(".labplot_element_fill_overrides", inherits = FALSE)) {{
+              .override <- unname(.labplot_element_fill_overrides[.mark_id])
+              if (length(.override) && !is.na(.override)) .fill <- as.character(.override)
+            }}
+            if (.element_editable && exists(".labplot_element_stroke_overrides", inherits = FALSE)) {{
+              .override <- unname(.labplot_element_stroke_overrides[.mark_id])
+              if (length(.override) && !is.na(.override)) .stroke <- as.character(.override)
+            }}
+            .scene[[length(.scene) + 1]] <- list(
+              id = .mark_id,
+              kind = "mark", role = "bar", geom = "col",
+              category = as.character(.d$labplot_category[.src]),
+              series = as.character(.d$labplot_series[.src]),
+              panel_id = suppressWarnings(as.integer(.pid)),
+              layer_index = .li,
+              fill = .fill,
+              stroke = .stroke,
+              bbox_px = list(
+                x0 = .pbx$x0 + .xlo * .pw,
+                x1 = .pbx$x0 + .xhi * .pw,
+                y0 = .pbx$y1 - .yhi * .ph,
+                y1 = .pbx$y1 - .ylo * .ph),
+              editable = .element_editable,
+              setting_path = if (.element_editable) paste0("options.element_overrides.", .mark_id) else NA_character_)
+          }}
+        }}
+      }}
+
+      # Scatter's primary geom_point carries a stable source-row identity.
+      # Overlay layers deliberately omit these inert aesthetics, so only the
+      # original data mark becomes a hit target and legend semantics cannot be
+      # duplicated by a localized recolor.
+      .point_mark_cols <- c("labplot_mark_id", "labplot_row_identity", "PANEL", "x", "y")
+      if (identical(.geom, "point") && all(.point_mark_cols %in% names(.d))) {{
+        for (.pid in unique(as.character(.d$PANEL))) {{
+          .pbx <- .scene_panel_px[[.pid]]
+          .ppx <- .scene_panel_params[[.pid]]
+          if (is.null(.pbx) || is.null(.ppx)) next
+          .rows <- which(as.character(.d$PANEL) == .pid)
+          .pd <- .d[.rows, , drop = FALSE]
+          .tr <- tryCatch(.gb$plot$coordinates$transform(.pd, .ppx), error = function(e) NULL)
+          if (is.null(.tr) || !all(c("x", "y") %in% names(.tr))) next
+          .pw <- .pbx$x1 - .pbx$x0; .ph <- .pbx$y1 - .pbx$y0
+          for (.ri in seq_len(nrow(.tr))) {{
+            .xn <- suppressWarnings(as.numeric(.tr$x[.ri]))
+            .yn <- suppressWarnings(as.numeric(.tr$y[.ri]))
+            if (!is.finite(.xn) || !is.finite(.yn) || .xn < 0 || .xn > 1 || .yn < 0 || .yn > 1) next
+            .src <- .rows[.ri]
+            .mark_id <- as.character(.d$labplot_mark_id[.src])
+            .element_editable <- !is.na(.mark_id) && nzchar(.mark_id) &&
+              nchar(.mark_id, type = "bytes") <= 512 &&
+              sum(as.character(.d$labplot_mark_id) == .mark_id, na.rm = TRUE) == 1
+            .fill <- if ("colour" %in% names(.d)) as.character(.d$colour[.src]) else "black"
+            # The solid base glyph uses its colour for both interior and edge.
+            # Fill-only overlays use shape 21 and inherit this same mapped
+            # colour as their outline, so report it as the effective stroke.
+            .stroke <- .fill
+            if (.element_editable && exists(".labplot_element_fill_overrides", inherits = FALSE)) {{
+              .override <- unname(.labplot_element_fill_overrides[.mark_id])
+              if (length(.override) && !is.na(.override)) .fill <- as.character(.override)
+            }}
+            if (.element_editable && exists(".labplot_element_stroke_overrides", inherits = FALSE)) {{
+              .override <- unname(.labplot_element_stroke_overrides[.mark_id])
+              if (length(.override) && !is.na(.override)) .stroke <- as.character(.override)
+            }}
+            .cx <- .pbx$x0 + .xn * .pw
+            .cy <- .pbx$y1 - .yn * .ph
+            .size_mm <- if ("size" %in% names(.d)) suppressWarnings(as.numeric(.d$size[.src])) else 2
+            .stroke_mm <- if ("stroke" %in% names(.d)) suppressWarnings(as.numeric(.d$stroke[.src])) else 0
+            if (!is.finite(.size_mm)) .size_mm <- 2
+            if (!is.finite(.stroke_mm)) .stroke_mm <- 0
+            .radius <- max(7, (.size_mm + .stroke_mm) * .dpi / 25.4 / 2)
+            .scene[[length(.scene) + 1]] <- list(
+              id = .mark_id,
+              kind = "mark", role = "point", geom = "point",
+              row_identity = as.character(.d$labplot_row_identity[.src]),
+              x_value = if ("labplot_x_value" %in% names(.d)) as.character(.d$labplot_x_value[.src]) else NULL,
+              y_value = if ("labplot_y_value" %in% names(.d)) as.character(.d$labplot_y_value[.src]) else NULL,
+              panel_id = suppressWarnings(as.integer(.pid)),
+              layer_index = .li,
+              fill = .fill,
+              stroke = .stroke,
+              alpha = if ("alpha" %in% names(.d)) suppressWarnings(as.numeric(.d$alpha[.src])) else 1,
+              bbox_source = "ggplot_build_coord_transform",
+              bbox_px = list(
+                x0 = max(.pbx$x0, .cx - .radius),
+                x1 = min(.pbx$x1, .cx + .radius),
+                y0 = max(.pbx$y0, .cy - .radius),
+                y1 = min(.pbx$y1, .cy + .radius)),
+              editable = .element_editable,
+              setting_path = if (.element_editable) paste0("options.element_overrides.", .mark_id) else NA_character_)
+          }}
+        }}
+      }}
+
+      # Heatmaps carry semantic row/column labels on their base geom_tile.
+      # The rectangle transform is identical to grouped bars, but cell IDs are
+      # never derived from color/value or display order.
+      .cell_mark_cols <- c("labplot_mark_id", "PANEL", "xmin", "xmax", "ymin", "ymax")
+      .has_cell_semantics <- all(c("labplot_row", "labplot_col") %in% names(.d)) ||
+        all(c("labplot_x", "labplot_y") %in% names(.d))
+      if (identical(.geom, "tile") && .has_cell_semantics && all(.cell_mark_cols %in% names(.d))) {{
+        for (.pid in unique(as.character(.d$PANEL))) {{
+          .pbx <- .scene_panel_px[[.pid]]
+          .ppx <- .scene_panel_params[[.pid]]
+          if (is.null(.pbx) || is.null(.ppx)) next
+          .rows <- which(as.character(.d$PANEL) == .pid)
+          .pd <- .d[.rows, , drop = FALSE]
+          .tr <- tryCatch(.gb$plot$coordinates$transform(.pd, .ppx), error = function(e) NULL)
+          if (is.null(.tr) || !all(c("xmin", "xmax", "ymin", "ymax") %in% names(.tr))) next
+          .pw <- .pbx$x1 - .pbx$x0; .ph <- .pbx$y1 - .pbx$y0
+          for (.ri in seq_len(nrow(.tr))) {{
+            .xv <- suppressWarnings(as.numeric(c(.tr$xmin[.ri], .tr$xmax[.ri])))
+            .yv <- suppressWarnings(as.numeric(c(.tr$ymin[.ri], .tr$ymax[.ri])))
+            if (length(.xv) != 2 || length(.yv) != 2 || any(!is.finite(c(.xv, .yv)))) next
+            .xlo <- max(0, min(1, min(.xv))); .xhi <- max(0, min(1, max(.xv)))
+            .ylo <- max(0, min(1, min(.yv))); .yhi <- max(0, min(1, max(.yv)))
+            if (.xhi <= .xlo || .yhi <= .ylo) next
+            .src <- .rows[.ri]
+            .mark_id <- as.character(.d$labplot_mark_id[.src])
+            .element_editable <- !is.na(.mark_id) && nzchar(.mark_id) &&
+              nchar(.mark_id, type = "bytes") <= 512 &&
+              sum(as.character(.d$labplot_mark_id) == .mark_id, na.rm = TRUE) == 1
+            .fill <- if ("fill" %in% names(.d)) as.character(.d$fill[.src]) else NA_character_
+            .stroke <- if ("colour" %in% names(.d)) as.character(.d$colour[.src]) else NA_character_
+            if (.element_editable && exists(".labplot_element_fill_overrides", inherits = FALSE)) {{
+              .override <- unname(.labplot_element_fill_overrides[.mark_id])
+              if (length(.override) && !is.na(.override)) .fill <- as.character(.override)
+            }}
+            if (.element_editable && exists(".labplot_element_stroke_overrides", inherits = FALSE)) {{
+              .override <- unname(.labplot_element_stroke_overrides[.mark_id])
+              if (length(.override) && !is.na(.override)) .stroke <- as.character(.override)
+            }}
+            .scene[[length(.scene) + 1]] <- list(
+              id = .mark_id,
+              kind = "mark", role = "cell", geom = "tile",
+              row = if ("labplot_row" %in% names(.d)) as.character(.d$labplot_row[.src]) else NULL,
+              column = if ("labplot_col" %in% names(.d)) as.character(.d$labplot_col[.src]) else NULL,
+              x_value = if ("labplot_x" %in% names(.d)) as.character(.d$labplot_x[.src]) else NULL,
+              y_value = if ("labplot_y" %in% names(.d)) as.character(.d$labplot_y[.src]) else NULL,
+              value = if ("labplot_value" %in% names(.d)) suppressWarnings(as.numeric(.d$labplot_value[.src])) else NULL,
+              panel_id = suppressWarnings(as.integer(.pid)),
+              layer_index = .li,
+              fill = .fill,
+              stroke = .stroke,
+              bbox_source = "ggplot_build_coord_transform",
+              bbox_px = list(
+                x0 = .pbx$x0 + .xlo * .pw,
+                x1 = .pbx$x0 + .xhi * .pw,
+                y0 = .pbx$y1 - .yhi * .ph,
+                y1 = .pbx$y1 - .ylo * .ph),
+              editable = .element_editable,
+              setting_path = if (.element_editable) paste0("options.element_overrides.", .mark_id) else NA_character_)
+          }}
+        }}
+      }}
     }}
     if (length(.lg)) .obj$layer_geom <- .lg
   }}, error = function(e) {{}})
+  if (length(.scene)) .obj$scene_elements <- .scene
   jsonlite::write_json(.obj, "figure_layout.json", auto_unbox = TRUE, digits = 6)
 }}, error = function(e) message("layout skip: ", conditionMessage(e)))
 """
@@ -506,7 +875,9 @@ if (isTRUE(capabilities("cairo"))) {{
                       opts.get("custom_palette_values"), opts.get("font_family"),
                       bool(opts.get("transparent_background")),
                       legend_key_size=opts.get("legend_key_size"),
-                      base_size=opts.get("base_size"))
+                      base_size=opts.get("base_size"),
+                      axis_line_width_pt=opts.get("axis_line_width_pt"),
+                      data_line_width_pt=opts.get("data_line_width_pt"))
             + plot_r
             + theme_append
             + post
@@ -523,11 +894,20 @@ class RenderResult:
 
 def render(plot_type: str, mapping: dict, options: dict, preset: str,
            df: pd.DataFrame, out_dir: str) -> RenderResult:
-    r_code = build_script(plot_type, mapping, options, preset)
+    source_row_id_column = _unused_source_row_id_column(df.columns)
+    r_code = build_script(
+        plot_type,
+        mapping,
+        options,
+        preset,
+        source_row_id_column=source_row_id_column,
+    )
     os.makedirs(out_dir, exist_ok=True)
 
     with tempfile.TemporaryDirectory(prefix="labplot_") as work:
-        df.to_csv(os.path.join(work, "data.csv"), index=False)
+        render_df = df.copy()
+        render_df[source_row_id_column] = [_source_row_identity(value) for value in df.index]
+        render_df.to_csv(os.path.join(work, "data.csv"), index=False)
         with open(os.path.join(work, "figure.R"), "w") as f:
             f.write(r_code)
         try:

@@ -1,5 +1,6 @@
 'use client';
 
+import { useState } from 'react';
 import { useTheme } from 'next-themes';
 import { Moon, Sun } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -19,9 +20,10 @@ const THEMES = [
 
 export function ThemeToggle() {
   const { theme, setTheme } = useTheme();
+  const [open, setOpen] = useState(false);
 
   return (
-    <DropdownMenu>
+    <DropdownMenu open={open} onOpenChange={setOpen}>
       <DropdownMenuTrigger
         render={<Button type="button" variant="ghost" size="icon-sm" aria-label="Toggle theme" />}
       >
@@ -29,7 +31,13 @@ export function ThemeToggle() {
         <Moon className="hidden h-4 w-4 dark:block" aria-hidden="true" />
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-32">
-        <DropdownMenuRadioGroup value={theme} onValueChange={(value) => setTheme(String(value))}>
+        <DropdownMenuRadioGroup
+          value={theme}
+          onValueChange={(value) => {
+            setTheme(String(value));
+            setOpen(false);
+          }}
+        >
           {THEMES.map((t) => (
             <DropdownMenuRadioItem key={t.value} value={t.value}>
               {t.label}
