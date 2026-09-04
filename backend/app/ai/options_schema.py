@@ -22,6 +22,8 @@ Widening what the AI can express here never widens what the server accepts.
 """
 from __future__ import annotations
 
+from functools import lru_cache
+
 from app.figures.option_metadata import (
     _BOOL_OPTIONS,
     _INTEGER_NUMBER_KEYS,
@@ -29,6 +31,7 @@ from app.figures.option_metadata import (
     _OPTION_CHOICES,
     _UNIVERSAL_OPTION_KEYS,
 )
+from app.r_engine.option_support import potentially_supported_option_keys, supported_option_keys
 from app.r_engine.templates import PLOT_TYPES
 
 # Keys that sanitize_options/_sanitize_option would accept but are
@@ -78,20 +81,47 @@ def _number_schema(key: str) -> dict:
 # figures/service.py:_sanitize_option). This is shape metadata, not an option
 # allow-list: which keys exist is still driven entirely by
 # _UNIVERSAL_OPTION_KEYS and the per-plot-type option keys below.
+#
+# category_colors and element_overrides are modeled as ARRAYS here, not the
+# maps sanitize_options actually wants, because Gemini's responseSchema
+# (providers._to_gemini_schema) rejects any JSON-Schema object without a
+# `properties` key - which an open `additionalProperties` map necessarily is.
+# Without this, run_structured_with_usage silently falls back to prompt-only
+# JSON for every improve_figure call on Gemini (verified root cause of
+# "AI edits not applied" - M-A1.1). client._denormalize_patch_lists() converts
+# these array shapes back to the map shape sanitize_options expects before
+# anything else consumes a suggestion's param_patch.
 _STRUCTURAL_SHAPES = {
-    "category_colors": {"type": "object", "additionalProperties": {"type": "string"}},
-    # Stable semantic scene-element id -> a deliberately tiny visual patch.
-    # The service sanitizer remains authoritative for the id grammar, entry
-    # bound, and #RRGGBB validation; this schema only constrains model output
-    # to the renderer-supported fill/stroke surface.
-    "element_overrides": {
-        "type": "object",
-        "additionalProperties": {
+    # Array of {level, color} pairs; denormalized to {level: color} in
+    # client._denormalize_patch_lists() before sanitize_options sees it.
+    "category_colors": {
+        "type": "array",
+        "items": {
             "type": "object",
             "properties": {
+                "level": {"type": "string"},
+                "color": {"type": "string"},
+            },
+            "required": ["level", "color"],
+        },
+    },
+    # Array of {id, fill?, stroke?} entries - the same stable
+    # scene-element id -> tiny visual patch semantics as the map shape, just
+    # flattened to an array so every entry has a fixed `properties` set. The
+    # service sanitizer remains authoritative for the id grammar, entry
+    # bound, and #RRGGBB validation; this schema only constrains model output
+    # to the renderer-supported fill/stroke surface. Denormalized back to
+    # {id: {fill, stroke}} in client._denormalize_patch_lists().
+    "element_overrides": {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string"},
                 "fill": {"type": "string"},
                 "stroke": {"type": "string"},
             },
+            "required": ["id"],
         },
     },
     "level_order": {"type": "array", "items": {"type": "string"}},
@@ -134,13 +164,34 @@ def _all_option_keys() -> set[str]:
     return keys - _EXCLUDED_OPTION_KEYS
 
 
-def build_options_patch_schema() -> dict:
+def _plot_type_option_keys(plot_type: str) -> set[str]:
+    """Every option key the R generator could actually consume for
+    `plot_type`, per app.r_engine.option_support's registry (A1.3(a)) - the
+    union of keys consumed for a bare/default mapping+options AND keys only
+    conditionally consumed (e.g. error_type, which needs error_bars on; a
+    fresh figure would otherwise have it silently dropped from the schema
+    just because error_bars happens to be off right now), minus the
+    excluded-by-design keys."""
+    keys = supported_option_keys(plot_type, None, None) | potentially_supported_option_keys(plot_type)
+    return keys - _EXCLUDED_OPTION_KEYS
+
+
+@lru_cache(maxsize=None)
+def build_options_patch_schema(plot_type: str | None = None) -> dict:
     """Build the `options` patch JSON schema the AI editor is allowed to
     propose, generated from the real render/sanitize metadata rather than a
-    hand-maintained list. Called once at import time; the result is a plain
-    dict (mutating it after import is the caller's responsibility, same
-    contract as the schema it replaces)."""
-    keys = _all_option_keys()
+    hand-maintained list.
+
+    `plot_type=None` (the default, and what the import-time Gemini-
+    compatibility guard in app.ai.client validates) keeps the original flat
+    union across every plot type. A concrete `plot_type` narrows the schema
+    to only the option keys app.r_engine.option_support says this plot type
+    could ever consume, so the model is not offered (and cannot be graded
+    against) a key like `error_type` on a plot type that never reads it.
+    Cached per plot_type (functools.lru_cache) since option_support's own
+    per-type computation walks every builder's source via `inspect` once.
+    """
+    keys = _all_option_keys() if plot_type is None else _plot_type_option_keys(plot_type)
     return {
         "type": "object",
         "properties": {key: _schema_for_key(key) for key in sorted(keys)},

@@ -536,6 +536,9 @@ export interface ImprovementEditScope {
   requested_target_override?: AiResolvedMarkTarget | null;
   accepted_target_override?: AiResolvedMarkTarget | null;
   target_override_status?: 'accepted' | 'rejected' | string | null;
+  // (A1.4) Patch paths this scope proposed that sanitize/registry dropped,
+  // each with a short human-readable reason.
+  dropped?: { path: string; reason: string }[];
 }
 
 export interface Improvement {
@@ -550,6 +553,11 @@ export interface Improvement {
   applied: boolean;
   // Dotted paths this suggestion proposed that were dropped by sanitization.
   skipped?: string[];
+  // (A1.4) `skipped` path -> a short human-readable reason it was dropped
+  // (allow-list miss, invalid value, the option_support registry reason, or
+  // "not authorized by the edit request"). Not guaranteed to cover every
+  // `skipped` entry.
+  skipped_reasons?: Record<string, string>;
   unsupported?: UnsupportedRequestItem[];
   // Optional legacy mark-traceability metadata. `edit_scope` is authoritative;
   // old explicit Mark A / Mark #1 fields or prose can still be recognized, but
@@ -588,6 +596,10 @@ export interface VerificationResult {
   skipped?: string | null;
   allowed_patch_keys?: string[];
   unrequested_changes?: AppliedChangeItem[];
+  // Present only when the server's verification-loop exception guard fired:
+  // "<ExceptionType>: <message>" - distinguishes a genuine crash from a
+  // normal satisfied=false verdict. Serialized as null when absent.
+  error?: string | null;
 }
 
 // Response shape for both apply endpoints (U10b/U10c). Wraps FigureVersion
@@ -597,6 +609,10 @@ export interface ImprovementApplyResult {
   version: FigureVersion;
   applied_changes: AppliedChangeItem[];
   dropped_keys: string[];
+  // (A1.4) `dropped_keys` entry -> the option_support registry reason, when
+  // the key was touched but never actually consumed by the R generator for
+  // this plot type/mapping/options. Not guaranteed to cover every entry.
+  dropped_reasons?: Record<string, string>;
   verification?: VerificationResult | null;
 }
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timezone
 
@@ -12,6 +13,8 @@ from app.common.exceptions import AppError
 from app.common import storage
 from app.datasets.models import Dataset
 from app.figures.models import Figure, FigureVersion
+
+logger = logging.getLogger(__name__)
 
 
 def _month_start() -> datetime:
@@ -55,7 +58,10 @@ def storage_used_bytes(db: Session, user_id: uuid.UUID) -> int:
     for path in set(paths):
         try:
             total += storage.size(path)
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 - best effort, but never silent
+            # An unreadable object under-reports usage and could let a user slip
+            # past the storage quota; log it so operators can see the drift.
+            logger.warning("storage_used_bytes: could not size %s: %s", path, exc)
             continue
     return total
 

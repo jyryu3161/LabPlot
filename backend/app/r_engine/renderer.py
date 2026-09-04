@@ -19,6 +19,8 @@ from app.r_engine.templates import (
     NO_THEME_TYPES,
     POST_THEME_R,
     build_plot_r,
+    has_discrete_color_scale,
+    has_visible_discrete_legend,
     rq,
 )
 
@@ -206,6 +208,64 @@ p <- labplot_apply_category_colors(p)
 """
 
 
+def _legend_ncol_r(ncol: int) -> str:
+    """R for ``legend_ncol``: arrange each DISCRETE fill/colour/shape/linetype
+    legend into ``ncol`` columns via ``guide_legend(ncol = ...)``.
+
+    Mirrors ``_category_color_override_r``'s ggplot_build-based discreteness
+    check so a continuous colourbar (e.g. heatmap's fill gradient) is never
+    coerced into a paginated discrete legend -- guide_colourbar has no ``ncol``
+    concept and forcing guide_legend onto it would silently replace the
+    colourbar with a broken discrete guide.
+
+    Unlike a plain ``plot + guides(<aes> = guide_legend(ncol = N))``, this
+    does NOT replace the plot's existing guide for the aesthetic wholesale --
+    ggplot2's ``Guides$add()`` merges a new guide onto an existing one BY
+    NAME, so blindly adding a fresh ``guide_legend()`` here would discard the
+    template's ``guide_legend(title = ...)`` (the legend title falls back to
+    the deparsed aes expression, e.g. ``factor(df[["Treatment"]])``) and would
+    resurrect a legend the template deliberately hid via
+    ``guides(fill = "none")`` / ``scale_..._manual(..., guide = "none")``
+    (bar's color_bars legend, manhattan's internal `.band` scale, ...) --
+    exactly mirroring ``_category_color_override_r``'s ``name = sc$name``
+    preservation, but for the whole guide object rather than just its name.
+    Instead: read the CURRENT guide (plot-level ``guides()`` wins over the
+    scale's own ``guide=``), copy it via ``ggproto(NULL, .)`` when it is a
+    real ``GuideLegend`` (preserving title/override.aes/everything else) and
+    only set ``params$ncol``, or skip the aesthetic entirely when the guide is
+    ``"none"``/non-legend. ``ncol`` is a Python int already clamped by the
+    caller, so it is safe to interpolate directly (this also keeps the
+    literal ``guide_legend(ncol = N)`` call visible in the generated script
+    for reproducibility/debugging -- app.figures.service._r_code_check_for_patch
+    and tests/test_option_support_registry.py both grep for this exact text).
+    """
+    return f"""
+labplot_apply_legend_ncol <- function(plot) {{
+  built <- tryCatch(ggplot2::ggplot_build(plot), error = function(e) NULL)
+  if (is.null(built)) return(plot)
+  .args <- list()
+  for (.aes in c("fill", "colour", "shape", "linetype")) {{
+    sc <- built$plot$scales$get_scales(.aes)
+    if (is.null(sc)) next
+    if (!isTRUE(tryCatch(sc$is_discrete(), error = function(e) FALSE))) next
+    .g <- tryCatch(plot$guides$guides[[.aes]], error = function(e) NULL)
+    if (is.null(.g)) .g <- tryCatch(sc$guide, error = function(e) NULL)
+    if (is.character(.g)) {{
+      if (!identical(.g, "legend")) next
+      .args[[.aes]] <- ggplot2::guide_legend(ncol = {ncol})
+    }} else if (inherits(.g, "GuideLegend")) {{
+      .g2 <- ggplot2::ggproto(NULL, .g)
+      .g2$params$ncol <- {ncol}L
+      .args[[.aes]] <- .g2
+    }} else next
+  }}
+  if (!length(.args)) return(plot)
+  plot + do.call(ggplot2::guides, .args)
+}}
+p <- labplot_apply_legend_ncol(p)
+"""
+
+
 def build_script(plot_type: str, mapping: dict, options: dict, preset: str,
                  data_filename: str = "data.csv", *,
                  source_row_id_column: str = _SOURCE_ROW_ID_COLUMN) -> str:
@@ -268,7 +328,14 @@ if (isTRUE(capabilities("cairo"))) {{
         lt = opts.get("legend_title")
         if lt:
             post += f"p <- p + labs(fill = {rq(lt)}, colour = {rq(lt)})\n"
-        post += _category_color_override_r(opts)
+        # Gate emission (not just the runtime is_discrete() guard inside the
+        # helper) on has_discrete_color_scale() so option_support.py's
+        # registry stays decidable from this script's TEXT alone: when no
+        # builder call site can ever produce a discrete fill/colour scale for
+        # this plot_type/mapping/options, category_colors is a genuine no-op
+        # and the helper is skipped entirely rather than emitted-but-inert.
+        if has_discrete_color_scale(plot_type, mapping, opts):
+            post += _category_color_override_r(opts)
         legend_position = opts.get("legend_position")
         legend_hidden = bool(opts.get("hide_legend")) or legend_position == "none"
         if legend_hidden:
@@ -280,6 +347,25 @@ if (isTRUE(capabilities("cairo"))) {{
             # theme(legend.direction) covers discrete legends AND continuous
             # colourbars (guide_colourbar inherits it in ggplot2 >= 3.5).
             post += f'p <- p + theme(legend.direction = "{legend_direction}")\n'
+        legend_ncol = opts.get("legend_ncol")
+        # has_visible_discrete_legend() excludes DEVICE_TYPES, plot types with
+        # no discrete fill/colour/shape/linetype scale for this mapping/
+        # options (e.g. scatter without a color mapping, bar without
+        # color_bars, CONTINUOUS_FILL_TYPES like heatmap), AND plot types
+        # whose discrete scale's guide is hardcoded hidden regardless of
+        # options (bar, ridge, manhattan, sankey) or conditionally hidden
+        # (parallel_coordinates/radar without their optional group mapped) --
+        # in every one of those cases there is no visible legend for ncol to
+        # page. Skipping emission entirely (rather than relying solely on the
+        # R-side is_discrete() guard) keeps option_support.py's registry
+        # decidable from build_script's text alone, without executing R.
+        if not legend_hidden and legend_ncol is not None and has_visible_discrete_legend(plot_type, mapping, opts):
+            try:
+                ncol = max(1, min(8, int(legend_ncol)))
+            except (TypeError, ValueError):
+                ncol = None
+            if ncol is not None:
+                post += _legend_ncol_r(ncol)
         x_angle = opts.get("x_text_angle")
         if x_angle in (None, ""):
             # Template-default rotation (e.g. heatmap 45deg) rides the same

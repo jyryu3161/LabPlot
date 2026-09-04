@@ -291,6 +291,11 @@ class VerificationResult(BaseModel):
     skipped: str | None = None
     allowed_patch_keys: list[str] = Field(default_factory=list)
     unrequested_changes: list[AppliedChangeItem] = Field(default_factory=list)
+    # Present only when `_run_verification`'s broad exception guard fired:
+    # "<ExceptionType>: <message[:300]>" - so a genuine crash is distinguishable
+    # from a normal `satisfied=False` verdict instead of silently looking like
+    # one. Additive/optional; a normal run never sets this.
+    error: str | None = None
 
 
 class ImprovementApplyResponse(BaseModel):
@@ -303,6 +308,13 @@ class ImprovementApplyResponse(BaseModel):
     # (U10b) Patch keys that sanitize_options removed, or that provably
     # changed nothing versus the pre-apply state.
     dropped_keys: list[str] = Field(default_factory=list)
+    # (A1.4) `dropped_keys` entry -> why: the app.r_engine.option_support
+    # registry reason when the key was touched but the R generator never
+    # actually consumes it for this plot type/mapping/options (rather than a
+    # bare "changed nothing"). Additive/optional; not guaranteed to cover
+    # every dropped_keys entry (e.g. a plain sanitize-time removal has no
+    # registry reason to report).
+    dropped_reasons: dict[str, str] = Field(default_factory=dict)
     # (U10c) Present only when the caller opted in with verify=true AND a
     # non-empty original_request.
     verification: VerificationResult | None = None
@@ -442,6 +454,14 @@ class ImprovementResponse(BaseModel):
     # Dotted paths the AI proposed for this suggestion that were dropped by
     # sanitization (unsupported key, wrong type, or unknown column).
     skipped: list[str] = Field(default_factory=list)
+    # (A1.4) `skipped` path -> a short human-readable reason it was dropped:
+    # "not an option for <plot_type>" (allow-list miss), "invalid value"
+    # (sanitize shape/clamp drop), the app.r_engine.option_support registry
+    # reason (accepted by sanitize but never consumed by the R generator for
+    # the current mapping/options), or "not authorized by the edit request"
+    # (authorization-scope filter). Additive/optional so older clients are
+    # unaffected; not guaranteed to cover every `skipped` entry.
+    skipped_reasons: dict[str, str] = Field(default_factory=dict)
     # Parts of the improve request the AI reported it could NOT express as a
     # supported param_patch (U10b). Property of the whole improve_version call
     # this suggestion came from, not of this suggestion alone - the same list

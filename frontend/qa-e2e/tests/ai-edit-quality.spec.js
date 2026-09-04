@@ -189,7 +189,18 @@ test.describe('AI edit quality (U10)', () => {
       'import json',
       's = build_options_patch_schema()',
       'props = s["properties"]',
-      'print(json.dumps({"count": len(props), "keys": sorted(props.keys())}))',
+      // A1.3(a)/A1.3(b): the per-plot-type schema (M-A1.3) must still shape
+      // category_colors as an array-of-{level,color} objects (never the raw
+      // map sanitize_options wants — see options_schema._STRUCTURAL_SHAPES —
+      // because Gemini's responseSchema rejects a property-less object), and
+      // must actually offer it for a plot type with a discrete colour scale.
+      'scatter_s = build_options_patch_schema("scatter")',
+      'scatter_props = scatter_s["properties"]',
+      'cat_colors_schema = scatter_props.get("category_colors")',
+      'print(json.dumps({'
+        + '"count": len(props), "keys": sorted(props.keys()), '
+        + '"scatter_category_colors_schema": cat_colors_schema'
+        + '}))',
     ].join('\n');
 
     let out;
@@ -211,6 +222,16 @@ test.describe('AI edit quality (U10)', () => {
     for (const key of ['base_size', 'x_breaks', 'x_tick_format', 'reverse_x', 'show_data_labels']) {
       expect(result.keys).toContain(key);
     }
+    // A1.3(a)/A1.3(b): the scatter-narrowed schema still offers category_colors
+    // (scatter has a discrete colour scale) as an array of {level, color}
+    // objects, not the raw {level: color} map — the Gemini-compatible shape
+    // options_schema._STRUCTURAL_SHAPES defines and client._denormalize_patch_lists
+    // converts back before sanitize_options sees it.
+    const catColorsSchema = result.scatter_category_colors_schema;
+    expect(catColorsSchema, 'scatter schema dropped category_colors').toBeTruthy();
+    expect(catColorsSchema.type).toBe('array');
+    expect(catColorsSchema.items?.type).toBe('object');
+    expect(Object.keys(catColorsSchema.items?.properties || {}).sort()).toEqual(['color', 'level']);
   });
 
   test('U10c: "Verify result (AI)" toggle defaults on and persists across reload', async ({ page, request }) => {

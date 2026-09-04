@@ -15,6 +15,31 @@ elsewhere - importers must reference these objects (not copy the literals).
 """
 from __future__ import annotations
 
+import re
+
+# Stable per-mark element IDs the renderer issues for click-to-edit overrides
+# (`options.element_overrides`). Moved here (was figures/service.py) so
+# app.r_engine.option_support (A1.3(a) consumed-options registry) can read the
+# same authoritative "which plot types support element_overrides" set without
+# importing figures.service (which pulls in app.ai.client / sqlalchemy).
+_URL_ID_TOKEN = r"(?:[A-Za-z0-9._~+\-]|%[0-9A-Fa-f]{2})+"
+_GROUPED_BAR_MARK_ID_RE = re.compile(
+    rf"^mark:grouped_bar:category={_URL_ID_TOKEN}&series={_URL_ID_TOKEN}$"
+)
+_SCATTER_MARK_ID_RE = re.compile(rf"^mark:scatter:row={_URL_ID_TOKEN}$")
+_HEATMAP_MARK_ID_RE = re.compile(
+    rf"^mark:heatmap:row={_URL_ID_TOKEN}&col={_URL_ID_TOKEN}$"
+)
+_CORRELATION_HEATMAP_MARK_ID_RE = re.compile(
+    rf"^mark:correlation_heatmap:x={_URL_ID_TOKEN}&y={_URL_ID_TOKEN}$"
+)
+_ELEMENT_MARK_ID_RE_BY_PLOT = {
+    "grouped_bar": _GROUPED_BAR_MARK_ID_RE,
+    "scatter": _SCATTER_MARK_ID_RE,
+    "heatmap": _HEATMAP_MARK_ID_RE,
+    "correlation_heatmap": _CORRELATION_HEATMAP_MARK_ID_RE,
+}
+
 _UNIVERSAL_OPTION_KEYS = {
     "palette_name", "size", "width_in", "height_in", "color_mode", "font_scale", "base_size", "dpi",
     # Global line-thickness multiplier (×default). Universal: scales every

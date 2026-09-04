@@ -1,6 +1,17 @@
 # Biology Figure And Statistics Review
 
-Date: 2026-06-15
+> **Superseded 2026-09-04.** This review is kept for history. Re-verified against the
+> code on 2026-09-04: the plot registry now has **47** types (`backend/app/r_engine/templates.py`),
+> and of the ten gaps listed below `dot_plot`, `embedding` (UMAP/t-SNE), `upset`, `forest`,
+> `ma_plot`, `lollipop` and `sina` are shipped. The statistics module
+> (`backend/app/datasets/stats.py`) now includes Benjamini–Hochberg FDR, Mann–Whitney U,
+> Kruskal–Wallis, Shapiro–Wilk, Levene, and Cohen's d / Hedges' g with 95% CI.
+>
+> **Still open (2026-09):** GSEA running-enrichment curve, Venn diagram, sequence logo;
+> survival statistics (log-rank / Cox); paired tests (paired t / Wilcoxon signed-rank).
+> Everything else below should be read as resolved unless it is in that list.
+
+Date: 2026-06-15 (original)
 
 ## Scope
 

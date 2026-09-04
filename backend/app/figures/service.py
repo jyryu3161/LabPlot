@@ -4,6 +4,7 @@ import base64
 import binascii
 import io
 import json
+import logging
 import math
 import os
 import re
@@ -32,12 +33,26 @@ from app.datasets.models import Dataset
 from app.datasets import service as ds_service
 from app.figures import codegen
 from app.figures.models import Figure, FigureCodeArtifact, FigureComment, FigureTemplateFavorite, FigureVersion, Improvement, Recommendation, Review
-from app.figures.option_metadata import _BOOL_OPTIONS, _NUMBER_OPTIONS, _OPTION_CHOICES, _UNIVERSAL_OPTION_KEYS
+from app.figures.option_metadata import (
+    _BOOL_OPTIONS,
+    _CORRELATION_HEATMAP_MARK_ID_RE,
+    _ELEMENT_MARK_ID_RE_BY_PLOT,
+    _GROUPED_BAR_MARK_ID_RE,
+    _HEATMAP_MARK_ID_RE,
+    _NUMBER_OPTIONS,
+    _OPTION_CHOICES,
+    _SCATTER_MARK_ID_RE,
+    _UNIVERSAL_OPTION_KEYS,
+)
 from app.palettes import service as palette_service
 from app.projects.models import Project
 from app.r_engine import renderer
+from app.r_engine.option_support import option_support as _option_support
+from app.r_engine.option_support import unsupported_reason as _option_unsupported_reason
 from app.r_engine.presets import DEFAULT_NEW_FIGURE_OPTIONS, PRESETS, journal_spec
 from app.r_engine.templates import CONTINUOUS_FILL_TYPES, DEFAULT_X_TEXT_ANGLE, PLOT_TYPES, PLOT_TYPE_KEYS, rq
+
+logger = logging.getLogger(__name__)
 
 _STATIC_ROOT = os.path.dirname(settings.figures_dir.rstrip("/"))
 # _UNIVERSAL_OPTION_KEYS / _OPTION_CHOICES / _BOOL_OPTIONS / _NUMBER_OPTIONS now
@@ -63,27 +78,37 @@ _COLOR_WORDS = {
     "purple": "#7E22CE",
     "보라": "#7E22CE",
     "보라색": "#7E22CE",
+    "orange": "#EA580C",
+    "주황": "#EA580C",
+    "주황색": "#EA580C",
+    "yellow": "#CA8A04",
+    "노란": "#CA8A04",
+    "노랑": "#CA8A04",
+    "노란색": "#CA8A04",
+    "pink": "#DB2777",
+    "분홍": "#DB2777",
+    "분홍색": "#DB2777",
+    "brown": "#92400E",
+    "갈색": "#92400E",
+    "teal": "#0D9488",
+    "navy": "#1E3A8A",
+    "남색": "#1E3A8A",
 }
 # Shared 6-digit hex-color validator (matches the inline checks used for
 # category_colors / line_color / palettes). Colors are upper-cased before test.
 _HEX_COLOR_RE = re.compile(r"#[0-9A-F]{6}")
-_URL_ID_TOKEN = r"(?:[A-Za-z0-9._~+\-]|%[0-9A-Fa-f]{2})+"
-_GROUPED_BAR_MARK_ID_RE = re.compile(
-    rf"^mark:grouped_bar:category={_URL_ID_TOKEN}&series={_URL_ID_TOKEN}$"
+# Color-name matcher for _COLOR_WORDS. English entries use \b so a plain
+# substring test does not false-positive on e.g. "red" inside "required";
+# Korean entries deliberately skip \b (Python's \w treats Hangul as a word
+# character, so a color word immediately followed by a particle - "파란색으로",
+# no space - would otherwise never see a boundary and never match, same
+# reasoning the rest of this file's Korean patterns already follow).
+_COLOR_WORD_RE = re.compile(
+    "|".join(
+        (rf"\b{re.escape(w)}\b" if w.isascii() else re.escape(w))
+        for w in sorted(_COLOR_WORDS, key=len, reverse=True)
+    )
 )
-_SCATTER_MARK_ID_RE = re.compile(rf"^mark:scatter:row={_URL_ID_TOKEN}$")
-_HEATMAP_MARK_ID_RE = re.compile(
-    rf"^mark:heatmap:row={_URL_ID_TOKEN}&col={_URL_ID_TOKEN}$"
-)
-_CORRELATION_HEATMAP_MARK_ID_RE = re.compile(
-    rf"^mark:correlation_heatmap:x={_URL_ID_TOKEN}&y={_URL_ID_TOKEN}$"
-)
-_ELEMENT_MARK_ID_RE_BY_PLOT = {
-    "grouped_bar": _GROUPED_BAR_MARK_ID_RE,
-    "scatter": _SCATTER_MARK_ID_RE,
-    "heatmap": _HEATMAP_MARK_ID_RE,
-    "correlation_heatmap": _CORRELATION_HEATMAP_MARK_ID_RE,
-}
 _MAX_ELEMENT_OVERRIDES = 80
 _MAX_ELEMENT_ID_LENGTH = 512
 _LINE_COMPONENT_RE = re.compile(r"(line|선|라인)")
@@ -266,6 +291,26 @@ def _dataset_columns_for_ai(ds: Dataset | None, limit: int = 60) -> list[dict[st
     return out
 
 
+def _validate_axis_ranges(opts: dict[str, Any]) -> None:
+    """Drop an inverted/degenerate axis-range pair (min >= max) in place.
+
+    An invalid pair currently survives per-key sanitization (each of x_min/
+    x_max/y_min/y_max is sanitized independently as a plain finite float) and
+    is only silently ignored much later, at render time, by the
+    ``x_min is None or x_max is None or x_min < x_max`` guard in
+    ``renderer.build_script`` (coord_cartesian/coord_flip xlim/ylim). That
+    keeps the render safe but lets the AI-edit "applied" check see the stored
+    options dict change even though the range never took effect. Reject the
+    pair here too (defense in depth: the renderer guard stays as the last
+    line of defense for any option dict that reaches it via another path).
+    """
+    for lo_key, hi_key in (("x_min", "x_max"), ("y_min", "y_max")):
+        lo, hi = opts.get(lo_key), opts.get(hi_key)
+        if isinstance(lo, (int, float)) and isinstance(hi, (int, float)) and lo >= hi:
+            opts.pop(lo_key, None)
+            opts.pop(hi_key, None)
+
+
 def sanitize_options(plot_type: str, options: dict | None, valid_columns: set[str] | None = None) -> dict:
     pdef = _plot_def(plot_type)
     allowed_options = {o["key"] for o in pdef.get("options", [])} | _UNIVERSAL_OPTION_KEYS
@@ -278,6 +323,7 @@ def sanitize_options(plot_type: str, options: dict | None, valid_columns: set[st
         sanitized = _sanitize_option(key, value, valid_columns, plot_type=plot_type)
         if sanitized is not None:
             clean[key] = sanitized
+    _validate_axis_ranges(clean)
     return clean
 
 
@@ -1309,7 +1355,7 @@ def _auto_quality_correct_initial_figure(db: Session, owner_id: uuid.UUID, ds: D
         fig.style_preset = new_preset
         fig.status = "ready"
         for suggestion in suggestions:
-            clean = _sanitize_param_patch(suggestion.get("param_patch", {}), pdef, mapping or {}, cols)
+            clean = _sanitize_param_patch(suggestion.get("param_patch", {}), pdef, mapping or {}, cols, base_options=options or {})
             if not clean:
                 continue
             db.add(Improvement(
@@ -1333,7 +1379,7 @@ def _combined_quality_patch(suggestions: list[dict], pdef: dict, base_mapping: d
                             valid_columns: set[str] | None = None) -> dict[str, Any]:
     combined: dict[str, Any] = {}
     for suggestion in suggestions or []:
-        clean = _sanitize_param_patch(suggestion.get("param_patch", {}), pdef, base_mapping, valid_columns)
+        clean = _sanitize_param_patch(suggestion.get("param_patch", {}), pdef, base_mapping, valid_columns, base_options=base_options)
         if not clean:
             continue
         if clean.get("style_preset"):
@@ -2013,6 +2059,38 @@ def _scope_authorization_text(scope: dict[str, Any], scopes: list[dict[str, Any]
     return f"{global_request}\n{local_request}".strip()
 
 
+_LOG_SCALE_STRIP_RE = re.compile(r"['\"“”‘’][^'\"“”‘’]*['\"“”‘’]|\([^)]*\)")
+_LOG_SCALE_VERB_RE = re.compile(
+    r"\b(?:use|apply|make|put|set|switch|on|scale|transform)\b.{0,15}\blog\b"
+    r"|\blog\s*scale\b"
+    r"|로그\s*(?:스케일|축|변환)"
+    r"|로그로",
+)
+
+
+def _log_scale_request_authorized(lowered_text: str) -> bool:
+    """True when `lowered_text` (already lowercased) requests a log-SCALE
+    axis change, as opposed to merely mentioning the word 'log' inside a
+    quoted/parenthesised label being renamed (e.g. rename the y axis label to
+    "log fold change", or "Counts (log scale)" as literal label text - both
+    extremely common biology phrasings). Quoted strings and parenthesised
+    segments - the actual label text being set - are stripped before testing
+    for 'log' wording at all. A text-content edit (title/label/rename/...)
+    then additionally requires an explicit scale verb sitting next to 'log'
+    in what remains, so a bare axis+'log' co-occurrence inside a rename
+    request no longer authorizes/applies a scale change on its own."""
+    stripped = _LOG_SCALE_STRIP_RE.sub(" ", lowered_text)
+    if not re.search(r"\blog(?:arithmic)?\b|로그", stripped):
+        return False
+    text_edit = bool(
+        re.search(r"\b(?:title|label|rename|name|call)\b|제목|라벨|이름", lowered_text)
+        and _text_target_request_compatible(lowered_text)
+    )
+    if text_edit and not _LOG_SCALE_VERB_RE.search(stripped):
+        return False
+    return True
+
+
 def _text_target_request_compatible(request: str) -> bool:
     """True only for text-content operations, not visual text styling."""
     text = (request or "").lower()
@@ -2109,19 +2187,24 @@ def _request_allowed_patch_paths(plot_type: str, request: str, pdef: dict) -> se
         r"|(?:컬러|색상)\s+바(?=$|[\s를은는이가도만의에])",
         text,
     ))
-    title_or_label = bool(re.search(r"\b(?:title|label|rename)\b|제목|라벨|이름", text))
+    title_or_label = bool(re.search(r"\b(?:title|label|rename|name|call)\b|제목|라벨|이름", text))
     if subtitle:
         add("subtitle")
     if title_or_label and _text_target_request_compatible(text):
-        if legend:
-            add("legend_title")
-        elif x_axis and not y_axis:
+        # An explicit x/y-axis mention is a MORE specific target than a bare
+        # "legend" mention elsewhere in the same (possibly multi-clause)
+        # request - e.g. "Put the legend in 2 columns and rename the y axis
+        # title to Expression (log2)" must authorize y_label, not
+        # legend_title, even though "legend" appears in the sentence.
+        if x_axis and not y_axis:
             add("x_label")
         elif y_axis and not x_axis:
             add("y_label")
         elif x_axis and y_axis:
             add("x_label")
             add("y_label")
+        elif legend:
+            add("legend_title")
         elif not subtitle:
             add("title")
 
@@ -2164,7 +2247,11 @@ def _request_allowed_patch_paths(plot_type: str, request: str, pdef: dict) -> se
             add("y_min")
         if re.search(r"\bmax(?:imum)?\b|최대", text):
             add("y_max")
-    if re.search(r"\blog\s*(?:scale|x|y)?\b|로그", text):
+    # A bare 'log' mention does not authorize the axis-scale keys when the
+    # request is renaming a title/label to text that merely CONTAINS the word
+    # 'log' (e.g. "rename the y axis label to 'log fold change'") - see
+    # _log_scale_request_authorized.
+    if re.search(r"\blog\s*(?:scale|x|y)?\b|로그", text) and _log_scale_request_authorized(text):
         if x_axis:
             add("log_x")
         elif y_axis:
@@ -2190,9 +2277,113 @@ def _request_allowed_patch_paths(plot_type: str, request: str, pdef: dict) -> se
         add("error_bars")
         if re.search(r"\b(?:sd|se|sem|ci95|confidence\s*interval)\b|표준\s*편차|표준\s*오차|신뢰\s*구간", text):
             add("error_type")
+    # error_type/error_bars is also authorized by naming the statistic
+    # directly ("standard deviation", "95% CI", ...) without the words
+    # "error bars" - the natural way most people phrase this request.
+    if re.search(
+        r"\b(?:sd|sem?|standard\s+(?:deviation|error)|ci95|95%\s*ci|confidence\s+intervals?)\b|표준편차|표준오차|신뢰구간",
+        text,
+    ):
+        add("error_bars")
+        add("error_type")
+
+    if re.search(
+        r"\b(?:significance|significant\s+(?:differences?|groups?|pairs?)|p-?values?|asterisks?|"
+        r"significance\s+(?:stars?|brackets?)|(?:stars?|brackets?)\s+(?:for|showing|indicating)\s+"
+        r"(?:the\s+)?significance)\b|유의|p값|별표",
+        text,
+    ):
+        add("show_significance")
+    if re.search(r"\b(?:sample\s+sizes?|n\s*=|show\s+n|n\s+per\s+group)\b|표본\s*수|샘플\s*수", text):
+        add("show_n")
+
+    if re.search(r"\b(?:axis\s+break|broken\s+axis)\b|축\s*(?:끊|생략)", text):
+        if x_axis:
+            add("axis_break_x")
+        if y_axis:
+            add("axis_break_y")
+
+    if re.search(
+        r"\b(?:midpoint|cent(?:er|re))\b.{0,20}\b(?:colou?r|scale)\b"
+        r"|\b(?:colou?r|scale)\b.{0,20}\b(?:midpoint|cent(?:er|re))\b"
+        r"|중간값|중심값",
+        text,
+    ):
+        add("color_midpoint")
+
+    # category_colors: a colour word/hex AND a category-grouping word - either
+    # alone is too broad (colour requests and category-order requests are
+    # both common and unrelated). This only authorizes the PARENT path; the
+    # literal-level retention filter in _filter_patch_to_request_scope must
+    # be triggered by the SAME colour-word/hex signals (not only the literal
+    # word "colour") for it to actually narrow which levels get recoloured -
+    # otherwise this parent authorization lets every label in the model's
+    # patch survive unfiltered.
+    if (re.search(r"#[0-9a-f]{6}", text) or _COLOR_WORD_RE.search(text)) and re.search(
+        r"\b(?:categor(?:y|ies)|groups?|levels?|series|conditions?)\b|범주|그룹|계열", text,
+    ):
+        add("category_colors")
+
+    # x_axis_type/date_format: naming the axis kind directly ("date axis",
+    # "time axis") authorizes the temporal-axis options without also
+    # requiring the word "x axis". Requires explicit axis/format/label/scale
+    # context next to date/datetime/time so an unrelated "up-to-date" or
+    # "date of collection" mention does not authorize a scale change.
+    if re.search(
+        r"\b(?:date|datetime|time)\s*(?:axis|format|labels?|scale)\b|날짜\s*(?:축|형식)|시간축",
+        text,
+    ):
+        add("x_axis_type")
+        add("date_format")
+
+    if re.search(r"\baxis\s+lines?\s+(?:width|thickness)\b|축\s*선\s*(?:두께|굵기)", text):
+        add("axis_line_width_pt")
+    if re.search(
+        r"\bdata\s+lines?\s+(?:width|thickness)\b|\d+(?:\.\d+)?\s*pt\b.{0,15}(?:line|선)|데이터\s*선\s*(?:두께|굵기)",
+        text,
+    ):
+        add("data_line_width_pt")
+
+    # Per-type show/hide toggles (declared as each plot type's OWN option, not
+    # universal - add() already no-ops when the current plot type does not
+    # declare the mapped key).
+    _SHOW_TOGGLE_NOUN_TO_KEY = {
+        "point": "show_points", "points": "show_points", "jitter": "show_points",
+        "box": "show_box", "boxes": "show_box",
+        "rug": "show_rug",
+        "density": "show_density",
+        "label": "show_labels", "labels": "show_labels",
+        "line": "show_line",
+        "violin": "show_violin",
+        "점": "show_points", "상자": "show_box", "라벨": "show_labels",
+        "선": "show_line", "바이올린": "show_violin",
+    }
+    for match in re.finditer(
+        r"\b(?:show|add|hide|remove)\s+(?:the\s+)?(points?|jitter|box(?:es)?|rug|density|labels?|line|violin)\b",
+        text,
+    ):
+        # "the box/label around the legend/colorbar/plot/panel" etc. names a
+        # CHROME element (the legend's border, the panel outline), not the
+        # plot-type's own show_box/show_labels toggle.
+        if re.match(
+            r"\s+(?:around|of|on)\s+(?:the\s+)?(?:legend|key|colou?r\s*bar|plot|panel|border|outline|frame)\b",
+            text[match.end():],
+        ):
+            continue
+        key = _SHOW_TOGGLE_NOUN_TO_KEY.get(match.group(1))
+        if key:
+            add(key)
+    for match in re.finditer(r"(점|상자|라벨|선|바이올린)\s*(?:표시|숨김|제거|추가)", text):
+        key = _SHOW_TOGGLE_NOUN_TO_KEY.get(match.group(1))
+        if key:
+            add(key)
 
     if re.search(r"\b(?:palette|colou?r\s*scheme|colorblind|grayscale|greyscale)\b|팔레트|색상표|색맹|회색조", text):
         add("palette_name")
+        # Some plot types (contour/heatmap) expose their fill scale as
+        # "palette" instead of the universal "palette_name" - add() is a
+        # no-op for types that don't declare this key.
+        add("palette")
         if re.search(r"\b(?:grayscale|greyscale)\b|회색조", text):
             add("color_mode")
 
@@ -2216,8 +2407,16 @@ def _request_allowed_patch_paths(plot_type: str, request: str, pdef: dict) -> se
             add("dpi")
 
     option_rules = {
-        "fill_alpha": r"\b(?:fill\s*)?(?:alpha|transparen(?:cy|t))\b|채움\s*투명|투명도",
-        "point_alpha": r"\bpoint\s*(?:alpha|transparen(?:cy|t))\b|점\s*투명",
+        # "fill" is REQUIRED (not merely optional) so a bare "transparent
+        # background" request - which already authorizes
+        # transparent_background separately below - does not also authorize
+        # fill_alpha just because it contains "transparent".
+        "fill_alpha": r"\bfill(?:ed)?\b.{0,20}\b(?:alpha|transparen\w*)\b|채움\s*투명|투명도",
+        "point_alpha": (
+            r"\b(?:points?|markers?|dots?)\b.{0,30}\b(?:transparen\w*|alpha|opaque|faded?)\b"
+            r"|(?:점|마커).{0,10}투명"
+        ),
+        "legend_direction": r"\b(?:horizontal|vertical)\s+(?:legend|colou?r\s*bar|key)\b|(?:가로|세로)\s*범례",
         "flip_coords": r"\b(?:flip|horizontal\s+bars?)\b|가로\s*막대|축\s*뒤집",
         "hline_at": r"\b(?:horizontal\s+reference\s+line|hline)\b|수평\s*기준선",
         "vline_at": r"\b(?:vertical\s+reference\s+line|vline)\b|수직\s*기준선",
@@ -2241,6 +2440,34 @@ def _request_allowed_patch_paths(plot_type: str, request: str, pdef: dict) -> se
         "y2_column": r"\b(?:second|secondary)\s+y(?:\s*axis|\s*series)?\b|보조\s*y축",
         "y2_label": r"\b(?:second|secondary)\s+y\s*label\b|보조\s*y축\s*라벨",
         "transparent_background": r"\btransparent\s+background\b|투명\s*배경",
+        # Plot-type-specific keys that previously had NO natural-language
+        # rule at all (only reachable via the literal "options.<key>" dotted
+        # path) - each phrase below is wording a real user could plausibly
+        # type, scoped narrowly to avoid collateral matches on unrelated
+        # requests (see test_ai_edit_authorization.py's inventory test).
+        "cluster_rows": r"\bcluster\s+(?:the\s+)?rows?\b|row\s+clustering\b|행\s*군집",
+        "cluster_cols": r"\bcluster\s+(?:the\s+)?col(?:umn)?s?\b|colu?mn\s+clustering\b|열\s*군집",
+        "color_bars": r"\bcolou?r\s+(?:the\s+)?bars?\s+by\s+(?:category|group)\b|막대를?\s*범주(?:별)?로\s*색칠",
+        "corr_method": r"\b(?:pearson|spearman)\s+correlation\b|correlation\s+method\b|상관\s*(?:방법|계수)",
+        "fc_threshold": r"\b(?:fold[- ]?change|log2\s*fc)\s*threshold\b|폴드체인지\s*임계값|배수변화\s*임계값",
+        "p_threshold": r"\bp[- ]?(?:value)?\s*threshold\b|유의\s*수준|p값\s*임계값",
+        "label_top": r"\blabel\s+the\s+top\s+\d+|top\s+\d+\s+labels?\b|상위\s*\d+\s*(?:개)?\s*라벨",
+        "layout": r"\bnetwork\s+layout\b|\b(?:force[- ]directed|circular|circle|stress)\s+layout\b|레이아웃",
+        "overlap": r"\bridge\s+overlap\b|리지\s*겹침|겹침\s*정도",
+        "paired_rows_only": r"\bpaired\s+(?:rows?|data|samples?)\s*only\b|only\s+paired\s+(?:rows?|data|samples?)\b|짝지은\s*(?:행|데이터)만",
+        "palette": r"\b(?:viridis|magma|inferno|plasma|cividis|blue.?red)\b",
+        "redundant_series_encoding": r"\bredundant\s+(?:series\s+)?encoding\b|distinguish(?:able)?\s+(?:the\s+)?(?:lines?|series)\s+(?:without|besides)\s+colou?r\b|colorblind[- ]friendly\s+lines?\b|계열\s*중복\s*인코딩",
+        "ref_line": r"\breference\s+line\b|기준선",
+        "scale_rows": r"\bz[- ]?score\s+(?:the\s+)?rows?\b|scale\s+(?:the\s+)?rows?\b|행\s*표준화|행\s*스케일링",
+        "series_1_label": r"\bfirst\s+series\s+label\b|series\s*1\s+label\b|첫\s*(?:번째\s*)?계열\s*라벨",
+        "series_2_label": r"\bsecond\s+series\s+label\b|series\s*2\s+label\b|두\s*(?:번째\s*)?계열\s*라벨",
+        "show_cluster_labels": r"\b(?:label|show)\s+(?:the\s+)?clusters?\b|클러스터\s*라벨",
+        "show_contour_lines": r"\bcontour\s+lines?\b|등고선",
+        "show_row_names": r"\brow\s+names?\b|행\s*이름",
+        "show_sample_labels": r"\bsample\s+labels?\b|샘플\s*라벨",
+        "sig_threshold": r"\bsignificance\s+(?:line|threshold)\b|genome[- ]wide\s+significance\b|유의\s*(?:선|임계값)",
+        "sort_by_estimate": r"\bsort\s+by\s+estimate\b|order\s+by\s+(?:effect\s+size|estimate)\b|추정치\s*순\s*정렬",
+        "stat": r"\bbar\s+statistic\b|\bstatistic\s*(?:type|method)?\s*(?:to|as)\s*(?:mean|sum|count)\b|\baggregat(?:e|ion)\s+(?:by|as)\s+(?:mean|sum|count)\b|집계\s*방식|막대\s*통계",
     }
     for key, pattern in option_rules.items():
         if re.search(pattern, text):
@@ -2521,10 +2748,17 @@ def _filter_patch_to_request_scope(patch: dict[str, Any], allowed_paths: set[str
         # Named categorical-level recoloring is safe only when every retained
         # label is literally present in the user's request. A marked/selected
         # bar with no named level cannot smuggle in arbitrary category keys.
-        if key == "category_colors" and isinstance(value, dict) and re.search(
-            r"colou?r|색|파랑|파란|빨강|빨간|보라|초록|검정|회색",
-            request,
-            re.IGNORECASE,
+        # The trigger here must match the SAME signals that authorize the
+        # parent options.category_colors path in _request_allowed_patch_paths
+        # (a colour word/hex, not only the literal word "colour") - otherwise
+        # a request like "Make the Treatment group red" or "Set the Control
+        # group to #EA580C" authorizes the parent path but falls through to
+        # the plain 'path in allowed_paths' branch below with NO per-label
+        # narrowing, letting every label in the model's patch survive.
+        if key == "category_colors" and isinstance(value, dict) and (
+            re.search(r"colou?r|색|파랑|파란|빨강|빨간|보라|초록|검정|회색", request, re.IGNORECASE)
+            or _COLOR_WORD_RE.search(request.lower())
+            or re.search(r"#[0-9a-f]{6}", request, re.IGNORECASE)
         ):
             named = {
                 label: color for label, color in value.items()
@@ -2645,7 +2879,8 @@ def _edit_scope_payload(scope: dict[str, Any], *, status: str,
                         approved_patch: dict[str, Any] | None = None,
                         resolved_target: str | None = None,
                         reason: str | None = None,
-                        confidence: Any = None) -> dict[str, Any]:
+                        confidence: Any = None,
+                        dropped: list[dict[str, str]] | None = None) -> dict[str, Any]:
     payload = {
         "scope_id": scope.get("scope_id"),
         "mark_id": scope.get("mark_id"),
@@ -2694,6 +2929,17 @@ def _edit_scope_payload(scope: dict[str, Any], *, status: str,
             normalized_confidence = None
         if normalized_confidence is not None and 0 <= normalized_confidence <= 1:
             payload["confidence"] = normalized_confidence
+    if dropped:
+        # (A1.4) [{path, reason}] for every proposed patch path this scope's
+        # suggestion lost, whatever the cause (sanitize allow-list miss,
+        # invalid value, app.r_engine.option_support registry, or
+        # authorization-scope filtering) - a superset of `skipped_reasons`
+        # scoped to just this edit_scope's own suggestion(s).
+        payload["dropped"] = [
+            {"path": str(item.get("path") or ""), "reason": str(item.get("reason") or "")[:300]}
+            for item in dropped
+            if isinstance(item, dict) and item.get("path")
+        ][:50]
     return payload
 
 
@@ -2804,6 +3050,19 @@ def _explicit_visual_patch_from_request(plot_type: str, request: str | None) -> 
     # Legend/colorbar relocation ("colorbar를 오른쪽으로 이동", "move the
     # legend to the bottom"): a guide mention plus a side plus a move verb is
     # exact. Direction follows the side the way ggplot lays guides out.
+    # Log-scale axes are fully deterministic when an axis is named. Skip when
+    # the wording is about removing/undoing a log scale, or is really a
+    # title/label rename whose new text merely contains the word 'log' (e.g.
+    # "rename the y axis label to 'log fold change'") - see
+    # _log_scale_request_authorized.
+    if re.search(r"\blog(?:arithmic)?\b|로그", lowered) and not re.search(
+            r"\b(?:remove|linear|un-?log|without|undo)\b|해제|제거|끄|없애|선형", lowered
+    ) and _log_scale_request_authorized(lowered):
+        if re.search(r"(x\s*[- ]?\s*axis|x축|\bx\s*log|log\s*x\b|\blog[- ]?x\b)", lowered):
+            options["log_x"] = True
+        if re.search(r"(y\s*[- ]?\s*axis|y축|\by\s*log|log\s*y\b|\blog[- ]?y\b)", lowered):
+            options["log_y"] = True
+
     legend_mention = re.search(
         r"\blegend\b|범례|colou?r\s*-?\s*bar|colou?rbar"
         r"|컬러바|색상바|색막대|(?:컬러|색상)\s+바(?=$|[\s를은는이가도만의에])",
@@ -2926,7 +3185,8 @@ def _r_number_literal(value: Any) -> str | None:
     return f"{number:g}"
 
 
-def _r_code_check_for_patch(section: str, key: str, expected: Any, version: FigureVersion) -> tuple[bool | None, str]:
+def _r_code_check_for_patch(section: str, key: str, expected: Any, version: FigureVersion,
+                            base: FigureVersion | None = None) -> tuple[bool | None, str]:
     r_code = version.r_code or ""
     if not r_code:
         return None, "R code was not available for text verification."
@@ -2957,6 +3217,13 @@ def _r_code_check_for_patch(section: str, key: str, expected: Any, version: Figu
         return f'legend.position = "{expected}"' in r_code, f"Looked for legend.position = {expected!r}."
     if key == "legend_direction":
         return f'legend.direction = "{expected}"' in r_code, f"Looked for legend.direction = {expected!r}."
+    if key == "legend_ncol":
+        try:
+            ncol = max(1, min(8, int(expected)))
+            return (f"guide_legend(ncol = {ncol})" in r_code,
+                    f"Looked for guide_legend(ncol = {ncol}) in generated R code.")
+        except (TypeError, ValueError):
+            return "guide_legend(ncol" in r_code, "Looked for guide_legend(ncol in generated R code."
     if key in {"legend_title", "x_label", "y_label", "title", "subtitle", "series_1_label", "series_2_label"}:
         return quoted in r_code or text in r_code, f"Looked for label text {text!r} in generated R code."
     if key == "line_type":
@@ -2982,10 +3249,37 @@ def _r_code_check_for_patch(section: str, key: str, expected: Any, version: Figu
     if isinstance(expected, dict):
         missing = [str(v) for v in expected.values() if str(v) not in r_code]
         return len(missing) == 0, "Looked for custom values in generated R code."
+    if (
+        section == "options" and base is not None
+        and base.r_code and version.r_code and base.r_code == version.r_code
+    ):
+        # No specific string check exists for this key, but the R script text
+        # is byte-identical to the pre-apply version - the R generator would
+        # only reproduce that if it never actually consumed `key` (per the
+        # app.r_engine.option_support registry). Report a concrete failure
+        # instead of the generic "no check defined" None so a genuinely
+        # unconsumed key is not silently shown as a passing/neutral row.
+        plot_type = getattr(getattr(version, "figure", None), "plot_type", None)
+        if isinstance(plot_type, str) and plot_type:
+            reason = _option_unsupported_reason(plot_type, key, version.mapping or {}, version.options or {})
+            if reason is None:
+                # No registry objection, yet the R script text is
+                # byte-identical to the pre-apply version: report a concrete
+                # failure instead of falling through to the generic
+                # "no specific check defined" None below.
+                return False, "R code unchanged"
+            # The registry says this key is NOT consumed for the current
+            # (patch-merged) mapping/options - the genuinely unconsumed-key
+            # case this whole branch exists to catch (previously this fell
+            # through to the generic None return below and was silently
+            # reported as passing/neutral, i.e. "applied"). Surface the
+            # registry's own reason instead.
+            return False, reason
     return None, "Setting matched the regenerated version; no specific R-code string check is defined for this option."
 
 
-def _ai_edit_checklist(improvements: list[Improvement], version: FigureVersion) -> list[dict[str, Any]]:
+def _ai_edit_checklist(improvements: list[Improvement], version: FigureVersion,
+                       base: FigureVersion | None = None) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for index, imp in enumerate(improvements, start=1):
         patch = imp.param_patch or {}
@@ -3033,7 +3327,7 @@ def _ai_edit_checklist(improvements: list[Improvement], version: FigureVersion) 
 
         for section, key, expected, actual in items:
             settings_match = _values_match(expected, actual)
-            r_code_match, r_code_note = _r_code_check_for_patch(section, key, expected, version)
+            r_code_match, r_code_note = _r_code_check_for_patch(section, key, expected, version, base=base)
             status = "applied" if settings_match and r_code_match is not False else "warning"
             rows.append({
                 "label": label,
@@ -3584,9 +3878,24 @@ def improve_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, ow
     )
     rows: list[Improvement] = []
     skipped_lists: list[list[str]] = []
+    skipped_reason_lists: list[dict[str, str]] = []
     row_by_scope: dict[str, Improvement] = {}
     scope_reason: dict[str, str] = {}
     scope_confidence: dict[str, Any] = {}
+    # (A1.4) scope_id -> the FIRST sanitize/registry drop reason seen for a
+    # scope whose suggestion(s) ended up with zero surviving patch keys, so
+    # the "Unsupported request" carrier row (built later, once we know the
+    # scope never produced a durable row) can report a specific cause instead
+    # of the generic fallback reason.
+    scope_drop_reasons: dict[str, str] = {}
+
+    def _reason_for_dropped_path(path: str, sanitize_reasons: dict[str, str]) -> str:
+        if path in sanitize_reasons:
+            return sanitize_reasons[path]
+        for coarse, reason in sanitize_reasons.items():
+            if path == coarse or path.startswith(coarse + "."):
+                return reason
+        return "not authorized by the edit request"
 
     def scope_allowed_paths(scope: dict[str, Any]) -> tuple[str, set[str]]:
         authorization_text = _scope_authorization_text(scope, request_scopes)
@@ -3669,7 +3978,18 @@ def improve_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, ow
             # ambiguous by definition; never guess which memo authorized it.
             continue
         raw_patch = s.get("param_patch", {})
-        patch = _sanitize_param_patch(raw_patch, pdef, v.mapping or {}, cols)
+        # For a scoped (user_intent) edit, the registry pass is deferred to
+        # AFTER the per-scope merge below (providers routinely split one
+        # companion-gated change, e.g. error_bars/error_type, across sibling
+        # suggestions for the same mark) - see the post-loop pass and
+        # _sanitize_param_patch_report's `registry` docstring. An unscoped
+        # improve applies each suggestion independently, so it keeps the
+        # per-suggestion registry check as before.
+        patch, sanitize_dropped = _sanitize_param_patch_report(
+            raw_patch, fig.plot_type, v.mapping or {}, v.options or {}, valid_columns=cols,
+            registry=not user_intent,
+        )
+        sanitize_reason_map = {item["path"]: item["reason"] for item in sanitize_dropped}
         dropped = []
         if user_intent and scope is not None:
             if s.get("confidence") is not None:
@@ -3682,9 +4002,16 @@ def improve_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, ow
             authorization_text, allowed = scope_allowed_paths(scope)
             patch = _filter_patch_to_request_scope(patch, allowed, authorization_text)
         if not patch or not _patch_changes_version(patch, v):
+            if user_intent and scope is not None and sanitize_dropped:
+                scope_drop_reasons.setdefault(str(scope["scope_id"]), sanitize_dropped[0]["reason"])
             continue
         kept_paths = set(_authorization_patch_key_paths(patch))
         dropped = [path for path in _authorization_patch_key_paths(raw_patch) if path not in kept_paths]
+        dropped_with_reasons = [
+            {"path": path, "reason": _reason_for_dropped_path(path, sanitize_reason_map)}
+            for path in dropped
+        ]
+        dropped_reason_map = {item["path"]: item["reason"] for item in dropped_with_reasons}
         edit_scope = None
         if scope is not None:
             edit_scope = _edit_scope_payload(
@@ -3694,6 +4021,7 @@ def improve_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, ow
                 approved_patch=patch,
                 resolved_target=str(s.get("resolved_target") or "").strip()[:200] or None,
                 confidence=s.get("confidence"),
+                dropped=dropped_with_reasons,
             )
             existing = row_by_scope.get(str(scope["scope_id"]))
             if existing is not None:
@@ -3706,6 +4034,7 @@ def improve_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, ow
                     value for value in (existing_confidence, s.get("confidence"))
                     if isinstance(value, (int, float)) and not isinstance(value, bool)
                 ]
+                existing_dropped = list((existing.edit_scope or {}).get("dropped") or [])
                 existing.edit_scope = _edit_scope_payload(
                     scope,
                     status="supported",
@@ -3715,9 +4044,12 @@ def improve_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, ow
                     or str(s.get("resolved_target") or "").strip()[:200]
                     or None,
                     confidence=max(confidence_candidates) if confidence_candidates else None,
+                    dropped=existing_dropped + dropped_with_reasons,
                 )
                 try:
-                    skipped_lists[rows.index(existing)].extend(dropped)
+                    idx = rows.index(existing)
+                    skipped_lists[idx].extend(dropped)
+                    skipped_reason_lists[idx].update(dropped_reason_map)
                 except ValueError:
                     pass
                 continue
@@ -3733,6 +4065,7 @@ def improve_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, ow
         db.add(imp)
         rows.append(imp)
         skipped_lists.append(dropped)
+        skipped_reason_lists.append(dropped_reason_map)
         if scope is not None:
             row_by_scope[str(scope["scope_id"])] = imp
 
@@ -3752,14 +4085,14 @@ def improve_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, ow
                 _explicit_visual_patch_from_request(fig.plot_type, authorization_text),
                 _explicit_element_override_patch_from_scope(scope, authorization_text),
             )
-            explicit_patch = _sanitize_param_patch(
-                explicit_raw_patch,
-                pdef,
-                v.mapping or {},
-                cols,
+            explicit_patch, explicit_sanitize_dropped = _sanitize_param_patch_report(
+                explicit_raw_patch, fig.plot_type, v.mapping or {}, v.options or {}, valid_columns=cols,
+                registry=False,
             )
             explicit_patch = _filter_patch_to_request_scope(explicit_patch, allowed, authorization_text)
             if not explicit_patch or not _patch_changes_version(explicit_patch, v):
+                if explicit_sanitize_dropped:
+                    scope_drop_reasons.setdefault(scope_id, explicit_sanitize_dropped[0]["reason"])
                 continue
             existing = row_by_scope.get(scope_id)
             if existing is not None:
@@ -3771,6 +4104,7 @@ def improve_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, ow
                     approved_patch=existing.param_patch,
                     resolved_target=(existing.edit_scope or {}).get("provider_resolved_target"),
                     confidence=(existing.edit_scope or {}).get("confidence"),
+                    dropped=list((existing.edit_scope or {}).get("dropped") or []) + explicit_sanitize_dropped,
                 )
                 continue
             imp = Improvement(
@@ -3784,13 +4118,93 @@ def improve_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, ow
                     status="supported",
                     allowed_patch_keys=_authorization_patch_key_paths(explicit_patch),
                     approved_patch=explicit_patch,
+                    dropped=explicit_sanitize_dropped,
                 ),
                 priority="high",
             )
             db.add(imp)
             rows.append(imp)
             skipped_lists.append([])
+            skipped_reason_lists.append({item["path"]: item["reason"] for item in explicit_sanitize_dropped})
             row_by_scope[scope_id] = imp
+
+    if user_intent:
+        # (A1.4-fix) The option_support registry pass was deferred (skipped
+        # via registry=False) on every _sanitize_param_patch_report call
+        # above so it runs HERE, once per durable row against that row's
+        # FINAL merged param_patch, instead of once per suggestion against
+        # pre-merge options. A provider that splits one companion-gated
+        # change across sibling suggestions for the same mark/scope (e.g.
+        # error_bars in one JSON suggestion, error_type in another) merges
+        # both into the same row above ("Providers occasionally split one
+        # mark into several JSON suggestions"); checking each suggestion in
+        # isolation against v.options would wrongly drop the dependent half
+        # even though the merged row satisfies the registry.
+        scope_by_id = {str(s.get("scope_id")): s for s in request_scopes}
+        for row in rows:
+            edit_scope = row.edit_scope if isinstance(row.edit_scope, dict) else None
+            if edit_scope is None or edit_scope.get("status") != "supported":
+                continue
+            scope = scope_by_id.get(str(edit_scope.get("scope_id") or ""))
+            if scope is None:
+                continue
+            patch = row.param_patch or {}
+            options_patch = patch.get("options")
+            if not isinstance(options_patch, dict) or not options_patch or fig.plot_type not in PLOT_TYPE_KEYS:
+                continue
+            merged_mapping = {**(v.mapping or {}), **(patch.get("mapping") or {})}
+            merged_options = {**(v.options or {}), **options_patch}
+            removed: list[dict[str, str]] = []
+            for key in list(options_patch):
+                reason = _option_unsupported_reason(fig.plot_type, key, merged_mapping, merged_options)
+                if reason is not None:
+                    removed.append({"path": f"options.{key}", "reason": reason})
+                    del options_patch[key]
+            if not removed:
+                continue
+            if options_patch:
+                patch["options"] = options_patch
+            else:
+                patch.pop("options", None)
+            row.param_patch = patch
+            try:
+                idx = rows.index(row)
+                skipped_lists[idx] = list(skipped_lists[idx]) + [item["path"] for item in removed]
+                skipped_reason_lists[idx] = {
+                    **skipped_reason_lists[idx],
+                    **{item["path"]: item["reason"] for item in removed},
+                }
+            except ValueError:
+                pass
+            merged_dropped = list(edit_scope.get("dropped") or []) + removed
+            if patch.get("mapping") or patch.get("options") or patch.get("style_preset"):
+                row.edit_scope = _edit_scope_payload(
+                    scope,
+                    status="supported",
+                    allowed_patch_keys=_authorization_patch_key_paths(patch),
+                    approved_patch=patch,
+                    confidence=edit_scope.get("confidence"),
+                    dropped=merged_dropped,
+                )
+            else:
+                # Every key the registry would have consumed was removed -
+                # this row no longer changes anything, so downgrade it to the
+                # unsupported path (with the registry's own reason) instead
+                # of leaving an empty "supported" row that reports nothing
+                # applied and nothing wrong.
+                reason = removed[0]["reason"]
+                row.param_patch = {}
+                row.suggestion_type = "Unsupported request"
+                row.current_state = "This request scope does not map to an independently editable parameter."
+                row.recommended = f"Cannot be applied as-is: {reason}"[:1000]
+                row.priority = "low"
+                row.edit_scope = _edit_scope_payload(
+                    scope,
+                    status="unsupported",
+                    reason=reason,
+                    confidence=edit_scope.get("confidence"),
+                    dropped=merged_dropped,
+                )
 
     if not rows and not user_intent:
         imp = Improvement(
@@ -3804,6 +4218,7 @@ def improve_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, ow
         db.add(imp)
         rows.append(imp)
         skipped_lists.append([])
+        skipped_reason_lists.append({})
     normalized_unsupported = list(unsupported or [])
     if user_intent:
         # Every server-normalized scope must have a durable structured result,
@@ -3828,6 +4243,12 @@ def improve_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, ow
                 ), None)
                 if generic:
                     reason = str(generic.get("reason") or "").strip()[:500]
+            # (A1.4) A scope that lost every proposed patch key to sanitize
+            # (allow-list miss / invalid value) or the option_support registry
+            # gets that SPECIFIC reason here, ahead of the generic
+            # "does not map to a supported parameter" fallback.
+            if not reason:
+                reason = scope_drop_reasons.get(scope_id)
             if not reason:
                 reason = _scope_generic_unsupported_reason(scope)
             target = None
@@ -3860,6 +4281,7 @@ def improve_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, ow
             db.add(imp)
             rows.append(imp)
             skipped_lists.append([])
+            skipped_reason_lists.append({})
     elif not rows and unsupported:
         reason_text = "; ".join(
             f"“{(item.get('request') or '').strip()}” — {(item.get('reason') or '').strip()}"
@@ -3876,6 +4298,7 @@ def improve_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, ow
         db.add(imp)
         rows.append(imp)
         skipped_lists.append([])
+        skipped_reason_lists.append({})
     if not rows:
         return []
     db.commit()
@@ -3886,8 +4309,9 @@ def improve_version(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID, ow
     # of any one suggestion - the same normalized list is attached to every row
     # from this call (transient attribute, not a DB column, same pattern as
     # `.skipped` above) so the client can read it off any/all of them.
-    for r, sk in zip(rows, skipped_lists):
+    for r, sk, sk_reasons in zip(rows, skipped_lists, skipped_reason_lists):
         r.skipped = sk
+        r.skipped_reasons = sk_reasons
         r.unsupported = normalized_unsupported
     return rows
 
@@ -4109,11 +4533,29 @@ def _full_version_diff(base: FigureVersion, current: FigureVersion) -> list[dict
                     "key": f"{section}.{key}", "from": before_value, "to": after_value,
                 })
     plot_type = getattr(getattr(base, "figure", None), "plot_type", None)
-    return _fill_default_before_values(changes, plot_type, dict(getattr(base, "options", None) or {}))
+    changes = _fill_default_before_values(changes, plot_type, dict(getattr(base, "options", None) or {}))
+    if isinstance(plot_type, str) and plot_type:
+        # A key the R generator never actually consumes for the CURRENT
+        # (post-change) mapping/options is not a real "applied/unrequested
+        # change" even if its stored value differs - see
+        # app.r_engine.option_support's module docstring.
+        support = _option_support(
+            plot_type, dict(getattr(current, "mapping", None) or {}), dict(getattr(current, "options", None) or {}),
+        )
+
+        def _unconsumed(path: str) -> bool:
+            if not path.startswith("options."):
+                return False
+            opt_key = path[len("options."):].split(".", 1)[0]
+            return support.get(opt_key) is not None
+
+        changes = [c for c in changes if not _unconsumed(str(c.get("key") or ""))]
+    return changes
 
 
 def _apply_diagnostics(touched_patch: dict[str, Any], base_mapping: dict[str, Any], base_options: dict[str, Any],
-                       base_style_preset: str | None, new_version: FigureVersion) -> tuple[list[dict[str, Any]], list[str]]:
+                       base_style_preset: str | None,
+                       new_version: FigureVersion) -> tuple[list[dict[str, Any]], list[str], dict[str, str]]:
     """(U10b) Per-key diff between the pre-apply state (base_*) and the
     actually-rendered new_version, restricted to the keys `touched_patch`
     tried to change. A key is a dropped_keys entry when rerender's re-sanitize
@@ -4122,7 +4564,14 @@ def _apply_diagnostics(touched_patch: dict[str, Any], base_mapping: dict[str, An
     {"key", "from", "to"}. `touched_patch` may be a single suggestion's
     already-sanitized param_patch, or a union of several (see
     _merge_touched_patch) - only which keys it touches matters here, not its
-    values."""
+    values.
+
+    A THIRD pass (A1.4) re-checks every touched ``options.<key>`` against
+    app.r_engine.option_support: a key the registry says the R generator
+    never consumes for the new_version's mapping/options is moved into
+    dropped_keys REGARDLESS of whether its stored value visibly changed (a
+    changed stored value is not proof the render changed), and paired with
+    the registry reason in the returned ``dropped_reasons`` dict."""
     applied: list[dict[str, Any]] = []
     dropped: list[str] = []
 
@@ -4174,12 +4623,41 @@ def _apply_diagnostics(touched_patch: dict[str, Any], base_mapping: dict[str, An
         else:
             applied.append({"key": f"options.{key}", "from": before, "to": after})
     plot_type = getattr(getattr(new_version, "figure", None), "plot_type", None)
-    return _fill_default_before_values(applied, plot_type, base_options), dropped
+    dropped_reasons: dict[str, str] = {}
+    touched_option_keys = set((touched_patch.get("options") or {}).keys())
+    if isinstance(plot_type, str) and plot_type and touched_option_keys:
+        support = _option_support(plot_type, new_mapping, new_options)
+
+        def _touched_option_key(path: str) -> str | None:
+            if not path.startswith("options."):
+                return None
+            candidate = path[len("options."):].split(".", 1)[0]
+            return candidate if candidate in touched_option_keys else None
+
+        still_applied: list[dict[str, Any]] = []
+        for item in applied:
+            key = _touched_option_key(str(item.get("key") or ""))
+            reason = support.get(key) if key is not None else None
+            if reason is not None:
+                dropped.append(item["key"])
+                dropped_reasons[item["key"]] = reason
+            else:
+                still_applied.append(item)
+        applied = still_applied
+        for path in dropped:
+            if path in dropped_reasons:
+                continue
+            key = _touched_option_key(path)
+            reason = support.get(key) if key is not None else None
+            if reason is not None:
+                dropped_reasons[path] = reason
+    return _fill_default_before_values(applied, plot_type, base_options), dropped, dropped_reasons
 
 
 def _best_sanitized_patch(suggestions: list[dict], pdef: dict, base_mapping: dict[str, Any],
                           valid_columns: set[str] | None,
-                          allowed_patch_keys: set[str] | None = None) -> dict[str, Any] | None:
+                          allowed_patch_keys: set[str] | None = None,
+                          base_options: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """Pick the highest-priority suggestion (high > medium > low > unranked)
     whose param_patch survives sanitization, for the U10c retry step ("apply
     the best suggestion's patch on top")."""
@@ -4188,7 +4666,7 @@ def _best_sanitized_patch(suggestions: list[dict], pdef: dict, base_mapping: dic
         by_priority.setdefault(s.get("priority"), by_priority[None]).append(s)
     for priority in ("high", "medium", "low", None):
         for s in by_priority.get(priority, []):
-            clean = _sanitize_param_patch(s.get("param_patch", {}), pdef, base_mapping, valid_columns)
+            clean = _sanitize_param_patch(s.get("param_patch", {}), pdef, base_mapping, valid_columns, base_options=base_options)
             if allowed_patch_keys is not None:
                 clean, _rejected = _enforce_edit_scope_patch(clean, {
                     "status": "supported",
@@ -4210,11 +4688,17 @@ def _run_verification(db: Session, fig: Figure, owner_id: uuid.UUID, original_ba
     the feedback appended, applying only its best suggestion on top, producing
     a second new version), then verifies again to report the final verdict.
     `allow_retry=False` (the suggestion-apply paths) reports the verdict only,
-    never creating a version the user did not select. At most 2 verify_edit
-    calls + 1 retry improve_figure call (<=3 AI calls total) - every AI call
-    goes through ai_client._run_logged, which already calls enforce_ai_quota
-    before each one. Best-effort: an error before any verdict exists degrades
-    to verification={skipped: <reason>}; an error after verify #1 salvages
+    never creating a version the user did not select. A SCOPED edit
+    (`allowed_patch_keys` supplied, e.g. from an edit_scope) is likewise never
+    retried when that scope's allowed key set is empty - there is nothing a
+    retry could legitimately touch - but a scoped edit with a non-empty
+    allowed set retries like an unscoped one (allow_retry is no longer forced
+    off just because `edit_scopes` was passed; see the gate on `allowed_set`
+    below). At most 2 verify_edit calls + 1 retry improve_figure call (<=3 AI
+    calls total) - every AI call goes through ai_client._run_logged, which
+    already calls enforce_ai_quota before each one. Best-effort: an error
+    before any verdict exists degrades to verification={skipped: <reason>,
+    error: "<ExceptionType>: <message>"}; an error after verify #1 salvages
     that verdict instead of discarding it. The apply itself never fails here."""
     final_version = applied_version
     final_patch = dict(touched_patch)
@@ -4224,18 +4708,18 @@ def _run_verification(db: Session, fig: Figure, owner_id: uuid.UUID, original_ba
     allowed = sorted(set(allowed_source))
     allowed_set = set(allowed)
 
-    def _evidence(version: FigureVersion) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    def _evidence(version: FigureVersion) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str], dict[str, str]]:
         full_diff = _full_version_diff(original_base, version)
         requested_changes = [item for item in full_diff if item["key"] in allowed_set]
         unrequested_changes = [item for item in full_diff if item["key"] not in allowed_set]
-        _touched_changes, dropped_keys = _apply_diagnostics(
+        _touched_changes, dropped_keys, dropped_reasons = _apply_diagnostics(
             final_patch,
             original_base.mapping or {},
             original_base.options or {},
             original_base.style_preset,
             version,
         )
-        return requested_changes, unrequested_changes, dropped_keys
+        return requested_changes, unrequested_changes, dropped_keys, dropped_reasons
 
     def _verdict_payload(current_verdict: dict[str, Any] | None,
                          unrequested_changes: list[dict[str, Any]]) -> dict[str, Any]:
@@ -4253,14 +4737,16 @@ def _run_verification(db: Session, fig: Figure, owner_id: uuid.UUID, original_ba
         }
 
     def _result(verification: dict[str, Any] | None) -> dict[str, Any]:
-        applied_changes, _unrequested, dropped_keys = _evidence(final_version)
+        applied_changes, _unrequested, dropped_keys, dropped_reasons = _evidence(final_version)
         return {"version": final_version, "applied_changes": applied_changes,
-                "dropped_keys": dropped_keys, "verification": verification}
+                "dropped_keys": dropped_keys, "dropped_reasons": dropped_reasons, "verification": verification}
 
-    def _skipped(reason: str) -> dict[str, Any]:
-        _applied, unrequested, _dropped = _evidence(final_version)
+    def _skipped(reason: str, error: str | None = None) -> dict[str, Any]:
+        _applied, unrequested, _dropped, _reasons = _evidence(final_version)
         result = _verdict_payload(None, unrequested)
         result["skipped"] = reason[:100]
+        if error:
+            result["error"] = error[:300]
         return result
 
     try:
@@ -4269,7 +4755,7 @@ def _run_verification(db: Session, fig: Figure, owner_id: uuid.UUID, original_ba
             return _result(_skipped("NO_IMAGE"))
         before_path = storage.materialize(original_base.png_path, suffix=".png")
         after_path = storage.materialize(applied_version.png_path, suffix=".png")
-        applied_changes, unrequested_changes, _dropped = _evidence(applied_version)
+        applied_changes, unrequested_changes, _dropped, _reasons = _evidence(applied_version)
         verdict = ai_client.verify_edit(
             db, before_path, after_path, original_request, applied_changes,
             user_id=owner_id,
@@ -4277,7 +4763,11 @@ def _run_verification(db: Session, fig: Figure, owner_id: uuid.UUID, original_ba
             unrequested_changes=unrequested_changes,
         )
         attempts = 1
-        if allow_retry and not unrequested_changes and not verdict.get("satisfied"):
+        # A scoped edit (allowed_patch_keys was supplied) with an empty allowed
+        # set has nothing a retry could legitimately touch - skip the retry
+        # leg entirely rather than let it fall back to an unscoped best-patch
+        # pick that could touch paths outside the (empty) scope.
+        if allow_retry and allowed_set and not unrequested_changes and not verdict.get("satisfied"):
             retry_request = (
                 original_request.strip()
                 + "\n\n[Automatic verification retry] A previous attempt at this exact request did not fully "
@@ -4300,11 +4790,60 @@ def _run_verification(db: Session, fig: Figure, owner_id: uuid.UUID, original_ba
                 user_request=retry_request, rendered_image=retry_image, r_code=applied_version.r_code,
                 request_scopes=request_scopes,
             )
+            # The retry may only touch paths the user's request authorizes. The
+            # plan's own keys are always in scope; for a prompt-level edit (no
+            # numbered marks) also admit every path the request text itself
+            # authorizes, so a retry can pick up an intent the first plan
+            # missed (e.g. the model wrongly declared log_y unsupported) without
+            # ever widening past the authorization gate. Mark-scoped edits stay
+            # pinned to their element paths. The widening text is the APPLIED
+            # scopes' own request text, never the full plan/original_request -
+            # that string can carry OTHER marks' memos the user chose not to
+            # apply (see improve_version, which stores one combined
+            # original_request across every scope including the global one);
+            # widening from it would let an un-applied mark's memo leak into
+            # this apply's authorized set. Fall back to original_request only
+            # for a legacy/unscoped call with no dict scopes at all.
+            scoped_applied = [s for s in (request_scopes or []) if isinstance(s, dict)]
+            widen_text = (
+                "\n".join(str(s.get("request") or "") for s in scoped_applied)
+                if scoped_applied else original_request
+            )
+            retry_allowed = set(allowed_set)
+            if not any(s.get("mark_id") for s in scoped_applied):
+                retry_allowed |= set(_request_allowed_patch_paths(fig.plot_type, widen_text, pdef))
             best_patch = _best_sanitized_patch(
                 suggestions, pdef, applied_version.mapping or {}, cols,
-                allowed_patch_keys=allowed_set,
+                allowed_patch_keys=retry_allowed,
+                base_options=applied_version.options or {},
             )
             if best_patch:
+                # A nested map's PARENT path (options.category_colors etc.)
+                # being authorized does not mean every level inside it is -
+                # _best_sanitized_patch/_enforce_edit_scope_patch only checks
+                # the parent path, so run the retry patch through the same
+                # literal-level retention filter the first pass uses before
+                # trusting it.
+                best_patch = _filter_patch_to_request_scope(best_patch, retry_allowed, widen_text)
+            if best_patch:
+                # The retry's own changes are authorized by the request text, so
+                # the second verdict (and the final unrequested-change evidence)
+                # must judge against the widened scope - otherwise a legitimate
+                # retry fix (e.g. log_y) is misreported as "unrequested". Widen
+                # ONLY by the leaf paths the (now-filtered) patch actually
+                # retained, plus the scalar (non-nested-map) request-authorized
+                # paths - never by a nested map's bare parent path, which would
+                # let an unfiltered level slip past the unrequested-change
+                # evidence check undetected.
+                _NESTED_PARENT_PATHS = {
+                    "options.category_colors", "options.series_styles", "options.element_overrides",
+                }
+                allowed_set = (
+                    allowed_set
+                    | set(_authorization_patch_key_paths(best_patch))
+                    | {p for p in retry_allowed if p not in _NESTED_PARENT_PATHS}
+                )
+                allowed = sorted(allowed_set)
                 retry_mapping = {**(applied_version.mapping or {}), **(best_patch.get("mapping") or {})}
                 retry_options = {**(applied_version.options or {}), **(best_patch.get("options") or {})}
                 retry_preset = best_patch.get("style_preset") or applied_version.style_preset
@@ -4321,7 +4860,7 @@ def _run_verification(db: Session, fig: Figure, owner_id: uuid.UUID, original_ba
                 _merge_touched_patch(final_patch, best_patch)
                 if final_version.png_path and storage.exists(final_version.png_path):
                     after_path_2 = storage.materialize(final_version.png_path, suffix=".png")
-                    final_changes, final_unrequested, _dropped2 = _evidence(final_version)
+                    final_changes, final_unrequested, _dropped2, _reasons2 = _evidence(final_version)
                     verdict = ai_client.verify_edit(
                         db, before_path, after_path_2, original_request, final_changes,
                         user_id=owner_id,
@@ -4329,9 +4868,16 @@ def _run_verification(db: Session, fig: Figure, owner_id: uuid.UUID, original_ba
                         unrequested_changes=final_unrequested,
                     )
                     attempts = 2
-        _final_changes, final_unrequested, _final_dropped = _evidence(final_version)
+        _final_changes, final_unrequested, _final_dropped, _final_reasons = _evidence(final_version)
         return _result(_verdict_payload(verdict, final_unrequested))
     except Exception as exc:
+        code = getattr(exc, "error_code", None) or type(exc).__name__
+        error_text = f"{code}: {str(exc)[:300]}"
+        # Log with a full traceback - this guard is broad by design (it must
+        # never let a verification-loop bug fail the apply itself), which
+        # previously meant a genuine bug here produced no server-side signal
+        # beyond the render_log note below.
+        logger.exception("AI edit verification failed: %s", error_text)
         note = f"AI edit verification interrupted: {type(exc).__name__}: {str(exc)[:300]}"
         final_version.render_log = ((final_version.render_log or "").rstrip() + "\n" + note).strip()
         db.commit()
@@ -4340,10 +4886,12 @@ def _run_verification(db: Session, fig: Figure, owner_id: uuid.UUID, original_ba
             # we already paid for instead of discarding it (its feedback
             # describes the pre-retry render, which is still the version
             # returned unless the retry rerender itself completed).
-            _changes, unrequested, _dropped = _evidence(final_version)
-            return _result(_verdict_payload(verdict, unrequested))
-        code = getattr(exc, "error_code", None) or type(exc).__name__
-        return _result(_skipped(str(code)))
+            _changes, unrequested, _dropped, _reasons3 = _evidence(final_version)
+            result = _result(_verdict_payload(verdict, unrequested))
+            if isinstance(result.get("verification"), dict):
+                result["verification"]["error"] = error_text
+            return result
+        return _result(_skipped(str(code), error=error_text))
 
 
 def _finalize_apply_response(db: Session, fig: Figure, owner_id: uuid.UUID, base: FigureVersion,
@@ -4378,7 +4926,7 @@ def _finalize_apply_response(db: Session, fig: Figure, owner_id: uuid.UUID, base
     if verify and provenance_request and new_version is not None:
         outcome = _run_verification(db, fig, owner_id, base, new_version, touched_patch,
                                     provenance_request,
-                                    allow_retry=allow_retry and not bool(edit_scopes),
+                                    allow_retry=allow_retry,
                                     allowed_patch_keys=allowed_paths,
                                     request_scopes=[scope for scope in (edit_scopes or []) if isinstance(scope, dict)])
         final_version = outcome["version"]
@@ -4395,16 +4943,21 @@ def _finalize_apply_response(db: Session, fig: Figure, owner_id: uuid.UUID, base
             final_version.edit_context["edit_scopes"] = [scope for scope in edit_scopes if isinstance(scope, dict)][:20]
         db.commit()
         result = version_result if final_version.id == new_version.id else version_response(final_version)
+        dropped_reasons = dict(outcome.get("dropped_reasons") or {})
+        for path in (pre_dropped_keys or []):
+            dropped_reasons.setdefault(path, "not authorized by the edit request")
         return {
             "version": result,
             "applied_changes": outcome["applied_changes"],
             "dropped_keys": sorted(set(outcome["dropped_keys"] + (pre_dropped_keys or []))),
+            "dropped_reasons": dropped_reasons,
             "verification": outcome["verification"],
         }
     applied_changes: list[dict[str, Any]] = []
     dropped_keys: list[str] = []
+    dropped_reasons: dict[str, str] = {}
     if new_version is not None:
-        applied_changes, dropped_keys = _apply_diagnostics(
+        applied_changes, dropped_keys, dropped_reasons = _apply_diagnostics(
             touched_patch, base.mapping or {}, base.options or {}, base.style_preset, new_version
         )
         if provenance_request or advisory_verification_request or edit_scopes:
@@ -4422,10 +4975,13 @@ def _finalize_apply_response(db: Session, fig: Figure, owner_id: uuid.UUID, base
                     scope for scope in edit_scopes if isinstance(scope, dict)
                 ][:20]
             db.commit()
+    for path in (pre_dropped_keys or []):
+        dropped_reasons.setdefault(path, "not authorized by the edit request")
     return {
         "version": version_result,
         "applied_changes": applied_changes,
         "dropped_keys": sorted(set(dropped_keys + (pre_dropped_keys or []))),
+        "dropped_reasons": dropped_reasons,
         "verification": None,
     }
 
@@ -4516,7 +5072,7 @@ def apply_improvement(db: Session, figure_id: uuid.UUID, improvement_id: uuid.UU
     applied_paths: list[str] = []
     skipped_paths: list[str] = []
     if new_version:
-        checklist = _ai_edit_checklist([imp], new_version)
+        checklist = _ai_edit_checklist([imp], new_version, base=base)
         _append_internal_ai_edit_checklist(new_version, [imp], checklist)
         applied_paths, skipped_paths = _applied_skipped_from_checklist(checklist)
     imp.applied = True
@@ -4594,7 +5150,7 @@ def apply_improvements(db: Session, figure_id: uuid.UUID, improvement_ids: list[
     skipped_paths: list[str] = []
     if new_version:
         applied_improvements = [imp for imp in ordered if imp is not None]
-        checklist = _ai_edit_checklist(applied_improvements, new_version)
+        checklist = _ai_edit_checklist(applied_improvements, new_version, base=base)
         _append_internal_ai_edit_checklist(new_version, applied_improvements, checklist)
         applied_paths, skipped_paths = _applied_skipped_from_checklist(checklist)
     for imp in ordered:
@@ -4935,15 +5491,54 @@ def _sanitize_option(
     return None
 
 
-def _sanitize_param_patch(patch: dict[str, Any], pdef: dict, base_mapping: dict[str, Any],
-                          valid_columns: set[str] | None = None) -> dict[str, Any]:
+def _sanitize_param_patch_report(
+    patch: dict[str, Any], plot_type: str, mapping: dict[str, Any] | None,
+    options: dict[str, Any] | None = None, *, valid_columns: set[str] | None = None,
+    pdef: dict | None = None, registry: bool = True,
+) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    """Like the old ``_sanitize_param_patch`` but also reports WHY each
+    ``options.<key>``/``mapping.<key>`` was dropped, as ``[{"path", "reason"}]``:
+      - ``"not an option for <plot_type>"`` -- the key isn't even on this
+        plot type's allow-list (mapping slot / declared option / universal key).
+      - ``"invalid value"`` -- allow-listed, but the value failed
+        ``_sanitize_option``'s shape/clamp validation (or wasn't a real
+        dataset column for a mapping slot).
+      - the app.r_engine.option_support registry reason (A1.3(a)) -- the key
+        survived sanitize with a well-shaped value, but the R generator would
+        never actually consume it for the CURRENT (patch-merged)
+        mapping/options, e.g. ``error_type`` with no ``error_bars`` on. Keys
+        the registry marks unconsumed are REMOVED from the clean patch so
+        they can never be reported "applied" for a render that would be
+        byte-identical.
+
+    ``registry=False`` skips that last pass entirely (allow-list + value
+    sanitize only). A caller that evaluates several PARTIAL suggestions for
+    the same durable row before they are merged (``improve_version``'s
+    per-suggestion scoped loop - providers routinely split one companion-gated
+    change across two suggestions, e.g. ``error_bars`` in one and
+    ``error_type`` in another) must defer the registry pass until after that
+    merge, or a suggestion proposing only the dependent half of a companion
+    pair is wrongly judged against pre-merge options and dropped even though
+    the merged patch would satisfy the registry.
+    """
+    dropped: list[dict[str, str]] = []
     if not isinstance(patch, dict):
-        return {}
+        return {}, dropped
+    # `pdef` lets a caller that already has its own plot-type-definition dict
+    # (e.g. a synthetic/minimal test fixture, or the auto-quality-pass path
+    # which resolves it once up front) skip a second real-registry lookup;
+    # _plot_def(plot_type) is only used as a fallback when the caller relies
+    # on plot_type alone (this module's normal call sites).
+    if pdef is None:
+        pdef = _plot_def(plot_type)
 
     clean: dict[str, Any] = {}
     style = patch.get("style_preset")
     if isinstance(style, str) and style in PRESETS:
         clean["style_preset"] = style
+
+    base_mapping = mapping or {}
+    base_options = options or {}
 
     allowed_mapping = {r["key"] for r in pdef["required"]} | {o["key"] for o in pdef.get("optional", [])}
     # A mapping value is accepted if it is already used in the base mapping OR is
@@ -4951,35 +5546,68 @@ def _sanitize_param_patch(patch: dict[str, Any], pdef: dict, base_mapping: dict[
     # unlocks brand-new AI encodings (e.g. "color points by treatment"); values
     # that are not real columns are still rejected so renders cannot break.
     allowed_column_values = _known_mapping_values(base_mapping) | (valid_columns or set())
-    mapping_patch = {}
+    mapping_patch: dict[str, Any] = {}
     raw_mapping = patch.get("mapping")
     if isinstance(raw_mapping, dict):
         for key, value in raw_mapping.items():
             if key not in allowed_mapping:
+                dropped.append({"path": f"mapping.{key}", "reason": f"not an option for {plot_type}"})
                 continue
             if isinstance(value, str) and value in allowed_column_values:
                 mapping_patch[key] = value
-            elif isinstance(value, list):
-                vals = [v for v in value if isinstance(v, str) and v in allowed_column_values]
-                if vals:
-                    mapping_patch[key] = vals
+            elif isinstance(value, list) and any(
+                isinstance(v, str) and v in allowed_column_values for v in value
+            ):
+                mapping_patch[key] = [v for v in value if isinstance(v, str) and v in allowed_column_values]
+            else:
+                dropped.append({"path": f"mapping.{key}", "reason": "invalid value"})
     if mapping_patch:
         clean["mapping"] = mapping_patch
+    merged_mapping = {**base_mapping, **mapping_patch}
 
     allowed_options = {o["key"] for o in pdef.get("options", [])} | _UNIVERSAL_OPTION_KEYS
-    options_patch = {}
+    options_patch: dict[str, Any] = {}
     raw_options = patch.get("options")
     if isinstance(raw_options, dict):
         for key, value in raw_options.items():
             if key not in allowed_options:
+                dropped.append({"path": f"options.{key}", "reason": f"not an option for {plot_type}"})
                 continue
-            sanitized = _sanitize_option(
-                key, value, valid_columns, plot_type=str(pdef.get("type") or ""),
-            )
-            if sanitized is not None:
-                options_patch[key] = sanitized
+            sanitized = _sanitize_option(key, value, valid_columns, plot_type=plot_type)
+            if sanitized is None:
+                dropped.append({"path": f"options.{key}", "reason": "invalid value"})
+                continue
+            options_patch[key] = sanitized
+
+    # Registry pass: keys accepted TOGETHER in this same patch (e.g.
+    # error_bars + error_type) are evaluated against each other, not just
+    # against the figure's pre-patch options. Skipped when `plot_type` is not
+    # a real, registered plot type (e.g. a synthetic pdef-only test fixture
+    # with no "type") - option_support has no opinion to offer there, and
+    # treating "unknown plot type" as "not consumed" would wrongly drop every
+    # option instead of leaving the plain allow-list/sanitize result alone.
+    if registry and plot_type in PLOT_TYPE_KEYS:
+        merged_options = {**base_options, **options_patch}
+        for key in list(options_patch):
+            reason = _option_unsupported_reason(plot_type, key, merged_mapping, merged_options)
+            if reason is not None:
+                dropped.append({"path": f"options.{key}", "reason": reason})
+                del options_patch[key]
+
     if options_patch:
         clean["options"] = options_patch
+    return clean, dropped
+
+
+def _sanitize_param_patch(patch: dict[str, Any], pdef: dict, base_mapping: dict[str, Any],
+                          valid_columns: set[str] | None = None,
+                          base_options: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Thin wrapper over ``_sanitize_param_patch_report`` for call sites that
+    only need the clean patch, not the drop reasons."""
+    clean, _dropped = _sanitize_param_patch_report(
+        patch, str(pdef.get("type") or ""), base_mapping, base_options,
+        valid_columns=valid_columns, pdef=pdef,
+    )
     return clean
 
 

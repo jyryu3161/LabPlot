@@ -1751,9 +1751,12 @@ class MarkedEditSafetyRegressionTests(unittest.TestCase):
             },
         })
         self.assertNotIn("element_overrides", rejected_only)
-        element_schema = ai_client._OPTIONS_PATCH_SCHEMA["properties"]["element_overrides"]
+        element_schema = ai_client.build_options_patch_schema()["properties"]["element_overrides"]
+        # Array-of-{id, fill?, stroke?} shape (not a map with additionalProperties) so
+        # Gemini's responseSchema can represent it - see options_schema._STRUCTURAL_SHAPES.
+        self.assertEqual(element_schema["type"], "array")
         self.assertEqual(
-            set(element_schema["additionalProperties"]["properties"]),
+            set(element_schema["items"]["properties"]) - {"id"},
             {"fill", "stroke"},
         )
         self.assertEqual(
@@ -2250,6 +2253,75 @@ class MarkedEditSafetyRegressionTests(unittest.TestCase):
         self.assertEqual(len(applicable), 1)
         self.assertEqual(applicable[0].param_patch, {
             "options": {"line_type": "dashed", "point_shape": "square"},
+        })
+
+    def test_companion_keys_split_across_sibling_suggestions_survive_together(self):
+        # A1.4-fix regression: providers routinely split one companion-gated
+        # change (error_type needs error_bars on to be consumed) across two
+        # JSON suggestions for the same mark. improve_version's registry pass
+        # must be deferred until AFTER the sibling-suggestion merge, not
+        # applied per-suggestion against pre-merge options - otherwise the
+        # suggestion proposing only the dependent half is wrongly dropped
+        # even though the merged row would satisfy the registry.
+        db, figure, version, dataset = self._improve_fixture("grouped_bar")
+        prompt = "Mark #3: add error bars showing the 95% confidence interval"
+        suggestions = [
+            {
+                "mark_id": "3", "suggestion_type": "Error bars", "recommended": "On",
+                "priority": "high", "param_patch": {"options": {"error_bars": True}},
+            },
+            {
+                "mark_id": "3", "suggestion_type": "Error type", "recommended": "95% CI",
+                "priority": "high", "param_patch": {"options": {"error_type": "ci95"}},
+            },
+        ]
+        with (
+            patch.object(figure_service, "get_figure", return_value=figure),
+            patch.object(figure_service, "get_version", return_value=version),
+            patch.object(figure_service.ds_service, "get_dataset", return_value=dataset),
+            patch.object(figure_service.ai_client, "improve_figure", return_value=(suggestions, [])),
+        ):
+            rows = figure_service.improve_version(
+                db, figure.id, version.id, "44444444-4444-4444-8444-444444444444", prompt=prompt
+            )
+
+        applicable = [row for row in rows if row.param_patch]
+        self.assertEqual(len(applicable), 1)
+        self.assertEqual(applicable[0].param_patch, {
+            "options": {"error_bars": True, "error_type": "ci95"},
+        })
+        self.assertEqual(applicable[0].edit_scope["status"], "supported")
+        self.assertEqual(applicable[0].skipped_reasons, {})
+
+    def test_companion_keys_split_across_sibling_suggestions_survive_together_reverse_order(self):
+        # Same as above with the dependent key (error_type) proposed FIRST -
+        # the merge/registry order must not matter.
+        db, figure, version, dataset = self._improve_fixture("grouped_bar")
+        prompt = "Mark #3: add error bars showing the 95% confidence interval"
+        suggestions = [
+            {
+                "mark_id": "3", "suggestion_type": "Error type", "recommended": "95% CI",
+                "priority": "high", "param_patch": {"options": {"error_type": "ci95"}},
+            },
+            {
+                "mark_id": "3", "suggestion_type": "Error bars", "recommended": "On",
+                "priority": "high", "param_patch": {"options": {"error_bars": True}},
+            },
+        ]
+        with (
+            patch.object(figure_service, "get_figure", return_value=figure),
+            patch.object(figure_service, "get_version", return_value=version),
+            patch.object(figure_service.ds_service, "get_dataset", return_value=dataset),
+            patch.object(figure_service.ai_client, "improve_figure", return_value=(suggestions, [])),
+        ):
+            rows = figure_service.improve_version(
+                db, figure.id, version.id, "44444444-4444-4444-8444-444444444444", prompt=prompt
+            )
+
+        applicable = [row for row in rows if row.param_patch]
+        self.assertEqual(len(applicable), 1)
+        self.assertEqual(applicable[0].param_patch, {
+            "options": {"error_bars": True, "error_type": "ci95"},
         })
 
     def test_blank_mark_memo_consumes_general_prompt_without_duplicate_global_scope(self):

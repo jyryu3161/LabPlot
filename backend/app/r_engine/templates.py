@@ -2610,6 +2610,130 @@ def is_color_editable(plot_type: str) -> bool:
     path) and CONTINUOUS_FILL_TYPES (gradient fills) are not editable."""
     return plot_type not in DEVICE_TYPES and plot_type not in CONTINUOUS_FILL_TYPES
 
+
+# ---------------------------------------------------------------------------
+# Precise, mapping/options-aware discrete-scale predicates (A1.3(a) P1/P3
+# fix). `is_color_editable()` above is a coarse, TYPE-ONLY flag (used by
+# figures/router.py to build the static per-type "color_editable" flag for
+# the CanvasColorEditor UI, before any figure/mapping exists) -- it is
+# deliberately left unchanged. The two predicates below additionally know
+# WHICH mapping/options actually make a builder emit (and show) a discrete
+# fill/colour/shape/linetype scale, so option_support.py's registry and
+# renderer.build_script's script-text emission can agree exactly, instead of
+# both being gated on the coarser is_color_editable(plot_type) alone (which
+# over-claims "consumed" for e.g. bar without color_bars, scatter without a
+# color mapping, or roc_pr_curve/parallel_coordinates/embedding/
+# calibration_curve/chemical_space/radar/sankey -- all CONTINUOUS_FILL_TYPES
+# members whose builder ALSO emits a genuine discrete manual scale).
+#
+# _DISCRETE_SCALE_SLOT: plot_type -> the optional MAPPING slot that must be
+# set for that builder to emit a discrete scale_(colour|fill)_manual(...) at
+# all, or None if the scale is unconditional once the type's own required
+# mapping is filled. A plot type absent from this dict never emits a
+# discrete manual scale (dot_plot/lollipop: constant point colour;
+# enrichment_dot/enrichment_bar: continuous scale_colour/fill_gradient;
+# heatmap/correlation_heatmap/contour/confusion_matrix/network: gradient or
+# no colour scale at all). "bar" is handled separately below (its condition
+# is the `color_bars` OPTION, not a mapping slot).
+_DISCRETE_SCALE_SLOT: dict[str, str | None] = {
+    # -- unconditional discrete scale (no companion mapping needed) --
+    "box": None,                  # color = m.get("color") or x -- _box
+    "violin": None,                # color = m.get("color") or x -- _violin
+    "sina": None,                   # color = m.get("color") or x -- _sina
+    "overlap_bar": None,            # .series always built (group/y2/y fallback) -- _overlap_bar
+    "grouped_bar": None,            # required `group` slot -- _grouped_bar
+    "area": None,                   # required `group` slot -- _area
+    "volcano": None,                # colour = .sig, 3-level, no mapping needed -- _volcano
+    "ma_plot": None,                # colour = .sig, 3-level, no mapping needed -- _ma_plot
+    "ridge": None,                  # required `group` slot -- _ridge (guide hardcoded hidden, see below)
+    "manhattan": None,              # internal `.band`, no mapping slot -- _manhattan (guide hardcoded hidden)
+    "sankey": None,                 # colour = source (required) -- _sankey (guide hardcoded hidden)
+    "roc_pr_curve": None,           # group falls back to a constant "Model" factor -- _roc_pr_curve
+    "parallel_coordinates": None,   # group falls back to a constant "All" factor -- _parallel_coordinates
+    "radar": None,                  # group falls back to a constant "All" factor -- _radar
+    # -- discrete scale only once this optional slot is mapped --
+    "scatter": "color",
+    "line": "group",
+    "error_bar": "group",
+    "ribbon": "group",
+    "histogram": "group",
+    "density": "group",
+    "pca": "color",
+    "kaplan_meier": "group",
+    "qq": "group",
+    "ecdf": "group",
+    "forest": "color",
+    "curve_fit": "group",
+    "embedding": "color",
+    "chemical_space": "color",
+    "calibration_curve": "group",
+}
+
+# Plot types whose builder hardcodes an unconditional `guides(<aes> = "none")`
+# / `scale_..._manual(..., guide = "none")` for the discrete scale above --
+# category_colors/custom_palette_values still recolour the marks for real
+# (the scale IS discrete at runtime), but there is no legend for legend_ncol
+# to ever page, no matter the options.
+#   bar: _bar -- both the count-mode and mean-mode branches end in
+#     `guides(fill = "none")` regardless of color_bars.
+#   ridge: _ridge -- `guides(fill = "none")` (already labelled via the shared
+#     y-axis tick labels).
+#   manhattan: _manhattan -- `scale_colour_manual(..., guide = "none")` on the
+#     internal odd/even chromosome `.band`, never a user-facing legend.
+#   sankey: _sankey -- `scale_colour_manual(..., guide = "none")` on the flow
+#     source colour.
+_LEGEND_ALWAYS_HIDDEN_TYPES = {"bar", "ridge", "manhattan", "sankey"}
+
+# Plot types where the discrete scale itself is unconditional (see
+# _DISCRETE_SCALE_SLOT[type] is None) but the LEGEND is additionally
+# conditional on an optional mapping slot -- unlike the always-visible
+# unconditional types above (box/violin/sina/... whose guide is always shown
+# once the scale exists).
+#   parallel_coordinates: guide = ... if group else guides(colour = "none")
+#   radar: guide = ... if group else guides(colour = "none", fill = "none")
+# roc_pr_curve is deliberately NOT here: its guide is always
+# guide_legend(...) (title NULL when group is unset), never "none".
+_LEGEND_VISIBILITY_SLOT: dict[str, str] = {
+    "parallel_coordinates": "group",
+    "radar": "group",
+}
+
+
+def has_discrete_color_scale(plot_type: str, mapping: dict | None = None, options: dict | None = None) -> bool:
+    """True iff build_script(plot_type, mapping, options) would emit a
+    discrete fill/colour/shape/linetype scale that actually recolours marks
+    at runtime -- the precise gate for category_colors / custom_palette_values
+    (both apply regardless of whether the scale's legend is shown; see
+    _LEGEND_ALWAYS_HIDDEN_TYPES). DEVICE_TYPES (no ggplot `p`/theme_r() at
+    all) are always False."""
+    mapping = mapping or {}
+    options = options or {}
+    if plot_type in DEVICE_TYPES:
+        return False
+    if plot_type == "bar":
+        return bool(options.get("color_bars"))
+    if plot_type not in _DISCRETE_SCALE_SLOT:
+        return False
+    slot = _DISCRETE_SCALE_SLOT[plot_type]
+    if slot is None:
+        return True
+    value = mapping.get(slot)
+    return bool(value) if not isinstance(value, list) else bool(value)
+
+
+def has_visible_discrete_legend(plot_type: str, mapping: dict | None = None, options: dict | None = None) -> bool:
+    """True iff has_discrete_color_scale() AND that scale's guide is actually
+    shown (not hardcoded to "none") -- the precise gate for legend_ncol,
+    which has nothing to page into columns when no legend is ever drawn."""
+    if not has_discrete_color_scale(plot_type, mapping, options):
+        return False
+    if plot_type in _LEGEND_ALWAYS_HIDDEN_TYPES:
+        return False
+    vis_slot = _LEGEND_VISIBILITY_SLOT.get(plot_type)
+    if vis_slot is None:
+        return True
+    return bool((mapping or {}).get(vis_slot))
+
 PLOT_TYPES += [
     {"type": "annotated_heatmap", "label": "Annotated heatmap (cohort)",
      "required": [{"key": "columns", "label": "Feature columns", "roles": ["numeric", "log2fc"], "multi": True}],

@@ -645,5 +645,76 @@ class PointAndCellElementOverrideRenderTests(unittest.TestCase):
         self.assertIn(selected_id, r_code)
 
 
+def _svg_text_contents(svg: str) -> list[str]:
+    """Concatenated text content of every <text> node in an svglite SVG
+    (nested <tspan> children included), for asserting on rendered legend
+    titles/labels."""
+    root = ET.fromstring(svg)
+    contents: list[str] = []
+    for element in root.iter():
+        if element.tag.rsplit("}", 1)[-1] != "text":
+            continue
+        joined = "".join(part.strip() for part in element.itertext() if part and part.strip())
+        if joined:
+            contents.append(joined)
+    return contents
+
+
+class LegendNcolGuideMergeRenderTests(unittest.TestCase):
+    """A1.3(a) P1 regression: legend_ncol must MERGE ncol into the plot's
+    existing guide (renderer._legend_ncol_r) rather than replacing it
+    wholesale -- real-render validation (not just script-text assertions) of
+    both failure modes the finding described: a lost legend TITLE, and a
+    template-hidden legend being resurrected."""
+
+    def test_box_legend_ncol_keeps_discrete_legend_title(self):
+        data = pd.DataFrame(
+            {
+                "Group": ["A", "A", "B", "B", "A", "B"],
+                "Value": [1.0, 2.0, 3.0, 2.5, 1.5, 3.5],
+                "Treatment": ["Ctrl", "Ctrl", "Drug", "Drug", "Ctrl", "Drug"],
+            }
+        )
+        mapping = {"x": "Group", "y": "Value", "color": "Treatment"}
+        layout, svg, _r_code = _render_artifacts(
+            self, "box", mapping, {"legend_ncol": 2, "size": "single_column", "dpi": 72}, data
+        )
+        texts = _svg_text_contents(svg)
+        # The guide's title must remain the mapped column name "Treatment"
+        # (templates._box's guides(fill = guide_legend(title = rq(color))))
+        # -- not the deparsed aes expression a wholesale guide replacement
+        # would fall back to (e.g. "factor(df[[\"Treatment\"]])").
+        self.assertTrue(any(t == "Treatment" for t in texts), texts)
+        self.assertFalse(any("factor(" in t for t in texts), texts)
+        self.assertFalse(any("df[[" in t for t in texts), texts)
+        legend_keys = layout.get("legend_keys") or []
+        self.assertEqual({k.get("series") for k in legend_keys}, {"Ctrl", "Drug"})
+
+    def test_bar_color_bars_legend_ncol_stays_hidden(self):
+        data = pd.DataFrame(
+            {
+                "Category": ["W", "X", "Y", "Z"],
+                "Value": [1.0, 2.0, 3.0, 4.0],
+            }
+        )
+        mapping = {"x": "Category", "y": "Value"}
+        base_options = {"color_bars": True, "size": "single_column", "dpi": 72}
+        layout_before, _svg_before, r_code_before = _render_artifacts(
+            self, "bar", mapping, dict(base_options), data
+        )
+        layout_after, _svg_after, r_code_after = _render_artifacts(
+            self, "bar", mapping, {**base_options, "legend_ncol": 2}, data
+        )
+        # templates._bar hardcodes `guides(fill = "none")` regardless of
+        # color_bars -- a wholesale guide replacement would resurrect this
+        # legend (P1's exact failure scenario); the merge-based fix must
+        # leave it hidden, and the option_support gate must not even emit
+        # the helper's "guide_legend(ncol = 2)" text.
+        self.assertNotIn("legend_keys", layout_before)
+        self.assertNotIn("legend_keys", layout_after)
+        self.assertNotIn("guide_legend(ncol = 2)", r_code_after)
+        self.assertEqual(r_code_before, r_code_after)
+
+
 if __name__ == "__main__":
     unittest.main()

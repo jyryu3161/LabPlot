@@ -65,9 +65,9 @@ _MAPPING_PATCH_SCHEMA = {
 # Auto-generated (U10a) from the real renderer/sanitize option metadata
 # (app.ai.options_schema) instead of a hand-maintained dict, so schema
 # coverage cannot silently drift away from what sanitize_options actually
-# accepts. Built once at import time; see options_schema.py for the
-# generation rules and the documented exclusion list.
-_OPTIONS_PATCH_SCHEMA = build_options_patch_schema()
+# accepts. _improve_schema() calls build_options_patch_schema(plot_type) per
+# call (lru_cache'd there); see options_schema.py for the generation rules
+# and the documented exclusion list.
 
 
 def _mapping_schema() -> dict:
@@ -196,7 +196,7 @@ def _record_usage(user_id: uuid.UUID | None, organization_id: uuid.UUID | None, 
 
 def _run_logged(db: Session, user_id: uuid.UUID | None, feature: str, system: str, content: list[dict],
                 schema: dict, tool_name: str, max_tokens: int,
-                gemini_thinking_level: str | None = None) -> dict:
+                gemini_thinking_level: str | None = None, temperature: float | None = None) -> dict:
     user = None
     if user_id:
         from app.auth.models import User
@@ -207,7 +207,8 @@ def _run_logged(db: Session, user_id: uuid.UUID | None, feature: str, system: st
             enforce_ai_quota(db, user)
     provider, model, key, organization_id = _ready(db, user)
     payload, usage = providers.run_structured_with_usage(
-        provider, model, key, system, content, schema, tool_name, max_tokens, gemini_thinking_level
+        provider, model, key, system, content, schema, tool_name, max_tokens, gemini_thinking_level,
+        temperature=temperature,
     )
     _record_usage(user_id, organization_id, provider, model, feature, usage)
     return payload
@@ -230,12 +231,17 @@ _INJECTION_PATTERNS = [
     r"ignore (all )?(previous|above|system|developer) instructions",
     r"disregard (all )?(previous|above|system|developer) instructions",
     r"you are now",
-    r"act as",
+    r"\bact as (?:a|an|the)\b",
     r"system prompt",
     r"developer message",
     r"reveal (the )?(prompt|instructions|secret|api key)",
-    r"return only",
-    r"output .*json",
+    # Anchored to the classic exfil/jailbreak phrasing ("return only json/raw
+    # text/code", "output format/as/only ... json") rather than the bare
+    # "return only"/"output .*json" the neutralizer used to match, which also
+    # scrubbed innocuous figure-edit requests like "return only the Control
+    # group in blue".
+    r"\breturn only (?:json|raw|text|code)\b",
+    r"\boutput (?:format|as|only)\b.*\bjson\b",
 ]
 
 
@@ -1076,17 +1082,25 @@ def verify_edit(db: Session, before_png_path: str, after_png_path: str, request_
 
 
 # ----------------------------------------------------------------- improve
-def improve_figure(db: Session, plot_type: str, mapping: dict, options: dict, style_preset: str,
-                   review: dict | None, available_options: list[dict], project_context: str | None = None,
-                   user_id: uuid.UUID | None = None, user_request: str | None = None,
-                   rendered_image: tuple[bytes, str] | None = None,
-                   r_code: str | None = None,
-                   request_scopes: list[dict] | None = None) -> tuple[list[dict], list[dict]]:
-    """Returns (suggestions, unsupported). `unsupported` (U10b) lists parts of
-    user_request the model could not express as a supported param_patch, each
-    as {"request": <short quote/summary>, "reason": <short user-facing reason>}
-    - a sibling of `suggestions` at the top level, not silently dropped."""
-    system = with_guide(IMPROVE_SYSTEM, r_code_generator_guide(), "R code generator")
+def _improve_schema(plot_type: str | None = None) -> dict:
+    """The full improve_figure response schema (suggestions + unsupported).
+
+    Extracted to module level (instead of being built inline in
+    improve_figure) so:
+      - the import-time Gemini-compatibility guard below can validate the
+        exact schema the model is prompted with, catching a future schema
+        change that reintroduces a Gemini-incompatible shape (M-A1.1) at
+        import time instead of at request time on Gemini only;
+      - a future per-plot-type schema (M-A1.3) has a single place to
+        specialize.
+
+    `plot_type=None` keeps the full flat-union options schema (also what the
+    import-time Gemini-compatibility guard below validates); a concrete
+    `plot_type` narrows `param_patch.options` to only the keys
+    app.r_engine.option_support says this plot type could ever consume
+    (M-A1.3), via options_schema.build_options_patch_schema(plot_type).
+    """
+    options_schema = build_options_patch_schema(plot_type)
     suggestion_item_schema = {
         "type": "object",
         "properties": {
@@ -1102,7 +1116,7 @@ def improve_figure(db: Session, plot_type: str, mapping: dict, options: dict, st
                 "properties": {
                     "style_preset": {"type": "string", "enum": ["nature", "science", "cell", "minimal", "colorblind"]},
                     "mapping": _MAPPING_PATCH_SCHEMA,
-                    "options": _OPTIONS_PATCH_SCHEMA,
+                    "options": options_schema,
                 },
             },
         },
@@ -1122,7 +1136,7 @@ def improve_figure(db: Session, plot_type: str, mapping: dict, options: dict, st
         },
         "required": ["request", "reason"],
     }
-    schema = {
+    return {
         "type": "object",
         "properties": {
             "suggestions": {"type": "array", "items": suggestion_item_schema},
@@ -1130,6 +1144,46 @@ def improve_figure(db: Session, plot_type: str, mapping: dict, options: dict, st
         },
         "required": ["suggestions"],
     }
+
+
+def _project_request_scope(scope: dict) -> dict:
+    """Trim a server-normalized edit-request scope to the fields the model
+    actually needs before it is serialized into the prompt: identity, the
+    (already-neutralized) request text, and a minimal resolved-target
+    projection. Drops bbox_normalized/point_normalized, declared_target,
+    requested/accepted_target_override, and target_override_rejection_reason
+    - server-authority bookkeeping fields that are not model input."""
+    resolved = scope.get("server_resolved_target")
+    projected_target = None
+    if isinstance(resolved, dict):
+        projected_target = {
+            key: resolved.get(key)
+            for key in ("role", "label", "setting_path", "editable", "element_id")
+            if resolved.get(key) is not None
+        }
+    return {
+        "scope_id": scope.get("scope_id"),
+        "mark_id": scope.get("mark_id"),
+        "mark_label": scope.get("mark_label"),
+        "display_number": scope.get("display_number"),
+        "mark_type": scope.get("mark_type"),
+        "request": _neutralize_prompt_injection(str(scope.get("request") or "")),
+        "server_resolved_target": projected_target,
+    }
+
+
+def improve_figure(db: Session, plot_type: str, mapping: dict, options: dict, style_preset: str,
+                   review: dict | None, available_options: list[dict], project_context: str | None = None,
+                   user_id: uuid.UUID | None = None, user_request: str | None = None,
+                   rendered_image: tuple[bytes, str] | None = None,
+                   r_code: str | None = None,
+                   request_scopes: list[dict] | None = None) -> tuple[list[dict], list[dict]]:
+    """Returns (suggestions, unsupported). `unsupported` (U10b) lists parts of
+    user_request the model could not express as a supported param_patch, each
+    as {"request": <short quote/summary>, "reason": <short user-facing reason>}
+    - a sibling of `suggestions` at the top level, not silently dropped."""
+    system = with_guide(IMPROVE_SYSTEM, r_code_generator_guide(), "R code generator")
+    schema = _improve_schema(plot_type)
     ctx = {"plot_type": plot_type, "current_mapping": mapping, "current_options": options,
            "current_style_preset": style_preset, "available_options_for_this_type": available_options,
            "prior_review": review or {}}
@@ -1153,12 +1207,13 @@ def improve_figure(db: Session, plot_type: str, mapping: dict, options: dict, st
             "```r\n" + r_code[:20000] + "\n```"
         )})
     if request_scopes:
+        projected_scopes = [_project_request_scope(scope) for scope in request_scopes[:20] if isinstance(scope, dict)]
         content.append({"kind": "text", "text": (
             "SERVER-NORMALIZED EDIT SCOPES. The scope_id/mark_id values are authoritative and must be copied to each "
             "corresponding suggestion or unsupported result. Return exactly one result per marked scope; never invent, "
             "renumber, merge, or omit mark identities. resolved_target.setting_path is localization evidence, not permission "
             "to change unrelated settings; the memo remains the request boundary.\n"
-            + json.dumps(request_scopes[:20], ensure_ascii=False)[:12000]
+            + json.dumps(projected_scopes, ensure_ascii=False)[:12000]
         )})
     if rendered_image is not None:
         # Same long-edge guard as verify_edit: high-dpi exports can exceed
@@ -1193,13 +1248,32 @@ def improve_figure(db: Session, plot_type: str, mapping: dict, options: dict, st
             + _neutralize_prompt_injection(user_request.strip()[:4000])
             + "\n</figure_improvement_request>"
         )})
-    try:
-        out = _run_logged(
-            db, user_id, "figure_improvements", system, content, schema, "figure_improvements", 2600,
+    def _call_model(extra_content: list[dict] | None = None, temperature: float | None = None) -> dict:
+        call_content = content if extra_content is None else content + extra_content
+        return _run_logged(
+            db, user_id, "figure_improvements", system, call_content, schema, "figure_improvements", 2600,
             gemini_thinking_level="high" if rendered_image is not None else None,
+            temperature=temperature,
         )
+
+    try:
+        out = _call_model()
     except BadRequestError as e:
-        if getattr(e, "error_code", None) == "AI_BAD_RESPONSE":
+        # AI_API_ERROR (auth/rate-limit/network) is not recoverable by
+        # retrying the same request differently - propagate it immediately
+        # rather than masking it as a fallback/unsupported result.
+        if getattr(e, "error_code", None) != "AI_BAD_RESPONSE":
+            raise
+        # One automatic re-call at a lower temperature with an extra
+        # explicit instruction, before treating the request as unrecoverable.
+        try:
+            out = _call_model(
+                extra_content=[{"kind": "text", "text": "Return only the JSON object."}],
+                temperature=0.1,
+            )
+        except BadRequestError as retry_error:
+            if getattr(retry_error, "error_code", None) != "AI_BAD_RESPONSE":
+                raise
             if (user_request and user_request.strip()) or request_scopes:
                 # A scoped edit must never turn an incomplete model payload
                 # into unrelated palette/export defaults. Preserve the
@@ -1217,7 +1291,6 @@ def improve_figure(db: Session, plot_type: str, mapping: dict, options: dict, st
                     "reason": reason,
                 }]
             return _fallback_improvements(options, style_preset), []
-        raise
     return _normalize_improvement_suggestions(out.get("suggestions")), _normalize_unsupported(out.get("unsupported"))
 
 
@@ -1244,6 +1317,66 @@ def _normalize_confidence(value: Any) -> float | None:
     return confidence if 0 <= confidence <= 1 else None
 
 
+_ELEMENT_OVERRIDE_STYLE_KEYS = ("fill", "stroke")
+
+
+def _denormalize_category_colors(value: Any) -> Any:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, list):
+        return value
+    result: dict[str, str] = {}
+    for entry in value:
+        if not isinstance(entry, dict):
+            continue
+        level = entry.get("level")
+        color = entry.get("color")
+        if isinstance(level, str) and level.strip() and isinstance(color, str) and color.strip():
+            # Later duplicate entries win, matching plain dict-literal semantics.
+            result[level] = color
+    return result
+
+
+def _denormalize_element_overrides(value: Any) -> Any:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, list):
+        return value
+    result: dict[str, dict[str, str]] = {}
+    for entry in value:
+        if not isinstance(entry, dict):
+            continue
+        element_id = entry.get("id")
+        if not isinstance(element_id, str) or not element_id.strip():
+            continue
+        style = {key: entry[key] for key in _ELEMENT_OVERRIDE_STYLE_KEYS if isinstance(entry.get(key), str)}
+        if style:
+            result[element_id] = style
+    return result
+
+
+def _denormalize_patch_lists(options: dict) -> dict:
+    """Convert the Gemini-compatible array shapes for category_colors and
+    element_overrides (options_schema._STRUCTURAL_SHAPES - arrays, because
+    Gemini's responseSchema rejects an open string/object map) back into the
+    {level: color} / {id: {fill, stroke}} map shapes figures.service.
+    sanitize_options actually accepts. Applied to every suggestion's
+    param_patch.options before anything else consumes it (M-A1.1), so the
+    schema shape is an implementation detail invisible past this module.
+
+    Already-dict values (e.g. a well-behaved Claude response, or a value that
+    already went through this function) pass through unchanged. Entries
+    missing level/id are dropped; only the fill/stroke style keys survive."""
+    if not isinstance(options, dict):
+        return options
+    out = dict(options)
+    if "category_colors" in out:
+        out["category_colors"] = _denormalize_category_colors(out["category_colors"])
+    if "element_overrides" in out:
+        out["element_overrides"] = _denormalize_element_overrides(out["element_overrides"])
+    return out
+
+
 def _normalize_improvement_suggestions(value: Any) -> list[dict]:
     """Keep provider suggestions JSON-compatible while normalizing the two
     mark-localization fields used by the server's scope matcher."""
@@ -1254,6 +1387,11 @@ def _normalize_improvement_suggestions(value: Any) -> list[dict]:
         if not isinstance(item, dict):
             continue
         clean = dict(item)
+        patch = clean.get("param_patch")
+        if isinstance(patch, dict) and isinstance(patch.get("options"), dict):
+            patch = dict(patch)
+            patch["options"] = _denormalize_patch_lists(patch["options"])
+            clean["param_patch"] = patch
         mark_id = _normalize_mark_id(clean.get("mark_id"))
         if mark_id:
             clean["mark_id"] = mark_id
@@ -1394,3 +1532,20 @@ def enhance_prompt(db: Session, draft: str, kind: str = "dataset_description", c
     content = _ctx_block(context) + [{"kind": "text", "text": "Draft to improve:\n" + draft_text}]
     out = _run_logged(db, user_id, "enhanced_prompt", system, content, schema, "enhanced_prompt", 700)
     return out.get("enhanced", "")
+
+
+# Fail loud at import time rather than silently degrading every Gemini
+# improve_figure call to prompt-only JSON (which is the verified root cause
+# of "AI edits not applied" on Gemini - M-A1.1: options_schema.py's old
+# category_colors/element_overrides shapes were property-less objects that
+# providers._to_gemini_schema rejects, so run_structured_with_usage always
+# fell back for improve_figure). If this ever raises, the improve schema
+# (most likely a new entry in options_schema._STRUCTURAL_SHAPES) grew a
+# generic/property-less object shape again that Gemini's responseSchema
+# cannot represent.
+try:
+    providers._to_gemini_schema(_improve_schema())
+except providers._UnsupportedSchema as _improve_schema_error:  # pragma: no cover - guard, not meant to fire
+    raise RuntimeError(
+        f"improve schema is not Gemini-compatible: {_improve_schema_error}"
+    ) from _improve_schema_error
