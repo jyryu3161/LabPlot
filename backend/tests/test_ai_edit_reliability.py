@@ -199,10 +199,26 @@ class GeminiTransientRetryTests(unittest.TestCase):
         self.assertEqual(mock_urlopen.call_count, 2)
         self.mock_sleep.assert_called_once()
 
-    def test_second_consecutive_503_propagates(self):
+    def test_third_consecutive_503_propagates(self):
+        # Capacity shedding (429/503) gets two bounded retries (2s, 5s); the
+        # third failure propagates as AI_API_ERROR.
         mock_urlopen = MagicMock(side_effect=[
             urllib.error.HTTPError("https://x", 503, "Service Unavailable", None, None),
             urllib.error.HTTPError("https://x", 503, "Service Unavailable", None, None),
+            urllib.error.HTTPError("https://x", 503, "Service Unavailable", None, None),
+        ])
+        with patch("urllib.request.urlopen", mock_urlopen):
+            with self.assertRaises(BadRequestError) as ctx:
+                providers._gemini("gemini-test", "key", "sys", [], {"type": "object", "properties": {}}, 100)
+        self.assertEqual(ctx.exception.error_code, "AI_API_ERROR")
+        self.assertEqual(mock_urlopen.call_count, 3)
+        self.assertEqual([c.args[0] for c in self.mock_sleep.call_args_list], [2.0, 5.0])
+
+    def test_second_consecutive_500_propagates(self):
+        # Non-shedding transient statuses keep a single retry.
+        mock_urlopen = MagicMock(side_effect=[
+            urllib.error.HTTPError("https://x", 500, "Internal Server Error", None, None),
+            urllib.error.HTTPError("https://x", 500, "Internal Server Error", None, None),
         ])
         with patch("urllib.request.urlopen", mock_urlopen):
             with self.assertRaises(BadRequestError) as ctx:

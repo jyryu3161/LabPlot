@@ -174,22 +174,38 @@ def _retry_delay(error: urllib.error.HTTPError) -> float:
     return 2.0
 
 
-def _post_with_retry(req: urllib.request.Request, timeout: float = 90.0) -> bytes:
-    """POST `req`, retrying exactly once for transient failures.
+# Capacity shedding (429/503) is retried up to twice with a short backoff -
+# Gemini has been observed to shed ~50% of requests for minutes at a time, so a
+# single retry left too many verify verdicts skipped. Other transient failures
+# (500/504, network errors) keep a single retry.
+_SHED_HTTP_STATUS = {429, 503}
+_SHED_BACKOFF = (2.0, 5.0)
 
-    Retryable: HTTP 429/500/503/504, and connection/timeout errors
-    (URLError/socket.timeout/TimeoutError). Any other error (e.g. HTTP 400)
-    propagates immediately on the first attempt so the caller can react to it
-    (e.g. drop an unsupported responseSchema and retry with a different body)
-    instead of burning the one retry on a request that will fail again
-    unchanged.
+
+def _post_with_retry(req: urllib.request.Request, timeout: float = 90.0) -> bytes:
+    """POST `req`, retrying transient failures a bounded number of times.
+
+    Retryable: HTTP 429/503 (up to two retries, 2s then 5s, honouring a capped
+    Retry-After), HTTP 500/504 and connection/timeout errors (one retry). Any
+    other error (e.g. HTTP 400) propagates immediately on the first attempt so
+    the caller can react to it (e.g. drop an unsupported responseSchema and
+    retry with a different body) instead of burning a retry on a request that
+    will fail again unchanged.
     """
     last_error: Exception | None = None
-    for attempt in range(2):
+    max_attempts = 1 + len(_SHED_BACKOFF)
+    for attempt in range(max_attempts):
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return resp.read()
         except urllib.error.HTTPError as e:
+            retries_left = max_attempts - 1 - attempt
+            if e.code in _SHED_HTTP_STATUS and retries_left > 0:
+                delay = max(_SHED_BACKOFF[attempt], _retry_delay(e))
+                logger.warning("Gemini API returned HTTP %s; retrying after %.1fs (%d left)", e.code, delay, retries_left)
+                last_error = e
+                _SLEEP(delay)
+                continue
             if attempt == 0 and e.code in _RETRYABLE_HTTP_STATUS:
                 delay = _retry_delay(e)
                 logger.warning("Gemini API returned HTTP %s; retrying once after %.1fs", e.code, delay)
