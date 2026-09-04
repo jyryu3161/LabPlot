@@ -65,7 +65,7 @@ class Settings(BaseSettings):
     ANTHROPIC_MODEL: str = "claude-sonnet-4-6"
     # Google Gemini
     GEMINI_API_KEY: str = ""
-    GEMINI_MODEL: str = "gemini-3.1-flash-lite"
+    GEMINI_MODEL: str = "gemini-3.8-flash"
 
     # R engine
     RSCRIPT_PATH: str = "/app/.pixi/envs/r-viz/bin/Rscript"

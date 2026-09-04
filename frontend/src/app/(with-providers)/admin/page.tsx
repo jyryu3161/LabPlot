@@ -80,8 +80,9 @@ const usdFmt = new Intl.NumberFormat('en-US', {
 });
 const passwordOk = (pw: string) => pw.length >= 10 && /[A-Za-z]/.test(pw) && /\d/.test(pw);
 const GEMINI_MODEL_OPTIONS = [
-  { value: 'gemini-3.1-flash-lite', label: 'Gemini 3.1 Flash-Lite' },
+  { value: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash' },
   { value: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash' },
+  { value: 'gemini-3.1-flash-lite', label: 'Gemini 3.1 Flash-Lite' },
 ];
 
 export default function AdminPage() {
@@ -117,7 +118,7 @@ export default function AdminPage() {
   const [geminiKey, setGeminiKey] = useState('');
   const activeProvider = provider || aiCfg?.provider || 'claude';
   const activeClaudeModel = claudeModel || aiCfg?.claude_model || '';
-  const activeGeminiModel = geminiModel || aiCfg?.gemini_model || 'gemini-3.1-flash-lite';
+  const activeGeminiModel = geminiModel || aiCfg?.gemini_model || 'gemini-3.8-flash';
   const saveAi = useMutation({
     mutationFn: () => updateAiConfig({
       provider: activeProvider, claude_model: activeClaudeModel, gemini_model: activeGeminiModel,
