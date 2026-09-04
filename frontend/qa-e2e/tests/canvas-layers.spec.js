@@ -94,8 +94,11 @@ test.describe('canvas layers panel', () => {
 
       const layerButtons = list.getByRole('button');
       await expect(layerButtons).toHaveCount(4);
-      await expect(layerButtons.nth(0)).toHaveAccessibleName(/Layer 1 of 4: Text: “Top note”.*z 9/);
-      await expect(layerButtons.nth(1)).toHaveAccessibleName(/Layer 2 of 4: Rectangle annotation.*z 2/);
+      // M-C1 §9: the server normalizes annotation z to a dense 0..n-1 after every
+      // PATCH (stable (z, id) order), so the text created at z 9 above the rect at
+      // z 2 comes back as z 1 / z 0. Panel z_order is untouched.
+      await expect(layerButtons.nth(0)).toHaveAccessibleName(/Layer 1 of 4: Text: “Top note”.*z 1/);
+      await expect(layerButtons.nth(1)).toHaveAccessibleName(/Layer 2 of 4: Rectangle annotation.*z 0/);
       await expect(layerButtons.nth(2)).toHaveAccessibleName(/Layer 3 of 4: Figure panel Front.*z 8/);
       await expect(layerButtons.nth(3)).toHaveAccessibleName(/Layer 4 of 4: Figure panel Back.*z 1/);
 

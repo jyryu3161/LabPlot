@@ -24,6 +24,10 @@ class Canvas(Base):
     height_mm = Column(Float, nullable=False)
     preset = Column(String(40), nullable=True)  # journal preset key (e.g. nature_single)
     background = Column(String(20), nullable=False, default="white")  # white | transparent
+    # M-C1 §3: {label?: {...}, typography?: {...}} panel-label + typography
+    # style. Server-validated shape lives in service._sanitize_canvas_style;
+    # absent keys fall back to defaults at read time (service._label_style).
+    style = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict)
     export_snapshot = Column(JSONB, nullable=True)  # {panel_id: version_id} from last export
     # U8: text/arrow/line/rect/ellipse annotation objects, painted ABOVE every
     # panel. Server-validated shape lives in service._sanitize_annotations.

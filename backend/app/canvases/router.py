@@ -13,8 +13,11 @@ from app.canvases.schemas import (
     CanvasDetail,
     CanvasExportRequest,
     CanvasExportResponse,
+    CanvasJournalReport,
     CanvasListItem,
     CanvasPanel,
+    CanvasPresetItem,
+    CanvasTypographyRequest,
     CanvasUpdate,
     PanelCreate,
     PanelUpdate,
@@ -60,7 +63,7 @@ def preview(data: PreviewRenderRequest, db: Session = Depends(get_db),
 
 # -------- presets (data-only lookup) --------
 # Declared before /{canvas_id} so the literal path wins over the parameter.
-@router.get("/presets")
+@router.get("/presets", response_model=list[CanvasPresetItem])
 def canvas_presets(_: User = Depends(get_current_user)):
     return service.list_canvas_presets()
 
@@ -275,7 +278,46 @@ def export_canvas(canvas_id: uuid.UUID, data: CanvasExportRequest, request: Requ
         action="canvas.export",
         target_type="canvas",
         target_id=canvas_id,
-        metadata={"format": result["format"], "dpi": result.get("dpi"), "crop": data.crop, "panels": len(result["snapshot"])},
+        metadata={
+            "format": result["format"], "dpi": result.get("dpi"), "crop": data.crop,
+            "panels": len(result["snapshot"]), "skipped": len(result.get("skipped_panels") or []),
+        },
+        request=request,
+    )
+    db.commit()
+    return result
+
+
+# -------- journal-submission check (M-C1 §7) --------
+# Deterministic, no-AI comparison of the canvas's physical size + panel/label/
+# annotation typography + export settings against its journal preset's spec.
+@router.get("/{canvas_id}/journal-check", response_model=CanvasJournalReport)
+def journal_check(canvas_id: uuid.UUID, format: str = "pdf", dpi: int = 300,
+                  db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    return service.journal_check(db, canvas_id, current_user.id, format, dpi)
+
+
+# -------- canvas-wide typography apply (M-C1 §6) --------
+# Stores the typography override into canvas.style.typography, then
+# re-renders every distinct figure panel figure with it merged over the
+# figure's current options (each gets a NEW version, same as apply-style).
+@router.post("/{canvas_id}/typography", response_model=CanvasApplyStyleResponse,
+             dependencies=[Depends(rate_limit("canvas_typography", 60, 3600))])
+def apply_typography(canvas_id: uuid.UUID, data: CanvasTypographyRequest, request: Request,
+                     db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    patch = data.model_dump(exclude_unset=True, exclude_none=True)
+    result = service.apply_canvas_typography(db, canvas_id, current_user.id, patch)
+    audit_service.log_event(
+        db,
+        actor_id=current_user.id,
+        action="canvas.typography",
+        target_type="canvas",
+        target_id=canvas_id,
+        metadata={
+            "fields": sorted(patch.keys()),
+            "updated": len(result["updated"]),
+            "skipped": len(result["skipped"]),
+        },
         request=request,
     )
     db.commit()

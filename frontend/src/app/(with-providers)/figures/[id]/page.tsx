@@ -17,9 +17,11 @@ import type { ImproveVersionRequest } from '@/lib/api';
 import type { FigureDetail, FigureVersion, Review, Improvement, PlotTypeDef, ColumnProfile, PaletteDef, SeriesStyle, UnsupportedRequestItem } from '@/lib/types';
 import type { AiEditOutcome, AiEditPayload, AiSuggestionApplyOptions } from '@/components/figures/AiFigureEditor';
 import { formatStylePreset } from '@/lib/style-presets';
+import { FONT_FAMILY_OPTIONS } from '@/lib/font-families';
 import { publishFigureVersionCreated } from '@/lib/figure-version-events';
 import { AiFigureEditor } from '@/components/figures/AiFigureEditor';
 import { FigureCodeExport } from '@/components/figures/FigureCodeExport';
+import { FigureCompliance } from '@/components/figures/FigureCompliance';
 import { FigureComments } from '@/components/figures/FigureComments';
 import { FigureAxisBreakControl } from '@/components/figures/FigureAxisBreakControl';
 import { FigureSeriesStyleEditor } from '@/components/figures/FigureSeriesStyleEditor';
@@ -88,15 +90,6 @@ const CONTINUOUS_FILL_KEYS = new Set([
 function isContinuousFill(plotType: string): boolean {
   return CONTINUOUS_FILL_KEYS.has(plotType) || plotType.includes('enrichment') || plotType.includes('heatmap');
 }
-const FONT_FAMILY_OPTIONS = [
-  { value: '', label: 'Default (sans)' },
-  { value: 'sans', label: 'Sans-serif' },
-  { value: 'arial', label: 'Arial-compatible sans' },
-  { value: 'dejavu_sans', label: 'DejaVu Sans (installed Arial-compatible fallback)' },
-  { value: 'helvetica', label: 'Helvetica-compatible sans' },
-  { value: 'serif', label: 'Serif' },
-  { value: 'mono', label: 'Monospace' },
-];
 const DPI_OPTIONS = ['150', '300', '600', '1200'];
 const FACET_SCALE_OPTIONS = [
   { value: 'fixed', label: 'Fixed (shared)' },
@@ -1586,6 +1579,9 @@ export default function FigureDetailPage({ params }: { params: Promise<{ id: str
                 {renderInteractiveHtmlControls('export')}
               </CardContent>
             </Card>
+
+            {/* M-C1 §10: journal-compliance checklist + submission bundle download. */}
+            <FigureCompliance figureId={id} versionId={effectiveSelectedVid} />
 
             {/* AI figure legend (for the manuscript) */}
             <Card>

@@ -112,6 +112,13 @@ JOURNAL_SPECS = {
         "max_dpi": 1200,
         "preferred_font": "sans",              # Helvetica / Arial
         "preferred_formats": ["tiff", "eps", "pdf"],
+        # Canvas journal-frame (M-C1 §1): column widths in mm (source of truth
+        # for the canvas preset picker and journal-check), max printable
+        # figure height, and the minimum/recommended base font size.
+        "col_mm": {"single": 89, "onehalf": 120, "double": 183},
+        "max_height_mm": 247,
+        "min_font_pt": 5,
+        "recommended_font_pt": 7,
     },
     "science": {
         "journal": "Science",
@@ -121,6 +128,14 @@ JOURNAL_SPECS = {
         "max_dpi": 1200,
         "preferred_font": "sans",              # Helvetica
         "preferred_formats": ["tiff", "eps", "pdf"],
+        # Science's own "double" column is 120 mm (== double_col_in above);
+        # there is no verified intermediate/"onehalf" width published, so it
+        # is left unset rather than guessed. A wider (~3-column/full) layout
+        # should be added under its own slot once verified, not reused here.
+        "col_mm": {"single": 55, "onehalf": None, "double": 120},
+        "max_height_mm": 233,
+        "min_font_pt": 5,
+        "recommended_font_pt": 7,
     },
     "cell": {
         "journal": "Cell (Cell Press)",
@@ -130,6 +145,10 @@ JOURNAL_SPECS = {
         "max_dpi": 1200,
         "preferred_font": "sans",              # Arial / Helvetica
         "preferred_formats": ["tiff", "eps", "pdf"],
+        "col_mm": {"single": 85, "onehalf": 114, "double": 174},
+        "max_height_mm": 235,
+        "min_font_pt": 5,
+        "recommended_font_pt": 7,
     },
     "minimal": {
         "journal": "Generic print (single/double column)",
@@ -139,6 +158,10 @@ JOURNAL_SPECS = {
         "max_dpi": 1200,
         "preferred_font": "sans",
         "preferred_formats": ["pdf", "tiff", "eps", "svg"],
+        "col_mm": {"single": 89, "onehalf": None, "double": 178},
+        "max_height_mm": 240,
+        "min_font_pt": 5,
+        "recommended_font_pt": 7,
     },
     "colorblind": {
         "journal": "Generic print (colorblind-safe)",
@@ -148,6 +171,10 @@ JOURNAL_SPECS = {
         "max_dpi": 1200,
         "preferred_font": "sans",
         "preferred_formats": ["pdf", "tiff", "eps", "svg"],
+        "col_mm": {"single": 89, "onehalf": None, "double": 178},
+        "max_height_mm": 240,
+        "min_font_pt": 5,
+        "recommended_font_pt": 7,
     },
     # ---- Additional published specs for journals that are not yet distinct
     # style presets. journal_spec() resolves any of these keys; they are kept
@@ -160,6 +187,10 @@ JOURNAL_SPECS = {
         "max_dpi": 600,
         "preferred_font": "sans",              # Arial / Helvetica
         "preferred_formats": ["tiff", "eps"],
+        "col_mm": {"single": 132, "onehalf": None, "double": 190},
+        "max_height_mm": 222,
+        "min_font_pt": 5,
+        "recommended_font_pt": 7,
     },
     "ieee": {
         "journal": "IEEE",
@@ -169,6 +200,23 @@ JOURNAL_SPECS = {
         "max_dpi": 1200,
         "preferred_font": "serif",             # Times New Roman for text/labels
         "preferred_formats": ["tiff", "eps", "pdf"],
+        "col_mm": {"single": 88, "onehalf": None, "double": 181},
+        "max_height_mm": 230,
+        "min_font_pt": 5,
+        "recommended_font_pt": 7,
+    },
+    "elsevier": {
+        "journal": "Elsevier",
+        "single_col_in": 3.54,   # 90 mm
+        "double_col_in": 7.48,   # 190 mm
+        "min_dpi": 300,
+        "max_dpi": 1000,
+        "preferred_font": "sans",              # Helvetica / Arial
+        "preferred_formats": ["tiff", "eps", "pdf"],
+        "col_mm": {"single": 90, "onehalf": 140, "double": 190},
+        "max_height_mm": 240,
+        "min_font_pt": 5,
+        "recommended_font_pt": 7,
     },
 }
 
@@ -180,6 +228,26 @@ def journal_spec(preset: str | None) -> dict:
     affects theme/palette rendering.
     """
     return JOURNAL_SPECS.get(preset or "", JOURNAL_SPECS["nature"])
+
+
+# Canvas preset key -> (journal_key, column) e.g. "nature_double" -> ("nature",
+# "double"). Journal keys never contain an underscore, so splitting on the
+# LAST underscore unambiguously separates the two (M-C1 §1). Returns None for
+# anything that doesn't parse (unknown journal key, unknown column suffix, or
+# a non-canvas-preset key like the ISO "a4_portrait"/"a4_landscape" entries).
+def parse_canvas_preset(key: str | None) -> tuple[str, str] | None:
+    if not isinstance(key, str) or "_" not in key:
+        return None
+    journal_key, _, column = key.rpartition("_")
+    spec = JOURNAL_SPECS.get(journal_key)
+    if spec is None or column not in ("single", "onehalf", "double"):
+        return None
+    # Reject columns the journal does not actually define (e.g. no verified
+    # "onehalf" width) -- these must never parse, so list_canvas_presets and
+    # parse_canvas_preset agree on which preset keys exist.
+    if not (spec.get("col_mm") or {}).get(column):
+        return None
+    return journal_key, column
 
 
 # Distinguishable greyscale ramp for print/monochrome figures
@@ -216,6 +284,27 @@ _FONT_FAMILIES = {
 
 # Allow-listed font family keys (for callers/sanitizers that need the choice set).
 FONT_FAMILIES = tuple(_FONT_FAMILIES.keys())
+
+# Journal compliance ("preferred_font" in JOURNAL_SPECS) checks a FONT CLASS,
+# not an exact FONT_FAMILIES key -- e.g. every figure defaults to
+# font_family="dejavu_sans" (DEFAULT_NEW_FIGURE_OPTIONS below), which is a
+# sans font but not literally equal to "sans". Single source of truth shared
+# by figures.service.check_compliance AND canvases.service's journal-check so
+# the two never disagree on the same figure (M-C1 §7 / backend review [7]).
+FONT_FAMILY_CLASSES = {
+    "sans": {"sans", "helvetica", "arial", "dejavu_sans", "noto_sans"},
+    "serif": {"serif", "times", "noto_serif"},
+}
+
+
+def font_family_matches(family: str | None, preferred: str) -> bool:
+    """True when ``family`` (a FONT_FAMILIES key) belongs to the same class as
+    ``preferred`` (a JOURNAL_SPECS ``preferred_font`` value, e.g. "sans").
+
+    Falls back to strict equality for a ``preferred`` value with no known
+    class (e.g. "mono"), so unrecognised classes still behave predictably.
+    """
+    return (family or "sans") in FONT_FAMILY_CLASSES.get(preferred, {preferred})
 
 # Named discrete palettes the user can pick by name (verified hex). Overrides the
 # preset palette when set. Curated for scientific figures; cb = colorblind-safe.

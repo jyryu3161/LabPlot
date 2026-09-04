@@ -897,6 +897,11 @@ export interface Canvas {
   height_mm: number;
   preset?: string | null;
   background: string;
+  // M-C1: sanitized style (label defaults filled server-side; typography
+  // defaults to {}). Optional in the type only to tolerate a transitional
+  // backend that hasn't shipped the column yet — treat an absent value the
+  // same as {} (see DEFAULT_LABEL_STYLE in panelLabel.ts).
+  style?: CanvasStyle;
   export_snapshot?: Record<string, string> | null;
   annotations: CanvasAnnotation[];
   // Server-incremented on every annotations replace; echo it back as
@@ -922,6 +927,75 @@ export interface CanvasPreset {
   label: string;
   width_mm: number;
   height_mm: number;
+  max_height_mm: number | null;
+  journal: string | null;
+  journal_key: string | null;
+  column: 'single' | 'onehalf' | 'double' | null;
+}
+
+// M-C1: panel label WYSIWYG style. `label`/`typography` are each optional on
+// PATCH (unset keys keep their current value); GET responses fill `label`
+// with defaults (see DEFAULT_LABEL_STYLE in panelLabel.ts) — `typography`
+// defaults to {} (no override; panels render with each figure's own options).
+export interface CanvasLabelStyle {
+  format: 'A' | 'a' | '(A)' | 'A.';
+  bold: boolean;
+  /** 6-18 */
+  pt: number;
+  placement: 'inside' | 'outside';
+  /** 0-10 */
+  offset_mm: number;
+}
+export interface CanvasTypographyStyle {
+  /** One of the figure FONT_FAMILIES keys (see lib/font-families.ts). */
+  font_family?: string;
+  /** 5-14 */
+  base_pt?: number;
+  /** 0.1-3 */
+  axis_line_width_pt?: number;
+  /** 0.1-3 */
+  data_line_width_pt?: number;
+}
+export interface CanvasStyle {
+  label?: CanvasLabelStyle;
+  typography?: CanvasTypographyStyle;
+}
+
+export interface CanvasCheckItem {
+  name: string;
+  ok: boolean;
+  actual: string;
+  expected: string;
+  hint?: string | null;
+}
+export interface CanvasJournalReport {
+  canvas_id: string;
+  preset: string | null;
+  journal: string | null;
+  column: string | null;
+  passed: boolean;
+  checks: CanvasCheckItem[];
+  skipped_panels: { panel_id: string; reason: string }[];
+}
+
+export interface ComplianceCheckItem {
+  name: string;
+  ok: boolean;
+  actual: string;
+  expected: string;
+  hint?: string | null;
+}
+export interface ComplianceReport {
+  figure_id: string;
+  version_id: string;
+  style_preset: string;
+  journal: string;
+  passed: boolean;
+  width_in: number;
+  height_in: number;
+  dpi: number;
+  available_formats: string[];
+  checks: ComplianceCheckItem[];
 }
 export interface CanvasPreviewResult {
   svg_url: string;
@@ -931,8 +1005,13 @@ export interface CanvasPreviewResult {
 
 export interface CanvasExportResult {
   url: string;
-  format: 'svg' | 'pdf' | 'png' | 'tiff';
+  format: 'svg' | 'pdf' | 'png' | 'tiff' | 'pptx' | 'eps';
   snapshot: Record<string, string>;
+  /** Server-composed download filename, e.g. Fig_<slug>_<journal>_<w>mm.<ext>. */
+  filename: string;
+  /** Panels the composite could not include (no rendered version, figure not
+   *  accessible, or missing image blob) — surfaced as a toast, not an error. */
+  skipped_panels: { panel_id: string; reason: string }[];
 }
 export interface CanvasApplyStyleResult {
   updated: string[];

@@ -13,7 +13,7 @@ import {
   renderCanvasPreview, downloadCanvasExport, duplicateFigure, duplicateCanvas, listProjects, getFigure, ApiError,
   type CanvasExportFormat,
 } from '@/lib/api';
-import type { CanvasDetail, CanvasPanel, CanvasAnnotation, FigureListItem } from '@/lib/types';
+import type { CanvasDetail, CanvasPanel, CanvasAnnotation, FigureListItem, CanvasLabelStyle } from '@/lib/types';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
@@ -26,7 +26,7 @@ import {
 import {
   Loader2, Plus, Trash2, ArrowUp, ArrowDown, Maximize2, ZoomIn, ZoomOut, Lock, Unlock, Tag, Pencil, Check,
   Download, Undo2, Redo2, ExternalLink, FlaskConical, CopyPlus, Grid3x3, Magnet, Ruler, ClipboardPaste, Crop,
-  ImagePlus, RefreshCw,
+  ImagePlus, RefreshCw, BookOpen, ArrowDownAZ,
   AlignStartVertical, AlignCenterVertical, AlignEndVertical,
   AlignStartHorizontal, AlignCenterHorizontal, AlignEndHorizontal,
   AlignHorizontalDistributeCenter, AlignVerticalDistributeCenter,
@@ -44,6 +44,9 @@ import {
 import { CanvasApplyStyle } from './CanvasApplyStyle';
 import { CanvasHelpPopover, CanvasHintsBar } from './CanvasHints';
 import { CanvasRulers } from './CanvasRulers';
+import { CanvasJournalPanel } from './CanvasJournalPanel';
+import { resolveLabelStyle, labelLayoutMm } from './panelLabel';
+import { readingOrder } from './layout';
 import { useAuthContext } from '@/components/auth/AuthProvider';
 import { CanvasAnnotationNode } from './CanvasAnnotationNode';
 import { CanvasAnnotationInspector } from './CanvasAnnotationInspector';
@@ -266,6 +269,7 @@ function CanvasPanelNode({
   transparent,
   draggableEnabled,
   listening = true,
+  labelStyle,
   registerNode,
   onPanelMouseDown,
   onPanelClick,
@@ -279,6 +283,9 @@ function CanvasPanelNode({
   pxPerMm: number;
   selected: boolean;
   transparent: boolean;
+  /** M-C1 §4: label format/bold/size/placement — same formula as the backend
+   *  and the SVG/PPTX export (see panelLabel.ts). */
+  labelStyle: CanvasLabelStyle;
   /** false while Space is held — the Stage pans instead of the panel dragging. */
   draggableEnabled: boolean;
   /** U8: false while a creation tool is active, so a shape/text drag can
@@ -397,17 +404,23 @@ function CanvasPanelNode({
           listening={false}
         />
       )}
-      {panel.label_visible && panel.label ? (
-        <Text
-          text={panel.label}
-          x={4}
-          y={3}
-          fontSize={16}
-          fontStyle="bold"
-          fill="#0f172a"
-          listening={false}
-        />
-      ) : null}
+      {panel.label_visible && panel.label ? (() => {
+        // Relative to the panel's own origin (Group is already translated to
+        // panel.x_mm/y_mm), so pass {x_mm:0, y_mm:0} — see labelLayoutMm's doc.
+        const layout = labelLayoutMm(panel.label, { x_mm: 0, y_mm: 0 }, labelStyle);
+        return (
+          <Text
+            text={layout.text}
+            x={mmToPx(layout.left, pxPerMm)}
+            y={mmToPx(layout.top, pxPerMm)}
+            fontSize={mmToPx(layout.font_mm, pxPerMm)}
+            fontStyle={labelStyle.bold ? 'bold' : 'normal'}
+            fontFamily="Helvetica, Arial, sans-serif"
+            fill="#0f172a"
+            listening={false}
+          />
+        );
+      })() : null}
     </Group>
   );
 }
@@ -446,10 +459,28 @@ function byCodepoint(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
+// Spreadsheet-style bijective base-26 label for index i (0-based): A, B, …,
+// Z, AA, AB, …, ZZ, AAA, … — never runs out, unlike a bare A-Z cycle. Shared
+// by nextLabel (next unused letter for a newly added panel) and
+// relabelReadingOrder (§5 "Relabel A→Z") so a canvas with >26 panels keeps
+// getting distinct, non-empty labels instead of writing '' past Z.
+function alphaLabel(i: number): string {
+  let n = i + 1;
+  let s = '';
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    s = String.fromCharCode(65 + rem) + s;
+    n = Math.floor((n - 1) / 26);
+  }
+  return s;
+}
+
 function nextLabel(panels: CanvasPanel[]): string {
   const used = new Set(panels.map((p) => (p.label ?? '').toUpperCase()).filter(Boolean));
-  for (let i = 0; i < 26; i++) {
-    const c = String.fromCharCode(65 + i);
+  // panels.length+1 candidates always contain an unused one (pigeonhole: at
+  // most panels.length distinct labels can already be in use).
+  for (let i = 0; i <= panels.length; i++) {
+    const c = alphaLabel(i);
     if (!used.has(c)) return c;
   }
   return '';
@@ -464,6 +495,12 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   // showing project editors a button that can only ever 403).
   const { user } = useAuthContext();
   const isOwner = Boolean(user && canvas && user.id === canvas.owner_id);
+  // M-C1 §4: resolved (defaults-filled) label style, used by both the Konva
+  // label node below and the "Relabel A→Z" toolbar action's history entries.
+  const labelStyle = useMemo(() => resolveLabelStyle(canvas?.style?.label), [canvas?.style]);
+  // M-C1 §7: "Journal" sidebar toggle — shown in the empty-selection slot of
+  // the right sidebar (see the `selectedPanel`-keyed ternary near the bottom).
+  const [journalPanelOpen, setJournalPanelOpen] = useState(false);
 
   // Figures can gain versions in another tab (the "Edit figure" button opens
   // one). Window-focus refetch is globally disabled (app-providers), so refetch
@@ -1243,6 +1280,21 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
       data: Parameters<typeof updateCanvas>[1];
       history?: { before: CanvasSize; after: CanvasSize };
     }) => updateCanvas(canvasId, data),
+    // Optimistic `style` update + rollback (finding [10]): the server
+    // whole-object-replaces `style` (no merge, no rev guard), so two quick
+    // successive label/typography PATCHes built from a stale render-time
+    // `canvas` prop can race and silently drop the first edit. Applying the
+    // patch to the cache immediately means the SECOND mutate() call (built
+    // from CanvasJournalPanel reading the freshest cache) sees the first
+    // edit already applied, so it carries it forward instead of clobbering
+    // it. Mirrors patchAnnotations' onMutate/onError pattern above.
+    onMutate: async ({ data }) => {
+      if (data.style === undefined) return undefined;
+      await qc.cancelQueries({ queryKey });
+      const prev = qc.getQueryData<CanvasDetail>(queryKey);
+      qc.setQueryData<CanvasDetail>(queryKey, (old) => (old ? { ...old, style: data.style! } : old));
+      return { prev };
+    },
     onSuccess: (updated, vars) => {
       qc.setQueryData<CanvasDetail>(queryKey, (old) => (old ? { ...old, ...updated } : updated));
       if (vars.history) {
@@ -1254,7 +1306,10 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
         });
       }
     },
-    onError: (e) => toast.error(e instanceof Error && e.message ? e.message : 'Could not update canvas'),
+    onError: (e, _v, ctx) => {
+      if (ctx?.prev) qc.setQueryData(queryKey, ctx.prev);
+      toast.error(e instanceof Error && e.message ? e.message : 'Could not update canvas');
+    },
   });
 
   // ── U8: annotations — whole-array replace (server sanitizes + 400s
@@ -1594,12 +1649,20 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   // ── export: compose the canvas into a file (vector SVG/PDF, or raster
   // PNG/TIFF at 300|600 dpi) and download it. ──
   const exportCanvas = useMutation({
-    mutationFn: ({ format, dpi, crop }: { format: CanvasExportFormat; dpi?: 300 | 600; crop?: boolean }) => {
-      const base = (canvas?.name?.trim() || 'canvas').replace(/[/\\:*?"<>|]+/g, '_');
-      const suffix = `${dpi ? `_${dpi}dpi` : ''}${crop ? '_trim' : ''}`;
-      return downloadCanvasExport(canvasId, format, `${base}${suffix}.${format}`, dpi, crop);
+    // M-C1 §8: the download filename now comes from the server (`filename`
+    // on the export response, e.g. a journal-ready "Fig_..." name) instead of
+    // being composed from the canvas name here.
+    mutationFn: ({ format, dpi, crop }: { format: CanvasExportFormat; dpi?: 300 | 600; crop?: boolean }) =>
+      downloadCanvasExport(canvasId, format, dpi, crop),
+    onSuccess: (res, vars) => {
+      const summary = `Canvas exported as ${vars.format.toUpperCase()}${vars.dpi ? ` (${vars.dpi} dpi)` : ''}${vars.crop ? ' — trimmed' : ''}`;
+      const skipped = res.skipped_panels ?? [];
+      if (skipped.length) {
+        toast.warning(`${summary} — ${skipped.length} panel${skipped.length === 1 ? '' : 's'} skipped: ${skipped.map((s) => s.reason).join('; ')}`);
+      } else {
+        toast.success(summary);
+      }
     },
-    onSuccess: (_res, vars) => toast.success(`Canvas exported as ${vars.format.toUpperCase()}${vars.dpi ? ` (${vars.dpi} dpi)` : ''}${vars.crop ? ' — trimmed' : ''}`),
     onError: () => toast.error('Could not export canvas'),
   });
 
@@ -3286,7 +3349,22 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   }
   useEffect(() => {
     if (canvas) setSizeDraft({ w: String(roundMm(canvas.width_mm)), h: String(roundMm(canvas.height_mm)) });
-  }, [canvas?.width_mm, canvas?.height_mm, canvas]);
+    // Deps intentionally omit `canvas` itself (§9 bug fix): any other field
+    // changing (name, style, annotations…) must NOT clobber the draft the
+    // user is actively typing into the W/H inputs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canvas?.width_mm, canvas?.height_mm]);
+
+  // M-C1 §5: "Relabel A→Z" — reading-order clustering (layout.ts) reassigns
+  // every panel's canonical A-Z label in ONE history entry via commitPanelsBatch.
+  function relabelReadingOrder() {
+    const ordered = readingOrder(panels);
+    const items = ordered
+      .map((p, i) => ({ panelId: p.id, before: { label: p.label ?? null }, after: { label: alphaLabel(i) } }))
+      .filter((it) => it.before.label !== it.after.label);
+    if (!items.length) { toast.info('Labels already match reading order'); return; }
+    void commitPanelsBatch(items, 'relabel');
+  }
 
   // ── render states ──
   if (isLoading) {
@@ -3365,6 +3443,10 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
   // U8: selection composition drives the toolbar/sidebar below.
   const isAnnotationOnlySelection = selectedAnnotationIds.length > 0 && selectedPanelIds.length === 0;
   const isMixedSelection = selectedPanelIds.length > 0 && selectedAnnotationIds.length > 0;
+  // Finding [11]: whether the right sidebar shows a selection editor (image
+  // info / CanvasColorEditor / CanvasAnnotationInspector) instead of the
+  // journal panel. Used to hide (not unmount) CanvasJournalPanel below.
+  const selectionSidebarActive = !!((selectedPanel && selectedPanel.image_key) || selectedFigurePanel || isAnnotationOnlySelection);
   // Text-only selection (single or multi) resizes WIDTH only via the shared
   // Transformer — everything else keeps the full 8-anchor set.
   const transformEligibleIds = selectedIds.filter((id) => panels.some((p) => p.id === id)
@@ -3537,6 +3619,26 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
           >
             <CanvasApplyStyle canvasId={canvasId} panels={panels} />
           </span>
+          <Button
+            type="button"
+            size="sm"
+            variant={journalPanelOpen ? 'default' : 'outline'}
+            aria-pressed={journalPanelOpen}
+            onClick={() => setJournalPanelOpen((v) => !v)}
+            title="Journal submission panel: preset, panel labels, typography, and compliance checks"
+          >
+            <BookOpen className="h-4 w-4" /> Journal
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={panels.length === 0}
+            onClick={relabelReadingOrder}
+            title="Relabel every panel A, B, C… in reading order (top-to-bottom, left-to-right)"
+          >
+            <ArrowDownAZ className="h-4 w-4" /> Relabel A→Z
+          </Button>
           {isOwner && (
             <Button
               type="button"
@@ -3592,6 +3694,9 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
               </DropdownMenuItem>
               <DropdownMenuItem disabled={exportCanvas.isPending} onClick={() => exportCanvas.mutate({ format: 'pdf', crop: cropExport })}>
                 PDF (vector)
+              </DropdownMenuItem>
+              <DropdownMenuItem disabled={exportCanvas.isPending} onClick={() => exportCanvas.mutate({ format: 'eps', crop: cropExport })} title="Vector; text becomes outlines">
+                EPS (vector, text as outlines)
               </DropdownMenuItem>
               <DropdownMenuItem disabled={exportCanvas.isPending} onClick={() => exportCanvas.mutate({ format: 'pptx', crop: cropExport })}>
                 PowerPoint (.pptx)
@@ -4048,6 +4153,7 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
                     listening={activeTool === 'select'}
                     selected={selectedIds.includes(panel.id)}
                     transparent={transparent}
+                    labelStyle={labelStyle}
                     registerNode={registerNode}
                     onPanelMouseDown={handlePanelMouseDown}
                     onPanelClick={handlePanelClick}
@@ -4283,11 +4389,33 @@ export function CanvasEditor({ canvasId }: { canvasId: string }) {
             onSendBackward={(ids) => zBumpAnnotations(ids, -1)}
             onDelete={deleteAnnotationIds}
           />
-        ) : (
+        ) : !journalPanelOpen ? (
           <aside className="flex w-64 shrink-0 flex-col items-center justify-center gap-2 border-l bg-background p-4 text-center text-xs text-muted-foreground">
             <span className="font-medium">Edit panel</span>
-            <span>Select a panel or object on the canvas to edit its properties here.</span>
+            <span>Select a panel or object on the canvas to edit its properties here, or open the Journal panel from the toolbar.</span>
           </aside>
+        ) : null}
+        {/* Finding [11]: keep the journal panel MOUNTED (just hidden, via an
+            inline display toggle rather than the `hidden` attribute — which
+            would lose a cascade fight against a `display:contents` utility
+            class) whenever it's open, even while a panel/annotation selection
+            shows one of the editors above instead. Unmounting it on every
+            selection used to reset its unapplied typography drafts and
+            check-format/dpi selector state (re-seeded from canvas.style on
+            remount). `display:contents` keeps it a direct flex item of the
+            row above (matching the w-64 sidebar column it renders itself),
+            same convention as CanvasColorEditor's gesture-hide comment above. */}
+        {journalPanelOpen && (
+          <div style={{ display: selectionSidebarActive ? 'none' : 'contents' }}>
+            <CanvasJournalPanel
+              canvasId={canvasId}
+              canvas={canvas}
+              panels={panels}
+              onPatchCanvas={(args) => patchCanvas.mutate(args)}
+              patchPending={patchCanvas.isPending}
+              onClose={() => setJournalPanelOpen(false)}
+            />
+          </div>
         )}
       </div>
 

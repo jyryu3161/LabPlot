@@ -49,7 +49,7 @@ from app.projects.models import Project
 from app.r_engine import renderer
 from app.r_engine.option_support import option_support as _option_support
 from app.r_engine.option_support import unsupported_reason as _option_unsupported_reason
-from app.r_engine.presets import DEFAULT_NEW_FIGURE_OPTIONS, PRESETS, journal_spec
+from app.r_engine.presets import DEFAULT_NEW_FIGURE_OPTIONS, PRESETS, font_family_matches, journal_spec
 from app.r_engine.templates import CONTINUOUS_FILL_TYPES, DEFAULT_X_TEXT_ANGLE, PLOT_TYPES, PLOT_TYPE_KEYS, rq
 
 logger = logging.getLogger(__name__)
@@ -3451,6 +3451,9 @@ _BULK_STYLE_OPTION_KEYS = {
     "color_mode", "font_family", "font_scale",
     "legend_position", "legend_key_size", "legend_ncol",
     "transparent_background",
+    # M-C1 §6: canvas-wide typography apply also travels the absolute base
+    # font size and axis/data linewidths (pt).
+    "base_size", "axis_line_width_pt", "data_line_width_pt",
 }
 
 
@@ -6567,10 +6570,13 @@ def check_compliance(db: Session, figure_id: uuid.UUID, version_id: uuid.UUID,
                  f"{spec['journal']} prefers " + ", ".join(spec["preferred_formats"]) + "."),
     })
 
-    # 4) Font family -- should match the journal's preferred family.
+    # 4) Font family -- should match the journal's preferred family CLASS
+    # (e.g. every figure defaults to font_family="dejavu_sans", which is a
+    # sans font but not literally equal to "sans"); shared with the canvas
+    # journal-check so the two never disagree on the same figure.
     font_family = (v.options or {}).get("font_family") or "sans"
     preferred_font = spec["preferred_font"]
-    font_ok = font_family == preferred_font
+    font_ok = font_family_matches(font_family, preferred_font)
     checks.append({
         "name": "Font family",
         "ok": font_ok,

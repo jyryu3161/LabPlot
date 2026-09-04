@@ -618,6 +618,9 @@ export async function updateCanvas(id: string, data: {
   // Server 409s (ANNOTATIONS_CONFLICT) when it no longer matches, instead of
   // silently overwriting another editor's annotations.
   base_annotations_rev?: number;
+  // M-C1 §3: whole-object replace after server-side sanitize (unknown keys
+  // dropped, out-of-range values 400 CANVAS_STYLE_INVALID).
+  style?: import('./types').CanvasStyle;
 }): Promise<import('./types').CanvasDetail> {
   return fetcher(`/api/canvases/${id}`, { method: 'PATCH', body: JSON.stringify(data) });
 }
@@ -680,26 +683,86 @@ export async function renderCanvasPreview(req: {
 
 // U9: png/tiff add a `dpi` (300|600, default 300 server-side) alongside the
 // existing vector svg/pdf formats — same endpoint, same request shape.
-export type CanvasExportFormat = 'svg' | 'pdf' | 'png' | 'tiff' | 'pptx';
+// M-C1 §8: 'eps' (rsvg-convert -f eps on the composite; text becomes
+// outlines) joins the format union.
+export type CanvasExportFormat = 'svg' | 'pdf' | 'png' | 'tiff' | 'pptx' | 'eps';
 export async function exportCanvasFile(id: string, format: CanvasExportFormat, dpi?: 300 | 600, crop?: boolean): Promise<import('./types').CanvasExportResult> {
   const body: Record<string, unknown> = { format };
   if (dpi != null) body.dpi = dpi;
   if (crop) body.crop = true;
   return fetcher(`/api/canvases/${id}/export`, { method: 'POST', body: JSON.stringify(body) });
 }
-export async function downloadCanvasExport(id: string, format: CanvasExportFormat, filename: string, dpi?: 300 | 600, crop?: boolean): Promise<void> {
-  const { url } = await exportCanvasFile(id, format, dpi, crop);
+// M-C1 §8: the download filename now comes from the server response
+// (`_journal_filename`) instead of being composed client-side, so a journal
+// preset export gets a submission-ready name. Returns the full result so the
+// caller can surface `skipped_panels` (panels the composite could not include).
+export async function downloadCanvasExport(id: string, format: CanvasExportFormat, dpi?: 300 | 600, crop?: boolean): Promise<import('./types').CanvasExportResult> {
+  const result = await exportCanvasFile(id, format, dpi, crop);
   const headers: Record<string, string> = {};
   const token = getAccessToken();
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  const res = await fetch(url.startsWith('http') ? url : `${BASE_URL}${url}`, { headers });
+  const res = await fetch(result.url.startsWith('http') ? result.url : `${BASE_URL}${result.url}`, { headers });
   if (!res.ok) throw new ApiError('Export download failed', res.status);
   const blob = await res.blob();
   const objUrl = URL.createObjectURL(blob);
   const a = document.createElement('a');
-  a.href = objUrl; a.download = filename; document.body.appendChild(a); a.click();
+  a.href = objUrl; a.download = result.filename || `canvas.${format}`; document.body.appendChild(a); a.click();
   a.remove(); URL.revokeObjectURL(objUrl);
+  return result;
 }
 export async function applyCanvasStyle(id: string, sourceFigureId: string): Promise<import('./types').CanvasApplyStyleResult> {
   return fetcher(`/api/canvases/${id}/apply-style`, { method: 'POST', body: JSON.stringify({ source_figure_id: sourceFigureId }) });
+}
+// M-C1 §6: patch canvas-wide typography onto every distinct figure panel
+// (creates a new version of each — the confirm dialog in CanvasJournalPanel
+// warns the user before calling this). Body is a CanvasStyle['typography']
+// subset with at least one key.
+export async function applyCanvasTypography(
+  id: string,
+  body: import('./types').CanvasTypographyStyle,
+): Promise<import('./types').CanvasApplyStyleResult> {
+  return fetcher(`/api/canvases/${id}/typography`, { method: 'POST', body: JSON.stringify(body) });
+}
+// M-C1 §7: journal-submission compliance check for the whole canvas (column
+// width/height vs. the active preset, font sizes, font family, export
+// format/resolution, and any panel the export would have to skip).
+export async function getCanvasJournalCheck(
+  id: string,
+  opts?: { format?: string; dpi?: 300 | 600 },
+): Promise<import('./types').CanvasJournalReport> {
+  const params = new URLSearchParams();
+  if (opts?.format) params.set('format', opts.format);
+  if (opts?.dpi != null) params.set('dpi', String(opts.dpi));
+  const qs = params.toString();
+  return fetcher(`/api/canvases/${id}/journal-check${qs ? `?${qs}` : ''}`);
+}
+
+// ── figure compliance / submission bundle (M-C1 §10) ──
+export async function getFigureCompliance(figureId: string, versionId: string): Promise<import('./types').ComplianceReport> {
+  return fetcher(`/api/figures/${figureId}/versions/${versionId}/compliance`);
+}
+function filenameFromContentDisposition(res: Response, fallback: string): string {
+  const header = res.headers.get('Content-Disposition') ?? res.headers.get('content-disposition');
+  if (header) {
+    const utf8Match = /filename\*=UTF-8''([^;]+)/i.exec(header);
+    if (utf8Match) {
+      try { return decodeURIComponent(utf8Match[1]); } catch { /* fall through to the plain filename= match */ }
+    }
+    const match = /filename="?([^";]+)"?/i.exec(header);
+    if (match) return match[1];
+  }
+  return fallback;
+}
+export async function downloadSubmissionBundle(figureId: string, versionId: string, column: 'single' | 'double' = 'single'): Promise<void> {
+  const headers: Record<string, string> = {};
+  const token = getAccessToken();
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const res = await fetch(`${BASE_URL}/api/figures/${figureId}/versions/${versionId}/submission-bundle?column=${column}`, { headers });
+  if (!res.ok) { const b = await res.text().catch(() => ''); throw new ApiError(parseErrorMessage(b, res.statusText), res.status); }
+  const filename = filenameFromContentDisposition(res, `figure-${column}.zip`);
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename; document.body.appendChild(a); a.click();
+  a.remove(); URL.revokeObjectURL(url);
 }

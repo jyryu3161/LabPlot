@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
@@ -12,7 +12,9 @@ import { Textarea } from '@/components/ui/textarea';
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import {
+  Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue,
+} from '@/components/ui/select';
 import { Loader2, Plus } from 'lucide-react';
 
 const MM_MIN = 20;
@@ -66,6 +68,19 @@ export function NewCanvasDialog({
     queryFn: getCanvasPresets,
     enabled: open,
   });
+  // Group journal presets under their journal (§2): standard (A4) presets
+  // first, then one SelectGroup per journal, in the order the API returns them.
+  const groupedPresets = useMemo(() => {
+    const standard: NonNullable<typeof presets> = [];
+    const byJournal = new Map<string, NonNullable<typeof presets>>();
+    for (const p of presets ?? []) {
+      if (!p.journal) { standard.push(p); continue; }
+      const arr = byJournal.get(p.journal) ?? [];
+      arr.push(p);
+      byJournal.set(p.journal, arr);
+    }
+    return { standard, byJournal };
+  }, [presets]);
 
   // Reset to a clean form on OPEN; seed the preset ONCE per open when presets
   // arrive. A single [open, presets] reset effect would re-fire when the
@@ -172,10 +187,24 @@ export function NewCanvasDialog({
                 </SelectValue>
               </SelectTrigger>
               <SelectContent>
-                {presets?.map((p) => (
-                  <SelectItem key={p.key} value={p.key}>
-                    {p.label} ({p.width_mm} × {p.height_mm} mm)
-                  </SelectItem>
+                {groupedPresets.standard.length > 0 && (
+                  <SelectGroup>
+                    {groupedPresets.standard.map((p) => (
+                      <SelectItem key={p.key} value={p.key}>
+                        {p.label} ({p.width_mm} × {p.height_mm} mm)
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                )}
+                {Array.from(groupedPresets.byJournal.entries()).map(([journal, ps]) => (
+                  <SelectGroup key={journal}>
+                    <SelectLabel>{journal}</SelectLabel>
+                    {ps.map((p) => (
+                      <SelectItem key={p.key} value={p.key}>
+                        {p.label} ({p.width_mm} × {p.height_mm} mm{p.max_height_mm ? `, max ${p.max_height_mm} mm` : ''})
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
                 ))}
                 <SelectItem value={CUSTOM}>Custom size</SelectItem>
               </SelectContent>

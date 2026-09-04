@@ -12,24 +12,34 @@ import shutil
 import subprocess
 import tempfile
 import uuid
+from types import SimpleNamespace
 from xml.sax.saxutils import escape as _xml_escape
 
 from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload
 
+from app.auth.models import User
 from app.canvases import images as canvas_images
 from app.canvases.models import Canvas, CanvasPanel
 from app.canvases.schemas import CanvasCreate, PanelCreate, PreviewRenderRequest
 from app.common import storage
 from app.common.encryption import decrypt_private_bytes
 from app.common.exceptions import AppError, BadRequestError, NotFoundError
+from app.common.quotas import enforce_render_quota
 from app.config import settings
 from app.datasets import service as ds_service
 from app.datasets.models import Dataset
 from app.figures import service as figures_service
 from app.figures.models import Figure, FigureVersion
 from app.r_engine import renderer
-from app.r_engine.presets import JOURNAL_SPECS, PRESETS
+from app.r_engine.presets import (
+    FONT_FAMILIES,
+    FONT_FAMILY_CLASSES,
+    JOURNAL_SPECS,
+    PRESETS,
+    parse_canvas_preset,
+    resolve_base_size,
+)
 from app.r_engine.templates import scale_editable_axes
 
 # mm clamps (design §5): canvas 20-500 mm/side; panel 10-500 mm/side. Enforced
@@ -435,6 +445,7 @@ def _canvas_detail(db: Session, canvas: Canvas, owner_id: uuid.UUID) -> dict:
         "height_mm": canvas.height_mm,
         "preset": canvas.preset,
         "background": canvas.background,
+        "style": _style_response(canvas),
         "export_snapshot": canvas.export_snapshot,
         "created_at": canvas.created_at,
         "updated_at": canvas.updated_at,
@@ -453,6 +464,7 @@ def _canvas_list_item(canvas: Canvas) -> dict:
         "height_mm": canvas.height_mm,
         "panel_count": len(canvas.panels),
         "updated_at": canvas.updated_at,
+        "style": _style_response(canvas),
     }
 
 
@@ -512,6 +524,10 @@ def update_canvas(db: Session, canvas_id: uuid.UUID, owner_id: uuid.UUID, data: 
         canvas.background = data["background"] if data["background"] in _CANVAS_BACKGROUNDS else "white"
     if "preset" in data:
         canvas.preset = data["preset"]
+    # M-C1 §3: the whole style object is replaced after sanitize (not merged)
+    # — the client always sends its full intended {label?, typography?}.
+    if data.get("style") is not None:
+        canvas.style = _sanitize_canvas_style(data["style"])
     if "project_id" in data:
         # Owner-only (grilling Q6): attach/move/detach all change which team
         # can see the canvas — an editor could otherwise privatize it.
@@ -600,6 +616,7 @@ def duplicate_canvas(db: Session, canvas_id: uuid.UUID, owner_id: uuid.UUID) -> 
         background=src.background,
         annotations=copy.deepcopy(src.annotations) if src.annotations else [],
         annotations_rev=0,
+        style=copy.deepcopy(src.style) if isinstance(src.style, dict) else {},
     )
     db.add(canvas)
 
@@ -808,7 +825,195 @@ def _sanitize_annotations(items: list, canvas_w_mm: float, canvas_h_mm: float) -
 
         out.append(entry)
 
+    # M-C1 §9 bug fix: reassign a dense, deterministic z stack so paint order
+    # never carries gaps/duplicates/negative values forward from client input
+    # (e.g. after deletes) — stable sort by (z, id) preserves the caller's
+    # relative order for ties, then z becomes exactly 0..n-1.
+    out.sort(key=lambda e: (e.get("z", 0), e.get("id", "")))
+    for i, entry in enumerate(out):
+        entry["z"] = i
+
     return out
+
+
+# ---------------------------------------------------------------- canvas style
+# M-C1 §3 — canvas.style = {label?, typography?}. label controls panel-label
+# (A/B/C...) typography/placement; typography is an override merged into every
+# figure panel's render options by apply_canvas_typography (§6). Unknown keys
+# are dropped silently (only known keys are ever copied into the sanitized
+# object); an out-of-range/malformed KNOWN key is a hard 400
+# (CANVAS_STYLE_INVALID) — unlike annotations, style values are never clamped.
+_LABEL_FORMATS = {"A", "a", "(A)", "A."}
+_LABEL_PLACEMENTS = {"inside", "outside"}
+_LABEL_PT_MIN, _LABEL_PT_MAX = 6.0, 18.0
+_LABEL_OFFSET_MIN, _LABEL_OFFSET_MAX = 0.0, 10.0
+_TYPO_BASE_PT_MIN, _TYPO_BASE_PT_MAX = 5.0, 14.0
+_TYPO_LINE_MIN, _TYPO_LINE_MAX = 0.1, 3.0
+
+# Default label style (§4) applied whenever a key is absent from the stored
+# canvas.style.label object — the canonical panel-label typography for a
+# brand-new canvas and for any key a PATCH never touched.
+DEFAULT_LABEL_STYLE = {"format": "A", "bold": True, "pt": 12.0, "placement": "inside", "offset_mm": 1.0}
+
+
+def _style_range_error(field: str, low: float, high: float) -> None:
+    raise BadRequestError(f"style.{field} must be between {low:g} and {high:g}", error_code="CANVAS_STYLE_INVALID")
+
+
+def _sanitize_canvas_style(raw: dict | None) -> dict:
+    """Validate + sanitize a client-supplied ``style`` object.
+
+    Returns only the keys the caller actually supplied (no defaults filled in
+    here — that happens at read time via ``_label_style``/``_style_response``
+    so a PATCH that only sets ``label.pt`` doesn't silently pin every other
+    label field to its default in storage).
+    """
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        raise BadRequestError("style must be an object", error_code="CANVAS_STYLE_INVALID")
+
+    out: dict = {}
+
+    if raw.get("label") is not None:
+        label_raw = raw["label"]
+        if not isinstance(label_raw, dict):
+            raise BadRequestError("style.label must be an object", error_code="CANVAS_STYLE_INVALID")
+        label: dict = {}
+        if "format" in label_raw:
+            fmt = label_raw["format"]
+            # isinstance guard BEFORE the set membership test: an unhashable
+            # value (list/dict) would raise TypeError from `in` and surface
+            # as an uncaught 500 instead of this 400.
+            if not isinstance(fmt, str) or fmt not in _LABEL_FORMATS:
+                raise BadRequestError(
+                    "style.label.format must be one of 'A', 'a', '(A)', 'A.'", error_code="CANVAS_STYLE_INVALID"
+                )
+            label["format"] = fmt
+        if "bold" in label_raw:
+            if not isinstance(label_raw["bold"], bool):
+                raise BadRequestError("style.label.bold must be a boolean", error_code="CANVAS_STYLE_INVALID")
+            label["bold"] = label_raw["bold"]
+        if "pt" in label_raw:
+            pt = _ann_float(label_raw["pt"])
+            if pt is None or not (_LABEL_PT_MIN <= pt <= _LABEL_PT_MAX):
+                _style_range_error("label.pt", _LABEL_PT_MIN, _LABEL_PT_MAX)
+            label["pt"] = pt
+        if "placement" in label_raw:
+            placement = label_raw["placement"]
+            if not isinstance(placement, str) or placement not in _LABEL_PLACEMENTS:
+                raise BadRequestError(
+                    "style.label.placement must be 'inside' or 'outside'", error_code="CANVAS_STYLE_INVALID"
+                )
+            label["placement"] = placement
+        if "offset_mm" in label_raw:
+            offset = _ann_float(label_raw["offset_mm"])
+            if offset is None or not (_LABEL_OFFSET_MIN <= offset <= _LABEL_OFFSET_MAX):
+                _style_range_error("label.offset_mm", _LABEL_OFFSET_MIN, _LABEL_OFFSET_MAX)
+            label["offset_mm"] = offset
+        out["label"] = label
+
+    if raw.get("typography") is not None:
+        typo_raw = raw["typography"]
+        if not isinstance(typo_raw, dict):
+            raise BadRequestError("style.typography must be an object", error_code="CANVAS_STYLE_INVALID")
+        typo: dict = {}
+        if "font_family" in typo_raw:
+            fam = typo_raw["font_family"]
+            if not isinstance(fam, str) or fam not in FONT_FAMILIES:
+                raise BadRequestError(
+                    "style.typography.font_family is not a supported font family", error_code="CANVAS_STYLE_INVALID"
+                )
+            typo["font_family"] = fam
+        if "base_pt" in typo_raw:
+            bp = _ann_float(typo_raw["base_pt"])
+            if bp is None or not (_TYPO_BASE_PT_MIN <= bp <= _TYPO_BASE_PT_MAX):
+                _style_range_error("typography.base_pt", _TYPO_BASE_PT_MIN, _TYPO_BASE_PT_MAX)
+            typo["base_pt"] = bp
+        if "axis_line_width_pt" in typo_raw:
+            v = _ann_float(typo_raw["axis_line_width_pt"])
+            if v is None or not (_TYPO_LINE_MIN <= v <= _TYPO_LINE_MAX):
+                _style_range_error("typography.axis_line_width_pt", _TYPO_LINE_MIN, _TYPO_LINE_MAX)
+            typo["axis_line_width_pt"] = v
+        if "data_line_width_pt" in typo_raw:
+            v = _ann_float(typo_raw["data_line_width_pt"])
+            if v is None or not (_TYPO_LINE_MIN <= v <= _TYPO_LINE_MAX):
+                _style_range_error("typography.data_line_width_pt", _TYPO_LINE_MIN, _TYPO_LINE_MAX)
+            typo["data_line_width_pt"] = v
+        out["typography"] = typo
+
+    return out
+
+
+def _label_style(canvas: Canvas) -> dict:
+    """Full panel-label style (§4) with defaults filled in for any key the
+    stored ``canvas.style.label`` doesn't set."""
+    raw = canvas.style if isinstance(canvas.style, dict) else {}
+    stored = raw.get("label") if isinstance(raw.get("label"), dict) else {}
+    return {**DEFAULT_LABEL_STYLE, **{k: v for k, v in stored.items() if k in DEFAULT_LABEL_STYLE}}
+
+
+def _style_response(canvas: Canvas) -> dict:
+    """Sanitized ``style`` for API responses: label defaults filled in (§3),
+    typography left as-is (default {})."""
+    raw = canvas.style if isinstance(canvas.style, dict) else {}
+    typography = raw.get("typography") if isinstance(raw.get("typography"), dict) else {}
+    return {"label": _label_style(canvas), "typography": typography}
+
+
+# ---------------------------------------------------------------- panel label layout
+# M-C1 §4 — ONE formula shared verbatim with the frontend's panelLabel.ts:
+# PT_TO_MM / LABEL_BASELINE_RATIO / the inside-vs-outside placement math / the
+# box-size estimate. Used by the SVG export <text>, the PPTX textbox, and
+# _content_bbox_mm (an outside label extends the crop bbox upward).
+_LABEL_BASELINE_RATIO = 0.8
+
+
+def _format_label(raw_label: str, fmt: str) -> str:
+    """Render the canonical stored A-Z label per the chosen display format."""
+    letter = str(raw_label or "").strip()
+    if fmt == "a":
+        return letter.lower()
+    if fmt == "(A)":
+        return f"({letter})"
+    if fmt == "A.":
+        return f"{letter}."
+    return letter  # "A" (default) — canonical form, unchanged
+
+
+def _label_layout_mm(x_mm: float, y_mm: float, raw_label: str, style: dict) -> dict:
+    """Geometry (mm, canvas coordinate space) + rendered text for one panel
+    label, per the shared formula (§4). ``style`` is a FULL label style dict
+    (see ``_label_style`` — defaults already filled in)."""
+    fmt = style.get("format", "A")
+    pt = float(style.get("pt", 12.0))
+    placement = style.get("placement", "inside")
+    offset_mm = float(style.get("offset_mm", 1.0))
+
+    text = _format_label(raw_label, fmt)
+    font_mm = pt * _PT_TO_MM
+
+    if placement == "outside":
+        left = x_mm
+        top = y_mm - offset_mm - font_mm
+    else:
+        left = x_mm + offset_mm
+        top = y_mm + offset_mm
+
+    baseline_y = top + _LABEL_BASELINE_RATIO * font_mm
+    box_w = 0.62 * font_mm * len(text) + 0.4 * font_mm
+    box_h = font_mm
+
+    return {
+        "text": text,
+        "left": left,
+        "top": top,
+        "baseline_y": baseline_y,
+        "box_w": box_w,
+        "box_h": box_h,
+        "font_mm": font_mm,
+        "bold": bool(style.get("bold", True)),
+    }
 
 
 # ---------------------------------------------------------------- panels
@@ -1022,32 +1227,49 @@ def remove_panel(db: Session, canvas_id: uuid.UUID, panel_id: uuid.UUID, owner_i
 
 
 # ---------------------------------------------------------------- presets
+_COLUMN_LABELS = {"single": "1 column", "onehalf": "1.5 column", "double": "2 column"}
+
+
 def list_canvas_presets() -> list[dict]:
-    """Physical canvas-size presets: ISO paper first, then JOURNAL_SPECS sizes.
+    """Physical canvas-size presets: ISO paper first, then JOURNAL_SPECS sizes
+    (M-C1 §2).
 
     The create dialog seeds its form from the FIRST entry, so list order is the
-    default-canvas-size policy: A4 portrait leads. Journal presets follow: for
-    each spec, a single-column and double-column canvas (width = column inches
-    x 25.4 mm; height = width x 0.72), clamped to [20, 500] mm. No rendering.
+    default-canvas-size policy: A4 portrait, then A4 landscape (both
+    journal=None), then per JOURNAL_SPECS entry single -> onehalf (if the
+    journal defines one) -> double, straight from each spec's ``col_mm`` (mm
+    is the source of truth here, not the *_col_in values used by
+    figures.check_compliance). No rendering.
     """
     out: list[dict] = [
         # No dimensions in the label — the create dialog appends "(W × H mm)".
-        {"key": "a4_portrait", "label": "A4 portrait", "width_mm": 210.0, "height_mm": 297.0},
-        {"key": "a4_landscape", "label": "A4 landscape", "width_mm": 297.0, "height_mm": 210.0},
+        {"key": "a4_portrait", "label": "A4 portrait", "width_mm": 210.0, "height_mm": 297.0,
+         "max_height_mm": None, "journal": None, "journal_key": None, "column": None},
+        {"key": "a4_landscape", "label": "A4 landscape", "width_mm": 297.0, "height_mm": 210.0,
+         "max_height_mm": None, "journal": None, "journal_key": None, "column": None},
     ]
     for key, spec in JOURNAL_SPECS.items():
         journal = spec.get("journal", key)
-        for variant, in_key in (("single", "single_col_in"), ("double", "double_col_in")):
-            width_in = spec.get(in_key)
-            if not width_in:
+        col_mm = spec.get("col_mm") or {}
+        max_height_mm = spec.get("max_height_mm")
+        for column in ("single", "onehalf", "double"):
+            width = col_mm.get(column)
+            if not width:
                 continue
-            width_mm = _clamp(width_in * 25.4, _CANVAS_MM_MIN, _CANVAS_MM_MAX)
-            height_mm = _clamp(width_mm * 0.72, _CANVAS_MM_MIN, _CANVAS_MM_MAX)
+            width_mm = round(_clamp(float(width), _CANVAS_MM_MIN, _CANVAS_MM_MAX), 2)
+            height_mm = round(width_mm * 0.9, 2)
+            if max_height_mm is not None:
+                height_mm = min(float(max_height_mm), height_mm)
+            height_mm = round(_clamp(height_mm, _CANVAS_MM_MIN, _CANVAS_MM_MAX), 2)
             out.append({
-                "key": f"{key}_{variant}",
-                "label": f"{journal} — {variant} column ({round(width_mm)} mm)",
-                "width_mm": round(width_mm, 2),
-                "height_mm": round(height_mm, 2),
+                "key": f"{key}_{column}",
+                "label": f"{journal} — {_COLUMN_LABELS[column]} ({round(width_mm)} mm)",
+                "width_mm": width_mm,
+                "height_mm": height_mm,
+                "max_height_mm": max_height_mm,
+                "journal": journal,
+                "journal_key": key,
+                "column": column,
             })
     return out
 
@@ -1065,13 +1287,12 @@ def list_canvas_presets() -> list[dict]:
 
 _EXPORT_PARTS = ("figures", "canvases", "export")
 
-# Panel label (A/B/C…) typography. Absolute pt → mm: the parent SVG's user unit
-# is 1 mm (viewBox in mm, width/height in mm), so a physical pt size maps to
-# `pt * 25.4 / 72` mm regardless of any panel scaling (§5 font invariance).
-_LABEL_PT = 12.0
+# Absolute pt -> mm: the parent SVG's user unit is 1 mm (viewBox in mm,
+# width/height in mm), so a physical pt size maps to `pt * 25.4 / 72` mm
+# regardless of any panel scaling (§5 font invariance). Panel label typography
+# itself is now driven by canvas.style.label (§4, _label_style/_label_layout_mm)
+# rather than a fixed constant.
 _PT_TO_MM = 25.4 / 72.0
-_LABEL_FONT_MM = round(_LABEL_PT * _PT_TO_MM, 4)
-_LABEL_INSET_MM = 1.0  # nudge in from the panel's top-left corner
 
 
 def _num(value: float) -> str:
@@ -1233,7 +1454,17 @@ def _annotation_svg(ann: dict) -> str | None:
 def _annotation_bbox_mm(ann: dict) -> tuple[float, float, float, float] | None:
     """Best-effort mm bounding box (x0, y0, x1, y1) of one annotation, for the
     crop-to-content export. Returns None for malformed items (they are skipped,
-    same fail-open policy as _annotation_svg)."""
+    same fail-open policy as _annotation_svg).
+
+    M-C1 §9 bug fix: the box now includes the STROKE (rect/ellipse/line/arrow
+    are drawn centered on their path, so half the stroke width extends past
+    the nominal geometry) and, for arrow, the arrowhead's half-width — both
+    would otherwise get clipped by a tight crop. For text, the box is always
+    [x, x + w] regardless of align — this matches _annotation_svg (a
+    center/right anchored text is positioned so it stays INSIDE [x, x+w]
+    when w_mm is numeric; align is ignored — anchor=start at x — when it is
+    not), the PPTX textbox and the Konva node; align must never shift x0.
+    """
     if not isinstance(ann, dict):
         return None
     t = ann.get("type")
@@ -1241,7 +1472,9 @@ def _annotation_bbox_mm(ann: dict) -> tuple[float, float, float, float] | None:
         if t in ("rect", "ellipse"):
             x = float(ann["x_mm"]); y = float(ann["y_mm"])
             w = float(ann.get("w_mm") or 0.0); h = float(ann.get("h_mm") or 0.0)
-            return (x, y, x + w, y + h)
+            stroke_mm = float(ann.get("stroke_pt") or 1.0) * _PT_TO_MM
+            pad = stroke_mm / 2.0
+            return (x - pad, y - pad, x + w + pad, y + h + pad)
         if t == "text":
             x = float(ann["x_mm"]); y = float(ann["y_mm"])
             font_mm = float(ann.get("font_pt") or 10.0) * _PT_TO_MM
@@ -1250,28 +1483,48 @@ def _annotation_bbox_mm(ann: dict) -> tuple[float, float, float, float] | None:
             if isinstance(ann.get("w_mm"), (int, float)):
                 w = float(ann["w_mm"])
             else:
-                w = font_mm * 0.62 * max(1, len(str(ann.get("text") or "")))
+                w = 0.62 * font_mm * max(1, len(str(ann.get("text") or ""))) + 0.4 * font_mm
             h = float(ann["h_mm"]) if isinstance(ann.get("h_mm"), (int, float)) else font_mm * 1.4
+            # Box is [x, x+w] for EVERY align — matches _annotation_svg (an
+            # aligned text is anchored so it stays inside [x, x+w] when
+            # w_mm is numeric; align is ignored, anchor=start at x, when it
+            # is not), the PPTX textbox and the Konva node. Do NOT shift by
+            # align here — that would place the box outside what is painted.
             return (x, y, x + w, y + h)
         if t in ("line", "arrow"):
             pts = ann.get("points_mm")
             if isinstance(pts, list) and len(pts) == 4:
                 x1, y1, x2, y2 = (float(p) for p in pts)
-                return (min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
+                stroke_mm = float(ann.get("stroke_pt") or 1.0) * _PT_TO_MM
+                pad = stroke_mm / 2.0
+                if t == "arrow":
+                    # Mirrors the polygon math in _annotation_svg: half_w is
+                    # the arrowhead's perpendicular half-width.
+                    head_len = max(2.5 * stroke_mm, 2.0)
+                    pad += 0.6 * head_len
+                return (min(x1, x2) - pad, min(y1, y2) - pad, max(x1, x2) + pad, max(y1, y2) + pad)
     except (TypeError, ValueError, KeyError):
         return None
     return None
 
 
 def _content_bbox_mm(canvas: Canvas) -> tuple[float, float, float, float] | None:
-    """Union mm bbox (x0, y0, x1, y1) of every panel + annotation, or None when
-    the canvas is empty. Panels use the SAME size clamp as the composite so the
-    crop matches what is actually painted."""
+    """Union mm bbox (x0, y0, x1, y1) of every panel + panel label + annotation,
+    or None when the canvas is empty. Panels use the SAME size clamp as the
+    composite so the crop matches what is actually painted. M-C1 §4/§9: a
+    visible panel label is unioned in too, so an OUTSIDE-placed label (which
+    sits above the panel's top edge) extends the crop bbox upward instead of
+    being clipped."""
     x0s: list[float] = []; y0s: list[float] = []; x1s: list[float] = []; y1s: list[float] = []
+    label_style = _label_style(canvas)
     for p in canvas.panels:
         pw = _clamp(p.width_mm, _PANEL_MM_MIN, _PANEL_MM_MAX)
         ph = _clamp(p.height_mm, _PANEL_MM_MIN, _PANEL_MM_MAX)
         x0s.append(p.x_mm); y0s.append(p.y_mm); x1s.append(p.x_mm + pw); y1s.append(p.y_mm + ph)
+        if p.label_visible and p.label:
+            layout = _label_layout_mm(p.x_mm, p.y_mm, p.label, label_style)
+            x0s.append(layout["left"]); y0s.append(layout["top"])
+            x1s.append(layout["left"] + layout["box_w"]); y1s.append(layout["top"] + layout["box_h"])
     for ann in (canvas.annotations or []):
         bb = _annotation_bbox_mm(ann)
         if bb:
@@ -1281,7 +1534,21 @@ def _content_bbox_mm(canvas: Canvas) -> tuple[float, float, float, float] | None
     return (min(x0s), min(y0s), max(x1s), max(y1s))
 
 
-def _compose_canvas_svg(db: Session, owner_id: uuid.UUID, canvas: Canvas, crop: bool = False) -> tuple[str, dict[str, str]]:
+def _panel_skip_reason(exc: NotFoundError) -> str:
+    """Map a NotFoundError raised while resolving a panel's render source to
+    the M-C1 §7/§8 skip reason string, keyed off the resource name baked into
+    its error_code (FIGURE_NOT_FOUND / FIGUREVERSION_NOT_FOUND /
+    DATASET_NOT_FOUND — see figures_service.get_figure/get_version and
+    ds_service.get_dataset) rather than parsing free text."""
+    code = getattr(exc, "error_code", "") or ""
+    if code.startswith("FIGUREVERSION"):
+        return "version missing"
+    if code.startswith("DATASET"):
+        return "dataset not accessible"
+    return "figure not accessible"
+
+
+def _compose_canvas_svg(db: Session, owner_id: uuid.UUID, canvas: Canvas, crop: bool = False) -> tuple[str, dict[str, str], list[dict]]:
     """Build the composite canvas SVG by nesting each panel's vector render.
 
     When ``crop`` is set, the outer <svg> viewBox/size is the tight bounding box
@@ -1290,8 +1557,13 @@ def _compose_canvas_svg(db: Session, owner_id: uuid.UUID, canvas: Canvas, crop: 
     viewBox window (min-x/min-y origin) does the cropping, which rsvg-convert
     honours for every format.
 
-    Returns (svg_text, snapshot) where snapshot is {panel_id: version_id} of the
-    versions actually rendered (design §5 reproducibility).
+    Returns (svg_text, snapshot, skipped) where snapshot is
+    {panel_id: version_id} of the versions actually rendered (design §5
+    reproducibility) and skipped is [{"panel_id": str, "reason": str}] for
+    every panel this loop actually dropped (§5 backend review: this loop, not
+    ``_resolve_panel_sources``, is the source of truth for what an export
+    really composed — it sees failures ``_resolve_panel_sources`` cannot,
+    like a dangling dataset behind an otherwise-accessible figure).
     """
     # Full-sheet frame by default; the content bbox when cropping (falls back to
     # the full sheet if the canvas is empty).
@@ -1309,6 +1581,7 @@ def _compose_canvas_svg(db: Session, owner_id: uuid.UUID, canvas: Canvas, crop: 
     current_map = _figure_current_versions(db, [p.figure_id for p in canvas.panels], owner_id)
     # Paint order: ascending z_order (ties by id) → later panels drawn on top (§2).
     panels = sorted(canvas.panels, key=lambda p: (p.z_order, str(p.id)))
+    label_style = _label_style(canvas)
 
     parts: list[str] = [
         '<?xml version="1.0" encoding="UTF-8"?>',
@@ -1325,6 +1598,7 @@ def _compose_canvas_svg(db: Session, owner_id: uuid.UUID, canvas: Canvas, crop: 
         parts.append(f'<rect x="{_num(ox)}" y="{_num(oy)}" width="{_num(w_mm)}" height="{_num(h_mm)}" fill="#ffffff"/>')
 
     snapshot: dict[str, str] = {}
+    skipped: list[dict] = []
     for idx, panel in enumerate(panels):
         pw_mm = _clamp(panel.width_mm, _PANEL_MM_MIN, _PANEL_MM_MAX)
         ph_mm = _clamp(panel.height_mm, _PANEL_MM_MIN, _PANEL_MM_MAX)
@@ -1339,11 +1613,13 @@ def _compose_canvas_svg(db: Session, owner_id: uuid.UUID, canvas: Canvas, crop: 
             try:
                 blob = storage.read_bytes(_image_ref(panel.image_key))
             except (OSError, RuntimeError, ValueError):
+                skipped.append({"panel_id": str(panel.id), "reason": "image missing"})
                 continue
             if _image_ext(panel.image_key) == "svg":
                 try:
                     attrs, inner = _split_svg(blob.decode("utf-8"))
                 except (BadRequestError, UnicodeDecodeError):
+                    skipped.append({"panel_id": str(panel.id), "reason": "image unreadable"})
                     continue
                 native_w, native_h = _svg_native_size(attrs)
                 inner = _prefix_svg_ids(inner, f"p{idx}_")
@@ -1363,8 +1639,12 @@ def _compose_canvas_svg(db: Session, owner_id: uuid.UUID, canvas: Canvas, crop: 
                     f'xlink:href="data:{media};base64,{b64}"/>'
                 )
         else:
+            if panel.figure_id not in current_map:
+                skipped.append({"panel_id": str(panel.id), "reason": "figure not accessible"})
+                continue
             effective = panel.pinned_version_id or current_map.get(panel.figure_id)
             if effective is None:
+                skipped.append({"panel_id": str(panel.id), "reason": "no rendered version"})
                 continue  # figure has no version yet → nothing to render
 
             # Reuse the exact physical-size vector renderer (fonts stay pt, §5).
@@ -1379,11 +1659,14 @@ def _compose_canvas_svg(db: Session, owner_id: uuid.UUID, canvas: Canvas, crop: 
                         height_mm=ph_mm,
                     ),
                 )
-            except NotFoundError:
-                # The exporting user can't access this panel's figure (e.g. the
-                # canvas was moved into a project while a panel still references a
-                # personal figure). Fail-closed per PANEL — skip it — instead of
-                # hard-404ing a collaborator's ENTIRE export on the first miss.
+            except NotFoundError as exc:
+                # The exporting user can't access this panel's figure/version/
+                # dataset (e.g. the canvas was moved into a project while a
+                # panel still references a personal figure, or a pin dangles
+                # on a deleted version). Fail-closed per PANEL — skip it, with
+                # the specific reason — instead of hard-404ing a
+                # collaborator's ENTIRE export on the first miss.
+                skipped.append({"panel_id": str(panel.id), "reason": _panel_skip_reason(exc)})
                 continue
             svg_text = storage.read_bytes(ref).decode("utf-8")
             attrs, inner = _split_svg(svg_text)
@@ -1398,14 +1681,15 @@ def _compose_canvas_svg(db: Session, owner_id: uuid.UUID, canvas: Canvas, crop: 
             )
 
         if panel.label_visible and panel.label:
-            # Absolute-pt bold label pinned to the panel's top-left corner.
-            ty = panel.y_mm + _LABEL_INSET_MM + _LABEL_FONT_MM
-            tx = panel.x_mm + _LABEL_INSET_MM
+            # §4 shared label formula: canvas.style.label (format/bold/pt/
+            # placement/offset_mm) drives position + typography.
+            layout = _label_layout_mm(panel.x_mm, panel.y_mm, panel.label, label_style)
+            weight_attr = ' font-weight="bold"' if layout["bold"] else ""
             parts.append(
-                f'<text x="{_num(tx)}" y="{_num(ty)}" '
+                f'<text x="{_num(layout["left"])}" y="{_num(layout["baseline_y"])}" '
                 f'font-family="Helvetica, Arial, sans-serif" '
-                f'font-size="{_num(_LABEL_FONT_MM)}" font-weight="bold" '
-                f'fill="#000000">{_xml_escape(panel.label)}</text>'
+                f'font-size="{_num(layout["font_mm"])}"{weight_attr} '
+                f'fill="#000000">{_xml_escape(layout["text"])}</text>'
             )
 
         # Snapshot records figure VERSIONS (§5 reproducibility) — image panels
@@ -1425,7 +1709,7 @@ def _compose_canvas_svg(db: Session, owner_id: uuid.UUID, canvas: Canvas, crop: 
             parts.append(markup)
 
     parts.append("</svg>")
-    return "\n".join(parts), snapshot
+    return "\n".join(parts), snapshot, skipped
 
 
 def _persist_export(canvas_id: uuid.UUID, data: bytes, ext: str, content_type: str) -> str:
@@ -1518,16 +1802,30 @@ def _png_bytes_to_tiff_bytes(png_bytes: bytes, dpi: int) -> bytes:
         return out.getvalue()
 
 
-# DPI used to rasterise each panel figure into the PPTX. Slides don't need
-# 600dpi; 200 keeps each panel PNG well under the raster budget while staying
-# crisp on a projector.
-_PPTX_PANEL_DPI = 200
+# DPI used to rasterise each panel figure into the PPTX (M-C1 §8: raised from
+# 200 -> 300 so a PPTX panel meets the same journal-submission resolution bar
+# as the PNG/TIFF export). Guarded per-panel against the raster pixel budget —
+# a panel whose 300dpi raster would blow the budget falls back to 200dpi
+# rather than failing the whole export or silently exceeding the guard other
+# raster paths enforce.
+_PPTX_PANEL_DPI = 300
+_PPTX_PANEL_DPI_FALLBACK = 200
 
 
-def _build_pptx_bytes(db: Session, owner_id: uuid.UUID, canvas: Canvas, crop: bool = False) -> tuple[bytes, dict[str, str]]:
+def _pptx_panel_dpi(pw_mm: float, ph_mm: float) -> int:
+    px_w = math.ceil(pw_mm / 25.4 * _PPTX_PANEL_DPI)
+    px_h = math.ceil(ph_mm / 25.4 * _PPTX_PANEL_DPI)
+    if px_w * px_h > _RASTER_MAX_PIXELS:
+        return _PPTX_PANEL_DPI_FALLBACK
+    return _PPTX_PANEL_DPI
+
+
+def _build_pptx_bytes(db: Session, owner_id: uuid.UUID, canvas: Canvas, crop: bool = False) -> tuple[bytes, dict[str, str], list[dict]]:
     """Build a one-slide PPTX where each figure is its OWN movable picture and
     annotations are native PowerPoint shapes, sized so a slide millimetre maps
-    to a canvas millimetre. Returns (pptx_bytes, snapshot).
+    to a canvas millimetre. Returns (pptx_bytes, snapshot, skipped) — skipped
+    is [{"panel_id": str, "reason": str}] for every panel THIS loop actually
+    dropped (mirrors _compose_canvas_svg; see _panel_skip_reason).
 
     python-pptx is imported lazily so the module never hard-depends on it — an
     absent package surfaces as a clear 501 on THIS path only.
@@ -1586,10 +1884,13 @@ def _build_pptx_bytes(db: Session, owner_id: uuid.UUID, canvas: Canvas, crop: bo
 
     current_map = _figure_current_versions(db, [p.figure_id for p in canvas.panels], owner_id)
     panels = sorted(canvas.panels, key=lambda p: (p.z_order, str(p.id)))
+    label_style = _label_style(canvas)
     snapshot: dict[str, str] = {}
+    skipped: list[dict] = []
     for panel in panels:
         pw = _clamp(panel.width_mm, _PANEL_MM_MIN, _PANEL_MM_MAX)
         ph = _clamp(panel.height_mm, _PANEL_MM_MIN, _PANEL_MM_MAX)
+        panel_dpi = _pptx_panel_dpi(pw, ph)
         effective = None
         if panel.image_key:
             # Imported image: PNG/JPEG insert natively (python-pptx reads
@@ -1598,11 +1899,13 @@ def _build_pptx_bytes(db: Session, owner_id: uuid.UUID, canvas: Canvas, crop: bo
             try:
                 blob = storage.read_bytes(_image_ref(panel.image_key))
             except (OSError, RuntimeError, ValueError):
+                skipped.append({"panel_id": str(panel.id), "reason": "image missing"})
                 continue
             if _image_ext(panel.image_key) == "svg":
                 try:
                     attrs, inner = _split_svg(blob.decode("utf-8"))
                 except (BadRequestError, UnicodeDecodeError):
+                    skipped.append({"panel_id": str(panel.id), "reason": "image unreadable"})
                     continue
                 native_w, native_h = _svg_native_size(attrs)
                 wrapper = (
@@ -1614,39 +1917,51 @@ def _build_pptx_bytes(db: Session, owner_id: uuid.UUID, canvas: Canvas, crop: bo
                     f'viewBox="0 0 {_num(native_w)} {_num(native_h)}" '
                     f'preserveAspectRatio="none" overflow="hidden">{inner}</svg></svg>'
                 )
-                picture_bytes = _svg_to_png_bytes(wrapper, _PPTX_PANEL_DPI)
+                picture_bytes = _svg_to_png_bytes(wrapper, panel_dpi)
             else:
                 picture_bytes = blob
             try:
                 slide.shapes.add_picture(io.BytesIO(picture_bytes),
                                          Mm(panel.x_mm - ox), Mm(panel.y_mm - oy), Mm(pw), Mm(ph))
             except Exception:  # noqa: BLE001 - skip an unreadable image, keep the export
+                skipped.append({"panel_id": str(panel.id), "reason": "image unreadable"})
                 continue
         else:
+            if panel.figure_id not in current_map:
+                skipped.append({"panel_id": str(panel.id), "reason": "figure not accessible"})
+                continue
             effective = panel.pinned_version_id or current_map.get(panel.figure_id)
             if effective is None:
+                skipped.append({"panel_id": str(panel.id), "reason": "no rendered version"})
                 continue
             try:
                 ref, _layout, _cached = _render_preview_ref(
                     db, owner_id,
                     PreviewRenderRequest(figure_id=panel.figure_id, version_id=effective, width_mm=pw, height_mm=ph),
                 )
-            except NotFoundError:
-                continue  # inaccessible panel figure — skip, don't fail the whole export
+            except NotFoundError as exc:
+                # inaccessible panel figure/version/dataset — skip, don't fail
+                # the whole export.
+                skipped.append({"panel_id": str(panel.id), "reason": _panel_skip_reason(exc)})
+                continue
             svg_text = storage.read_bytes(ref).decode("utf-8")
-            png_bytes = _svg_to_png_bytes(svg_text, _PPTX_PANEL_DPI)
+            png_bytes = _svg_to_png_bytes(svg_text, panel_dpi)
             slide.shapes.add_picture(io.BytesIO(png_bytes), Mm(panel.x_mm - ox), Mm(panel.y_mm - oy), Mm(pw), Mm(ph))
         if panel.label_visible and panel.label:
+            # §4 shared label formula (replaces the old fixed 20mm box).
+            layout = _label_layout_mm(panel.x_mm, panel.y_mm, panel.label, label_style)
             try:
-                tb = slide.shapes.add_textbox(Mm(panel.x_mm - ox + _LABEL_INSET_MM), Mm(panel.y_mm - oy),
-                                              Mm(20), Mm(_LABEL_FONT_MM * 1.8))
+                tb = slide.shapes.add_textbox(
+                    Mm(layout["left"] - ox), Mm(layout["top"] - oy),
+                    Mm(max(layout["box_w"], 1.0)), Mm(max(layout["box_h"] * 1.4, 1.0)),
+                )
                 tf = tb.text_frame
                 tf.word_wrap = False
                 tf.margin_left = tf.margin_right = tf.margin_top = tf.margin_bottom = 0
                 run = tf.paragraphs[0].add_run()
-                run.text = panel.label
-                run.font.bold = True
-                run.font.size = Pt(_LABEL_FONT_MM / _PT_TO_MM)
+                run.text = layout["text"]
+                run.font.bold = layout["bold"]
+                run.font.size = Pt(float(label_style.get("pt", 12.0)))
                 run.font.color.rgb = RGBColor(0, 0, 0)
             except Exception:  # noqa: BLE001 - label is decorative
                 pass
@@ -1722,35 +2037,104 @@ def _build_pptx_bytes(db: Session, owner_id: uuid.UUID, canvas: Canvas, crop: bo
 
     buf = io.BytesIO()
     prs.save(buf)
-    return buf.getvalue(), snapshot
+    return buf.getvalue(), snapshot, skipped
+
+
+def _resolve_panel_sources(db: Session, owner_id: uuid.UUID, canvas: Canvas) -> tuple[
+    list[tuple[CanvasPanel, uuid.UUID | None, bytes | None]], list[dict]
+]:
+    """Which panels have a renderable source, and why the rest don't (M-C1
+    §7). Mirrors the resolution logic in ``_compose_canvas_svg``/
+    ``_build_pptx_bytes`` (figure-accessibility + pinned/current version +
+    image-blob-exists) WITHOUT actually rendering anything, so it is cheap
+    enough to call before every export and for the journal-check endpoint.
+
+    Returns ``(renderable, skipped)`` where ``renderable`` is
+    ``[(panel, effective_version_id | None, image_blob | None)]`` — a figure
+    panel carries its effective version id (image_blob None); an image panel
+    carries its raw blob (effective_version_id None) — and ``skipped`` is
+    ``[{"panel_id": str, "reason": str}]`` with reason one of "no rendered
+    version", "figure not accessible", "image missing".
+    """
+    current_map = _figure_current_versions(db, [p.figure_id for p in canvas.panels], owner_id)
+    renderable: list[tuple[CanvasPanel, uuid.UUID | None, bytes | None]] = []
+    skipped: list[dict] = []
+    for panel in canvas.panels:
+        if panel.image_key:
+            try:
+                blob = storage.read_bytes(_image_ref(panel.image_key))
+            except (OSError, RuntimeError, ValueError):
+                skipped.append({"panel_id": str(panel.id), "reason": "image missing"})
+                continue
+            renderable.append((panel, None, blob))
+            continue
+        if panel.figure_id not in current_map:
+            skipped.append({"panel_id": str(panel.id), "reason": "figure not accessible"})
+            continue
+        effective = panel.pinned_version_id or current_map.get(panel.figure_id)
+        if effective is None:
+            skipped.append({"panel_id": str(panel.id), "reason": "no rendered version"})
+            continue
+        renderable.append((panel, effective, None))
+    return renderable, skipped
+
+
+_FILENAME_ALLOWED_RE = re.compile(r"[^A-Za-z0-9-]+")
+
+
+def _journal_filename(canvas: Canvas, fmt: str, dpi: int | None) -> str:
+    """Export filename (M-C1 §8):
+    ``Fig_<slug>_<journalkey or 'custom'>_<round(width_mm)>mm[_<dpi>dpi].<ext>``
+    """
+    slug = _FILENAME_ALLOWED_RE.sub("", canvas.name or "")[:40] or "figure"
+    parsed = parse_canvas_preset(canvas.preset) if canvas.preset else None
+    journal_part = parsed[0] if parsed else "custom"
+    name = f"Fig_{slug}_{journal_part}_{round(canvas.width_mm)}mm"
+    if fmt in ("png", "tiff") and dpi:
+        name += f"_{dpi}dpi"
+    return f"{name}.{fmt}"
 
 
 def export_canvas(db: Session, canvas_id: uuid.UUID, owner_id: uuid.UUID, fmt: str, dpi: int = 300, crop: bool = False) -> dict:
-    """Export the canvas as svg, pdf, png, tiff, or pptx (§1, U9 §2).
+    """Export the canvas as svg, pdf, eps, png, tiff, or pptx (§1, U9 §2, M-C1 §8).
 
-    svg/pdf stay pure vector composition (§1: never bitmap-stretch a panel).
-    png/tiff RASTERIZE that SAME composite via rsvg-convert at `dpi` — still a
-    single controlled conversion of the whole composed sheet, not an ad hoc
-    per-panel bitmap stretch. tiff is derived from the rendered png (one rsvg
-    invocation, then a Pillow re-encode) rather than a second rsvg call.
+    svg/pdf/eps stay pure vector composition (§1: never bitmap-stretch a
+    panel) — eps is produced from the SAME composite SVG via rsvg-convert
+    ``-f eps``; text becomes outlines/paths in the EPS (PostScript has no
+    embedded-font story rsvg exposes here), matching what journals that still
+    require EPS expect. png/tiff RASTERIZE that SAME composite via
+    rsvg-convert at `dpi` — still a single controlled conversion of the whole
+    composed sheet, not an ad hoc per-panel bitmap stretch. tiff is derived
+    from the rendered png (one rsvg invocation, then a Pillow re-encode)
+    rather than a second rsvg call.
 
     Records `{panel_id: version_id}` into `canvas.export_snapshot` for
-    reproducibility (§5) and commits, for every format.
+    reproducibility (§5) and commits, for every format. Response also carries
+    `skipped_panels` (panels with no renderable source) and a
+    journal-submission-friendly `filename`.
     """
     fmt = (fmt or "svg").lower()
-    if fmt not in {"svg", "pdf", "png", "tiff", "pptx"}:
-        raise BadRequestError("format must be one of 'svg', 'pdf', 'png', 'tiff', 'pptx'", error_code="BAD_EXPORT_FORMAT")
+    if fmt not in {"svg", "pdf", "eps", "png", "tiff", "pptx"}:
+        raise BadRequestError(
+            "format must be one of 'svg', 'pdf', 'eps', 'png', 'tiff', 'pptx'", error_code="BAD_EXPORT_FORMAT"
+        )
     if fmt in {"png", "tiff"} and dpi not in _RASTER_DPI_CHOICES:
         raise BadRequestError("dpi must be 300 or 600", error_code="BAD_EXPORT_DPI")
 
     # Fail fast if a converter-backed format is requested but the vector
     # converter is unavailable — never silently fall back to a lesser path.
     # pptx rasterises each panel through the same rsvg path.
-    if fmt in {"pdf", "png", "tiff", "pptx"} and shutil.which("rsvg-convert") is None:
+    if fmt in {"pdf", "eps", "png", "tiff", "pptx"} and shutil.which("rsvg-convert") is None:
+        if fmt == "pdf":
+            unavailable_code = "PDF_EXPORT_UNAVAILABLE"
+        elif fmt == "eps":
+            unavailable_code = "EPS_EXPORT_UNAVAILABLE"
+        else:
+            unavailable_code = "RASTER_EXPORT_UNAVAILABLE"
         raise AppError(
             status_code=501,
             detail=f"{fmt.upper()} export requires librsvg (rsvg-convert), which is not installed.",
-            error_code="PDF_EXPORT_UNAVAILABLE" if fmt == "pdf" else "RASTER_EXPORT_UNAVAILABLE",
+            error_code=unavailable_code,
         )
 
     canvas = get_canvas(db, canvas_id, owner_id)
@@ -1781,16 +2165,19 @@ def export_canvas(db: Session, canvas_id: uuid.UUID, owner_id: uuid.UUID, fmt: s
     # pptx composes its OWN document (per-panel pictures), not the flat SVG —
     # handle it early so we don't render every panel twice.
     if fmt == "pptx":
-        pptx_bytes, snapshot = _build_pptx_bytes(db, owner_id, canvas, crop=crop)
+        pptx_bytes, snapshot, skipped_panels = _build_pptx_bytes(db, owner_id, canvas, crop=crop)
         url = _persist_export(
             canvas_id, pptx_bytes, "pptx",
             "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         )
         canvas.export_snapshot = snapshot
         db.commit()
-        return {"url": url, "format": fmt, "dpi": None, "snapshot": snapshot}
+        return {
+            "url": url, "format": fmt, "dpi": None, "snapshot": snapshot,
+            "skipped_panels": skipped_panels, "filename": _journal_filename(canvas, fmt, None),
+        }
 
-    composite_svg, snapshot = _compose_canvas_svg(db, owner_id, canvas, crop=crop)
+    composite_svg, snapshot, skipped_panels = _compose_canvas_svg(db, owner_id, canvas, crop=crop)
 
     result_dpi: int | None = None
     if fmt == "svg":
@@ -1817,6 +2204,26 @@ def export_canvas(db: Session, canvas_id: uuid.UUID, owner_id: uuid.UUID, fmt: s
         if not pdf_bytes:
             raise BadRequestError("PDF conversion produced no output", error_code="PDF_EXPORT_FAILED")
         url = _persist_export(canvas_id, pdf_bytes, "pdf", "application/pdf")
+    elif fmt == "eps":
+        with tempfile.TemporaryDirectory(prefix="labplot_canvas_export_") as td:
+            svg_path = os.path.join(td, "composite.svg")
+            eps_path = os.path.join(td, "out.eps")
+            with open(svg_path, "w", encoding="utf-8") as fh:
+                fh.write(composite_svg)
+            try:
+                subprocess.run(
+                    ["rsvg-convert", "-f", "eps", "-o", eps_path, svg_path],
+                    check=True,
+                    capture_output=True,
+                    timeout=60,
+                )
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                raise BadRequestError("EPS conversion failed", error_code="EPS_EXPORT_FAILED") from exc
+            with open(eps_path, "rb") as fh:
+                eps_bytes = fh.read()
+        if not eps_bytes:
+            raise BadRequestError("EPS conversion produced no output", error_code="EPS_EXPORT_FAILED")
+        url = _persist_export(canvas_id, eps_bytes, "eps", "application/postscript")
     elif fmt == "png":
         result_dpi = dpi
         png_bytes = _stamp_png_dpi(_svg_to_png_bytes(composite_svg, dpi), dpi)
@@ -1830,7 +2237,10 @@ def export_canvas(db: Session, canvas_id: uuid.UUID, owner_id: uuid.UUID, fmt: s
     # Snapshot the versions actually composed (§5), then commit.
     canvas.export_snapshot = snapshot
     db.commit()
-    return {"url": url, "format": fmt, "dpi": result_dpi, "snapshot": snapshot}
+    return {
+        "url": url, "format": fmt, "dpi": result_dpi, "snapshot": snapshot,
+        "skipped_panels": skipped_panels, "filename": _journal_filename(canvas, fmt, result_dpi),
+    }
 
 
 def apply_canvas_style(db: Session, canvas_id: uuid.UUID, owner_id: uuid.UUID,
@@ -1852,3 +2262,319 @@ def apply_canvas_style(db: Session, canvas_id: uuid.UUID, owner_id: uuid.UUID,
     targets = list({fid for fid in panel_figure_ids if fid != source_figure_id})
     result = figures_service.bulk_apply_style(db, source_figure_id, targets, owner_id)
     return {"updated": result.get("updated", []), "skipped": result.get("skipped", [])}
+
+
+# ---------------------------------------------------------------- typography (M-C1 §6)
+# canvas.style.typography key -> figure options key. base_pt is the canvas's
+# user-facing name for the figure's absolute base_size (pt); the other two
+# keys are named identically on both sides.
+_TYPOGRAPHY_TO_OPTION_KEY = {
+    "font_family": "font_family",
+    "base_pt": "base_size",
+    "axis_line_width_pt": "axis_line_width_pt",
+    "data_line_width_pt": "data_line_width_pt",
+}
+
+
+def apply_canvas_typography(db: Session, canvas_id: uuid.UUID, owner_id: uuid.UUID, patch: dict) -> dict:
+    """Apply a typography override to canvas.style AND every figure panel
+    figure (M-C1 §6).
+
+    ``patch`` is a subset of CanvasStyle.typography (at least one key);
+    validated the same way a whole-style PATCH is, then MERGED into the
+    canvas's stored typography (unlike the whole-style PATCH, which replaces
+    the object wholesale — a typography patch only touches the keys it sets).
+    Each DISTINCT figure panel figure is re-rendered with the mapped patch
+    merged over its current options via figures_service.rerender (bulk_apply_
+    style's pattern: one atomic render+commit per target, quota-enforced
+    inside rerender, a failure on one target doesn't discard the rest).
+    """
+    canvas = get_canvas(db, canvas_id, owner_id, write=True)
+    sanitized = _sanitize_canvas_style({"typography": patch}).get("typography", {})
+    if not sanitized:
+        raise BadRequestError("at least one typography field is required", error_code="CANVAS_STYLE_INVALID")
+
+    # Pre-flight the render quota BEFORE mutating/committing canvas.style: an
+    # at-quota user must get a clean 429 with nothing written, not a canvas
+    # that advertises a typography no panel actually rendered.
+    owner = db.query(User).filter(User.id == owner_id).first()
+    if owner:
+        enforce_render_quota(db, owner)
+
+    existing_style = canvas.style if isinstance(canvas.style, dict) else {}
+    existing_typo = existing_style.get("typography") if isinstance(existing_style.get("typography"), dict) else {}
+    canvas.style = {**existing_style, "typography": {**existing_typo, **sanitized}}
+    db.commit()  # persist the style change up front — independent of the render loop below
+
+    figure_patch: dict = {}
+    for key, option_key in _TYPOGRAPHY_TO_OPTION_KEY.items():
+        if key not in sanitized:
+            continue
+        if key == "base_pt":
+            figure_patch[option_key] = int(round(float(sanitized[key])))
+        else:
+            figure_patch[option_key] = sanitized[key]
+
+    figure_ids = sorted({p.figure_id for p in canvas.panels if p.figure_id is not None}, key=str)
+    updated: list[uuid.UUID] = []
+    skipped: list[uuid.UUID] = []
+    for fid in figure_ids:
+        try:
+            fig = figures_service.get_figure(db, fid, owner_id)
+            base = figures_service._current_or_latest_version(fig)
+            if base is None:
+                skipped.append(fid)
+                continue
+            merged_options = {**(base.options or {}), **figure_patch}
+            figures_service.rerender(db, fid, owner_id, SimpleNamespace(
+                mapping=base.mapping,
+                options=merged_options,
+                style_preset=None,
+                change_note="Canvas typography",
+                base_version_id=base.id,
+            ))
+            updated.append(fid)
+        except AppError as exc:
+            db.rollback()
+            # 429 (render quota) / 403 (project write denied) are whole-request
+            # errors, not a per-figure render failure — propagate them instead
+            # of silently collapsing them into "skipped" (they may keep firing
+            # on every remaining figure and give no visible reason otherwise).
+            if exc.status_code in (429, 403):
+                raise
+            skipped.append(fid)
+        except Exception:
+            db.rollback()
+            skipped.append(fid)
+    return {"updated": updated, "skipped": skipped}
+
+
+# ---------------------------------------------------------------- journal check (M-C1 §7)
+def _preferred_font_family_set(preferred: str) -> set[str]:
+    # FONT_FAMILY_CLASSES is the single source of truth shared with
+    # figures.service.check_compliance so the two checklists never disagree
+    # on the same figure (backend review [7]).
+    return FONT_FAMILY_CLASSES.get(preferred, {preferred})
+
+
+def _evaluate_journal_checks(
+    spec: dict | None,
+    column: str | None,
+    canvas_w_mm: float,
+    canvas_h_mm: float,
+    style: dict,
+    panel_infos: list[dict],
+    annotations: list[dict],
+    fmt: str,
+    dpi: int,
+    skipped: list[dict],
+    invalid_preset: str | None = None,
+) -> list[dict]:
+    """Pure core of the journal-submission check (M-C1 §7) — no DB access.
+
+    ``spec`` is a JOURNAL_SPECS-shaped dict (or None when the canvas has no
+    journal preset); ``style`` is a FULL label style (``_label_style``
+    output); ``panel_infos`` is ``[{panel_id, label, pt, font_family}]`` for
+    every renderable FIGURE panel (image panels carry no typography and are
+    not checked here); ``annotations`` is the canvas's raw annotations list;
+    ``skipped`` is the ``_resolve_panel_sources`` skip list. ``invalid_preset``
+    is the raw ``canvas.preset`` string ONLY when it is set but does not parse
+    to a known journal/column (e.g. a column the journal does not define,
+    like ``"plos_onehalf"``) — distinct from ``spec is None`` (no preset set
+    at all), so the two cases are never conflated as the same "no journal
+    preset" outcome.
+    """
+    checks: list[dict] = []
+    if invalid_preset:
+        checks.append({
+            "name": "Journal preset", "ok": False,
+            "actual": invalid_preset,
+            "expected": "a supported journal/column preset key",
+            "hint": f"'{invalid_preset}' is not a supported journal preset; pick one from the preset list.",
+        })
+    has_preset = spec is not None and column is not None
+    eval_spec = spec if spec is not None else JOURNAL_SPECS["minimal"]
+    min_font_pt = float(eval_spec.get("min_font_pt", 5))
+    no_preset_hint = "Pick a journal preset to check column width and height"
+
+    # 1) Column width
+    col_mm = (eval_spec.get("col_mm") or {}).get(column) if has_preset else None
+    if not has_preset or col_mm is None:
+        checks.append({
+            "name": "Column width", "ok": True, "actual": "no journal preset",
+            "expected": "n/a", "hint": no_preset_hint,
+        })
+    else:
+        diff = abs(float(canvas_w_mm) - float(col_mm))
+        ok = diff <= 0.5
+        checks.append({
+            "name": "Column width", "ok": ok,
+            "actual": f"{canvas_w_mm:.1f} mm",
+            "expected": f"{float(col_mm):.1f} mm",
+            "hint": None if ok else f"Resize the canvas width to {float(col_mm):.1f} mm.",
+        })
+
+    # 2) Height
+    max_h = eval_spec.get("max_height_mm") if has_preset else None
+    if not has_preset or max_h is None:
+        checks.append({
+            "name": "Height", "ok": True, "actual": "no journal preset",
+            "expected": "n/a", "hint": no_preset_hint,
+        })
+    else:
+        ok = float(canvas_h_mm) <= float(max_h) + 1e-6
+        checks.append({
+            "name": "Height", "ok": ok,
+            "actual": f"{canvas_h_mm:.1f} mm",
+            "expected": f"<= {float(max_h):.1f} mm",
+            "hint": None if ok else f"Reduce the canvas height to at most {float(max_h):.1f} mm.",
+        })
+
+    # 3) Minimum font size — every figure panel.
+    if panel_infos:
+        worst = min(panel_infos, key=lambda p: p["pt"])
+        min_found = float(worst["pt"])
+        ok = min_found >= min_font_pt
+        worst_id = worst.get("label") or worst.get("panel_id")
+        checks.append({
+            "name": "Minimum font size", "ok": ok,
+            "actual": f"{min_found:g} pt (panel {worst_id})",
+            "expected": f">= {min_font_pt:g} pt",
+            "hint": None if ok else f"Increase the base font size of panel {worst_id} to at least {min_font_pt:g} pt.",
+        })
+    else:
+        checks.append({
+            "name": "Minimum font size", "ok": True, "actual": "no figure panels",
+            "expected": f">= {min_font_pt:g} pt", "hint": None,
+        })
+
+    # 4) Label font size
+    label_pt = float(style.get("pt", 12.0))
+    ok = label_pt >= min_font_pt
+    checks.append({
+        "name": "Label font size", "ok": ok,
+        "actual": f"{label_pt:g} pt",
+        "expected": f">= {min_font_pt:g} pt",
+        "hint": None if ok else f"Increase the panel label size to at least {min_font_pt:g} pt.",
+    })
+
+    # 5) Annotation font size — text annotations only.
+    text_anns = [a for a in (annotations or []) if isinstance(a, dict) and a.get("type") == "text"]
+    if text_anns:
+        min_ann = min(float(a.get("font_pt") or 10.0) for a in text_anns)
+        ok = min_ann >= min_font_pt
+        checks.append({
+            "name": "Annotation font size", "ok": ok,
+            "actual": f"{min_ann:g} pt",
+            "expected": f">= {min_font_pt:g} pt",
+            "hint": None if ok else f"Increase annotation text size to at least {min_font_pt:g} pt.",
+        })
+    else:
+        checks.append({
+            "name": "Annotation font size", "ok": True, "actual": "no text annotations",
+            "expected": f">= {min_font_pt:g} pt", "hint": None,
+        })
+
+    # 6) Font family — every figure panel.
+    preferred = eval_spec.get("preferred_font", "sans")
+    preferred_set = _preferred_font_family_set(preferred)
+    if panel_infos:
+        families = {p.get("font_family") or "sans" for p in panel_infos}
+        ok = families <= preferred_set
+        checks.append({
+            "name": "Font family", "ok": ok,
+            "actual": ", ".join(sorted(families)),
+            "expected": preferred,
+            "hint": None if ok else f"Set panel typography to a {preferred} font family.",
+        })
+    else:
+        checks.append({
+            "name": "Font family", "ok": True, "actual": "no figure panels",
+            "expected": preferred, "hint": None,
+        })
+
+    # 7) Export format
+    preferred_formats = eval_spec.get("preferred_formats", [])
+    ok = fmt in preferred_formats
+    checks.append({
+        "name": "Export format", "ok": ok,
+        "actual": fmt,
+        "expected": "one of: " + ", ".join(preferred_formats),
+        "hint": None if ok else f"Export as one of: {', '.join(preferred_formats)}.",
+    })
+
+    # 8) Resolution — raster formats only; vector is always ok.
+    if fmt in ("png", "tiff"):
+        min_dpi = int(eval_spec.get("min_dpi", 300))
+        ok = dpi >= min_dpi
+        checks.append({
+            "name": "Resolution", "ok": ok,
+            "actual": f"{dpi} dpi",
+            "expected": f">= {min_dpi} dpi",
+            "hint": None if ok else f"Export at {min_dpi} dpi or higher.",
+        })
+    else:
+        checks.append({"name": "Resolution", "ok": True, "actual": "vector", "expected": "n/a", "hint": None})
+
+    # 9) Panels renderable
+    ok = not skipped
+    checks.append({
+        "name": "Panels renderable", "ok": ok,
+        "actual": (f"{len(skipped)} skipped" if skipped else "all panels rendered"),
+        "expected": "0 skipped",
+        "hint": None if ok else "Some panels could not be rendered; check figure access or re-render.",
+    })
+
+    return checks
+
+
+def journal_check(db: Session, canvas_id: uuid.UUID, owner_id: uuid.UUID,
+                  fmt: str = "pdf", dpi: int = 300) -> dict:
+    """DB-backed wrapper: resolve the canvas's panels/preset/style, then run
+    the pure `_evaluate_journal_checks` core (M-C1 §7)."""
+    canvas = get_canvas(db, canvas_id, owner_id)
+    renderable, skipped = _resolve_panel_sources(db, owner_id, canvas)
+
+    version_ids = [vid for (_p, vid, _blob) in renderable if vid is not None]
+    version_options: dict[uuid.UUID, dict] = {}
+    if version_ids:
+        rows = db.query(FigureVersion.id, FigureVersion.options).filter(FigureVersion.id.in_(version_ids)).all()
+        version_options = {vid: (options or {}) for vid, options in rows}
+
+    panel_infos: list[dict] = []
+    for panel, vid, _blob in renderable:
+        if vid is None:
+            continue  # image panel — no typography to check
+        options = version_options.get(vid, {})
+        pt = float(resolve_base_size(options.get("base_size"), options.get("font_scale", 1.0)))
+        panel_infos.append({
+            "panel_id": str(panel.id),
+            "label": panel.label,
+            "pt": pt,
+            "font_family": options.get("font_family") or "sans",
+        })
+
+    parsed = parse_canvas_preset(canvas.preset) if canvas.preset else None
+    journal_key, column = parsed if parsed else (None, None)
+    spec = JOURNAL_SPECS.get(journal_key) if journal_key else None
+    # A preset that is SET but does not parse (e.g. a column the journal
+    # doesn't define) must not be silently reported as "no journal preset" —
+    # it needs its own failing check so the user knows the stored key itself
+    # is the problem.
+    invalid_preset = canvas.preset if (canvas.preset and parsed is None) else None
+    fmt_l = (fmt or "pdf").lower()
+
+    checks = _evaluate_journal_checks(
+        spec, column, float(canvas.width_mm), float(canvas.height_mm),
+        _label_style(canvas), panel_infos, canvas.annotations or [], fmt_l, int(dpi), skipped,
+        invalid_preset=invalid_preset,
+    )
+    return {
+        "canvas_id": canvas.id,
+        "preset": canvas.preset,
+        "journal": spec.get("journal") if spec else None,
+        "column": column,
+        "passed": all(c["ok"] for c in checks),
+        "checks": checks,
+        "skipped_panels": skipped,
+    }
