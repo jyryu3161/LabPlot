@@ -314,7 +314,7 @@ def _gemini(model, key, system, content, schema, max_tokens, thinking_level: str
         retry_gen["maxOutputTokens"] = int(gen.get("maxOutputTokens", max_tokens)) * 2
         if _supports_thinking_level(model) and not thinking_level:
             retry_gen["thinkingConfig"] = {"thinkingLevel": "low"}
-        logger.warning("Gemini output truncated (MAX_TOKENS); retrying once with maxOutputTokens=%s",
+        logger.warning("Gemini output hit the output-length limit; retrying once with a doubled budget (%s)",
                        retry_gen["maxOutputTokens"])
         try:
             raw2 = _post(retry_gen)
